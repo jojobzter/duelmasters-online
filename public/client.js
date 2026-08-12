@@ -167,7 +167,12 @@ function refreshCardGrid() {
     const count = currentDeck.filter(x => x === id).length;
     div.innerHTML = `<img src="${c.url}" title="${c.name}">` +
       (count ? `<div class="count-badge">${count}</div>` : '') +
+      `<div class="zoom-btn" title="Preview">🔍</div>` +
       `<div class="name">${c.name}</div>`;
+    div.querySelector('.zoom-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openMagnify(id);
+    });
     div.addEventListener('click', () => {
       if (currentDeck.length >= 40) return;
       currentDeck.push(id);
@@ -255,62 +260,152 @@ refreshSavedDecks();
 refreshDeckList();
 
 // ====================== Networking / lobby ======================
-let ws = null;
-let myIndex = null;
-let roomCode = null;
+// "Seats" let one browser tab hold up to two live connections at once —
+// used for Practice Mode, where the same person plays both sides locally.
+// Normal two-browser play only ever uses seat 0.
+let seats = [
+  { ws: null, idx: null, roomCode: null, state: null },
+  { ws: null, idx: null, roomCode: null, state: null }
+];
+let activeSeat = 0;
+let isSolo = false;
+let practiceDeck = null;
 
 function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   return proto + location.host;
 }
 
-function connectAndSend(msg) {
+function openSeat(seatIndex, onOpenMsg) {
   const cWrap = document.getElementById('connect-progress-wrap');
   cWrap.style.display = 'block';
-  document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
-  ws = new WebSocket(wsUrl());
-  ws.addEventListener('open', () => ws.send(JSON.stringify(msg)));
-  ws.addEventListener('message', (ev) => { cWrap.style.display = 'none'; onServerMessage(ev); });
-  ws.addEventListener('close', () => { cWrap.style.display = 'none'; appendLog('Disconnected from server.'); });
-  ws.addEventListener('error', () => { cWrap.style.display = 'none'; document.getElementById('room-info').textContent = 'Could not connect. Try again.'; });
+  const seat = seats[seatIndex];
+  seat.ws = new WebSocket(wsUrl());
+  seat.ws.addEventListener('open', () => seat.ws.send(JSON.stringify(onOpenMsg)));
+  seat.ws.addEventListener('message', (ev) => { cWrap.style.display = 'none'; handleSeatMessage(seatIndex, JSON.parse(ev.data)); });
+  seat.ws.addEventListener('close', () => { cWrap.style.display = 'none'; appendLog('Seat ' + (seatIndex + 1) + ' disconnected.'); });
+  seat.ws.addEventListener('error', () => { cWrap.style.display = 'none'; document.getElementById('room-info').textContent = 'Could not connect. Try again.'; });
+  return seat;
+}
+
+function sendMsg(msg) {
+  const seat = seats[activeSeat];
+  if (seat && seat.ws && seat.ws.readyState === WebSocket.OPEN) seat.ws.send(JSON.stringify(msg));
+}
+function sendOnSeat(seatIndex, msg) {
+  const seat = seats[seatIndex];
+  if (seat && seat.ws && seat.ws.readyState === WebSocket.OPEN) seat.ws.send(JSON.stringify(msg));
 }
 
 document.getElementById('btn-create-room').addEventListener('click', () => {
-  connectAndSend({ type: 'create' });
+  isSolo = false;
+  document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
+  openSeat(0, { type: 'create' });
 });
 document.getElementById('btn-join-room').addEventListener('click', () => {
+  isSolo = false;
   const code = document.getElementById('join-code').value.trim().toUpperCase();
   if (!code) return;
-  connectAndSend({ type: 'join', room: code });
+  document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
+  openSeat(0, { type: 'join', room: code });
 });
 document.getElementById('btn-submit-deck').addEventListener('click', () => {
   const decks = getSavedDecks();
   const name = document.getElementById('active-deck-select').value;
   const deck = decks[name];
   if (!deck || !deck.length) { alert('Pick a saved deck first.'); return; }
-  ws.send(JSON.stringify({ type: 'submitDeck', deck }));
-  document.getElementById('ready-status').textContent = 'Deck submitted. Waiting for opponent...';
+  sendOnSeat(0, { type: 'submitDeck', deck });
+  document.getElementById('ready-status').textContent = 'Deck submitted — your hand is dealt below whenever you switch to the table.';
 });
 
-let lastPhase = null;
+document.getElementById('btn-practice').addEventListener('click', () => {
+  const decks = getSavedDecks();
+  const name = document.getElementById('active-deck-select').value || Object.keys(decks)[0];
+  const deck = decks[name];
+  if (!deck || !deck.length) { alert('Save a deck first, then pick it in the "Use deck" dropdown.'); return; }
+  practiceDeck = deck;
+  isSolo = true;
+  document.getElementById('room-info').textContent = 'Starting practice game...';
+  document.getElementById('ready-panel').style.display = 'block';
+  openSeat(0, { type: 'create' });
+});
+
+document.getElementById('btn-accept-join').addEventListener('click', () => {
+  document.getElementById('join-request-banner').style.display = 'none';
+  sendOnSeat(0, { type: 'respondJoin', accept: true });
+});
+document.getElementById('btn-decline-join').addEventListener('click', () => {
+  document.getElementById('join-request-banner').style.display = 'none';
+  sendOnSeat(0, { type: 'respondJoin', accept: false });
+});
+
 let dieScreenShown = false;
 
-function onServerMessage(ev) {
-  const msg = JSON.parse(ev.data);
+function handleSeatMessage(seatIndex, msg) {
+  const seat = seats[seatIndex];
   if (msg.type === 'error') { alert(msg.message); return; }
+
   if (msg.type === 'joined') {
-    myIndex = msg.you;
-    roomCode = msg.room;
-    document.getElementById('room-info').textContent =
-      'Room code: ' + roomCode + '  (share this with your opponent) — you are Player ' + (myIndex + 1);
-    document.getElementById('ready-panel').style.display = 'block';
-    refreshSavedDecks();
+    seat.idx = msg.you;
+    seat.roomCode = msg.room;
+    if (seatIndex === 0) {
+      document.getElementById('room-info').textContent =
+        'Room code: ' + msg.room + '  (share this with your opponent) — you are Player ' + (msg.you + 1);
+      document.getElementById('ready-panel').style.display = 'block';
+      refreshSavedDecks();
+      if (isSolo) {
+        // I'm the host — immediately deal myself in, then bring in "seat 2" (same person, other side)
+        sendOnSeat(0, { type: 'submitDeck', deck: practiceDeck });
+        openSeat(1, { type: 'join', room: msg.room });
+      }
+    } else if (isSolo) {
+      // seat 2 (my own second connection) got in — deal it too
+      sendOnSeat(1, { type: 'submitDeck', deck: practiceDeck });
+      showSeatSwitcher();
+    }
     return;
   }
+
+  if (msg.type === 'joinRequest') {
+    // Only the host (seat 0) ever receives this
+    if (isSolo) {
+      sendOnSeat(0, { type: 'respondJoin', accept: true }); // auto-accept my own second connection
+    } else {
+      document.getElementById('join-request-banner').style.display = 'flex';
+    }
+    return;
+  }
+  if (msg.type === 'joinPending') {
+    document.getElementById('room-info').textContent = 'Waiting for the host to accept your join request...';
+    return;
+  }
+  if (msg.type === 'joinDeclined') {
+    document.getElementById('room-info').textContent = 'The host declined your join request.';
+    return;
+  }
+
   if (msg.type === 'state') {
-    renderState(msg.state);
+    seat.state = msg.state;
+    if (seatIndex === activeSeat) renderState(msg.state);
     return;
   }
+}
+
+function showSeatSwitcher() {
+  if (document.getElementById('seat-switcher')) return;
+  const div = document.createElement('div');
+  div.id = 'seat-switcher';
+  div.className = 'seat-switcher';
+  div.innerHTML = 'Practice mode — viewing: ' +
+    '<button id="btn-view-seat0">Player 1</button>' +
+    '<button id="btn-view-seat1">Player 2</button>';
+  document.getElementById('sidebar').prepend(div);
+  document.getElementById('btn-view-seat0').addEventListener('click', () => switchSeat(0));
+  document.getElementById('btn-view-seat1').addEventListener('click', () => switchSeat(1));
+}
+function switchSeat(seatIndex) {
+  activeSeat = seatIndex;
+  if (seats[seatIndex].state) renderState(seats[seatIndex].state);
 }
 
 // ====================== Table rendering ======================
@@ -328,6 +423,14 @@ function appendLog(text) {
   log.scrollTop = log.scrollHeight;
 }
 
+function ensureTableVisible() {
+  if (document.getElementById('screen-table').style.display !== 'flex') {
+    document.getElementById('screen-setup').style.display = 'none';
+    document.getElementById('screen-die').style.display = 'none';
+    document.getElementById('screen-table').style.display = 'flex';
+  }
+}
+
 function renderState(state) {
   const meIdx = state.you;
   const oppIdx = meIdx === 0 ? 1 : 0;
@@ -335,23 +438,22 @@ function renderState(state) {
   const opp = state.players[oppIdx];
 
   if (state.phase === 'waiting') {
-    document.getElementById('ready-status').textContent = state.ready
-      ? 'Both decks in — starting...' : 'Waiting for both players to submit a deck...';
-    return;
+    document.getElementById('ready-status').textContent = 'Submit a deck to deal your hand — no need to wait for your opponent.';
+    return; // nothing dealt yet on my side
   }
 
-  // first time we see a non-waiting phase, show the die roll screen briefly
-  if (!dieScreenShown && state.die[0] !== null) {
+  // I've been dealt in — show the table immediately, even if opponent hasn't joined/readied yet
+  const dieRolled = state.die[0] !== null;
+  if (dieRolled && !dieScreenShown) {
     dieScreenShown = true;
     document.getElementById('screen-setup').style.display = 'none';
     document.getElementById('screen-die').style.display = 'block';
     document.getElementById('die-result').textContent =
       'You rolled ' + state.die[meIdx] + '  —  Opponent rolled ' + state.die[oppIdx] +
       '.  ' + (state.turn === meIdx ? 'You go first!' : 'Opponent goes first.');
-    setTimeout(() => {
-      document.getElementById('screen-die').style.display = 'none';
-      document.getElementById('screen-table').style.display = 'flex';
-    }, 2200);
+    setTimeout(ensureTableVisible, 2200);
+  } else {
+    ensureTableVisible();
   }
 
   // ---- hand (mine, face up, interactive, fanned) ----
@@ -421,15 +523,21 @@ function renderState(state) {
 
   // ---- sidebar ----
   const ti = document.getElementById('turn-indicator');
-  ti.textContent = state.turn === meIdx ? 'Your turn' : "Opponent's turn";
-  ti.className = 'turn-indicator' + (state.turn === meIdx ? ' my-turn' : '');
+  const dieRolled2 = state.die[0] !== null;
+  if (!dieRolled2) {
+    ti.textContent = 'Waiting for opponent to join & ready up...';
+    ti.className = 'turn-indicator';
+  } else {
+    ti.textContent = state.turn === meIdx ? 'Your turn' : "Opponent's turn";
+    ti.className = 'turn-indicator' + (state.turn === meIdx ? ' my-turn' : '');
+  }
   document.getElementById('phase-label').textContent = 'Phase: ' + state.phase;
   document.getElementById('my-gy-count').textContent = me.graveyard.length;
   document.getElementById('opp-gy-count').textContent = opp.graveyard.length;
   document.getElementById('my-deck-count').textContent = me.deckCount;
   document.getElementById('opp-deck-count').textContent = opp.deckCount;
 
-  const isMyTurn = state.turn === meIdx;
+  const isMyTurn = dieRolled2 && state.turn === meIdx;
   document.getElementById('btn-end-phase').style.display = (isMyTurn && state.phase !== 'end') ? 'inline-block' : 'none';
   document.getElementById('btn-end-turn').style.display = isMyTurn ? 'inline-block' : 'none';
 
@@ -510,8 +618,6 @@ function renderBattleZone(elId, cards, isMine) {
     el.appendChild(div);
   });
 }
-
-function sendMsg(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
 
 document.getElementById('btn-end-phase').addEventListener('click', () => sendMsg({ type: 'endPhase' }));
 document.getElementById('btn-end-turn').addEventListener('click', () => sendMsg({ type: 'endTurn' }));
