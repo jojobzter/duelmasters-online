@@ -44,23 +44,23 @@ input {
 .card-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  max-height: 420px;
+  gap: 10px;
+  max-height: 620px;
   overflow-y: auto;
   margin-top: 8px;
-  padding: 4px;
+  padding: 6px;
   background: #0f1216;
   border-radius: 6px;
 }
 .card-thumb {
-  width: 80px;
+  width: 130px;
   cursor: pointer;
   text-align: center;
   position: relative;
 }
 .card-thumb img, .card-thumb .placeholder {
-  width: 80px;
-  height: 112px;
+  width: 130px;
+  height: 182px;
   object-fit: cover;
   border-radius: 5px;
   border: 1px solid #444;
@@ -68,17 +68,27 @@ input {
 }
 .card-thumb .placeholder {
   background: #2a2f3a;
-  font-size: 0.6em;
+  font-size: 0.75em;
   padding: 4px;
   overflow: hidden;
 }
-.card-thumb .name { font-size: 0.65em; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-thumb .name { font-size: 0.75em; color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-thumb .count-badge {
-  position: absolute; top: 2px; right: 2px;
+  position: absolute; top: 4px; right: 4px;
   background: #3a5ba0; border-radius: 50%;
-  width: 18px; height: 18px; font-size: 0.7em;
+  width: 22px; height: 22px; font-size: 0.8em;
   display: flex; align-items: center; justify-content: center;
 }
+.card-thumb .zoom-btn {
+  position: absolute; bottom: 22px; right: 4px;
+  background: rgba(0,0,0,0.65);
+  border-radius: 5px;
+  width: 24px; height: 24px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.9em;
+  cursor: zoom-in;
+}
+.card-thumb .zoom-btn:hover { background: rgba(58,91,160,0.9); }
 
 .deck-list { max-height: 300px; overflow-y: auto; margin: 8px 0; }
 .deck-list-item {
@@ -91,6 +101,31 @@ input {
 .saved-deck-row { display: flex; gap: 6px; align-items: center; font-size: 0.85em; }
 
 .play-row { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; }
+
+.join-request-banner {
+  background: #2a4a2a;
+  border: 1px solid #4a7a4a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9em;
+}
+.join-request-banner button { margin: 0; }
+#btn-decline-join { background: #6a3a3a; }
+
+.seat-switcher {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: #262b35;
+  border-radius: 8px;
+  font-size: 0.85em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 .progress-wrap {
   width: 100%;
