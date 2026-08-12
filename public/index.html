@@ -1,135 +1,37 @@
-<!DOCTYPE html>
-<html lang="en">
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Duel Masters Table</title>
-<link rel="stylesheet" href="style.css" />
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2575.7">
+  <style type="text/css">
+    p.p3 {margin: 0.0px 0.0px 12.0px 0.0px; font: 12.0px Times; -webkit-text-stroke: #000000}
+    p.p4 {margin: 0.0px 0.0px 0.0px 0.0px; font: 11.0px 'Helvetica Neue'; color: #000000; color: rgba(0, 0, 0, 0.85); -webkit-text-stroke: rgba(0, 0, 0, 0.85)}
+    p.p5 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times; -webkit-text-stroke: #000000; min-height: 14.0px}
+    p.p6 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Times; -webkit-text-stroke: #000000}
+    span.s1 {font-kerning: none}
+    span.s2 {font: 13.0px Menlo; font-kerning: none}
+    span.s3 {font-kerning: none; background-color: #b3b3b3}
+  </style>
 </head>
 <body>
-
-<div id="screen-setup" class="screen">
-  <h1>Duel Masters Table</h1>
-
-  <section class="panel">
-    <h2>1. Load your card images</h2>
-    <p class="hint">
-      Select your main <code>cards</code> folder (the one containing <code>DM-1</code>, <code>DM-2</code>, etc.).
-      This only reads images from your computer — nothing is uploaded anywhere.
-    </p>
-    <button id="btn-load-folder">Choose "cards" folder</button>
-    <input id="fallback-input" type="file" webkitdirectory multiple style="display:none" />
-    <div id="load-progress-wrap" class="progress-wrap" style="display:none">
-      <div id="load-progress-bar" class="progress-bar"></div>
-    </div>
-    <span id="load-status" class="hint"></span>
-  </section>
-
-  <section class="panel" id="deckbuilder-panel">
-    <h2>2. Build a deck</h2>
-    <div class="deckbuilder">
-      <div class="card-browser">
-        <input id="card-search" placeholder="Search cards / set (e.g. DM-2)..." />
-        <div id="card-grid" class="card-grid"></div>
-      </div>
-      <div class="deck-editor">
-        <input id="deck-name" placeholder="Deck name" />
-        <div id="deck-count" class="hint">0 / 40 cards</div>
-        <div id="deck-list" class="deck-list"></div>
-        <button id="btn-save-deck">Save Deck</button>
-        <h3>Saved decks</h3>
-        <div id="saved-decks" class="saved-decks"></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>3. Play</h2>
-    <div class="play-row">
-      <div>
-        <button id="btn-create-room">Create Private Game</button>
-      </div>
-      <div>
-        <input id="join-code" placeholder="Room code" maxlength="6" style="text-transform:uppercase" />
-        <button id="btn-join-room">Join Game</button>
-      </div>
-    </div>
-    <div id="connect-progress-wrap" class="progress-wrap" style="display:none">
-      <div id="connect-progress-bar" class="progress-bar indeterminate"></div>
-    </div>
-    <div id="room-info" class="hint"></div>
-    <div id="ready-panel" style="display:none">
-      <label>Use deck: <select id="active-deck-select"></select></label>
-      <button id="btn-submit-deck">Ready</button>
-      <div id="ready-status" class="hint"></div>
-    </div>
-  </section>
-</div>
-
-<div id="screen-die" class="screen" style="display:none">
-  <div class="die-box">
-    <h1>Rolling for first turn...</h1>
-    <div id="die-result" class="die-result"></div>
-  </div>
-</div>
-
-<div id="screen-table" class="screen table-screen" style="display:none">
-  <div id="table">
-    <div class="opp-row">
-      <div class="zone-label">Opponent Hand</div>
-      <div id="opp-hand" class="zone hand-zone opp-hand"></div>
-    </div>
-    <div class="zone-label">Opponent Mana Zone</div>
-    <div id="opp-mana" class="zone mana-zone"></div>
-    <div class="zone-label">Opponent Shield Zone</div>
-    <div id="opp-shields" class="zone shield-zone"></div>
-    <div class="zone-label">Battlezone</div>
-    <div class="zone battle-zone">
-      <div id="opp-battle" class="battle-half"></div>
-      <div class="battle-divider"></div>
-      <div id="my-battle" class="battle-half"></div>
-    </div>
-    <div class="zone-label">Your Shield Zone</div>
-    <div id="my-shields" class="zone shield-zone"></div>
-    <div class="zone-label">Your Mana Zone</div>
-    <div id="my-mana" class="zone mana-zone"></div>
-    <div class="zone-label">Your Hand</div>
-    <div id="my-hand" class="zone hand-zone"></div>
-  </div>
-
-  <div id="sidebar">
-    <div id="turn-indicator" class="turn-indicator"></div>
-    <div id="graveyards">
-      <div>Your Graveyard (<span id="my-gy-count">0</span>) <button id="btn-view-my-gy">View</button></div>
-      <div>Opp Graveyard (<span id="opp-gy-count">0</span>) <button id="btn-view-opp-gy">View</button></div>
-    </div>
-    <div id="deck-counts">
-      <div>Your deck: <span id="my-deck-count">0</span></div>
-      <div>Opp deck: <span id="opp-deck-count">0</span></div>
-    </div>
-    <div id="phase-controls">
-      <div id="phase-label"></div>
-      <button id="btn-draw" style="display:none">Draw</button>
-      <button id="btn-end-phase">End Phase</button>
-      <button id="btn-end-turn">End Turn</button>
-    </div>
-    <div id="log" class="log"></div>
-  </div>
-</div>
-
-<div id="context-menu" class="context-menu" style="display:none"></div>
-<div id="gy-modal" class="gy-modal" style="display:none">
-  <div class="gy-modal-inner">
-    <h3 id="gy-modal-title">Graveyard</h3>
-    <div id="gy-modal-grid" class="card-grid"></div>
-    <button id="gy-modal-close">Close</button>
-  </div>
-</div>
-
-<div id="magnify-overlay" class="magnify-overlay" style="display:none">
-  <div id="magnify-card" class="magnify-card"></div>
-</div>
-
-<script src="client.js"></script>
+<h1 style="margin: 0.0px 0.0px 16.1px 0.0px; font: 24.0px Times; -webkit-text-stroke: #000000"><span class="s1"><b>Duel Masters Table</b></span></h1>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px Times; -webkit-text-stroke: #000000"><span class="s1"><b>1. Load your card images</b></span></h2>
+<p class="p3"><span class="s1">Select your main </span><span class="s2">cards</span><span class="s1"> folder (the one containing </span><span class="s2">DM-1</span><span class="s1">, </span><span class="s2">DM-2</span><span class="s1">, etc.). This only reads images from your computer — nothing is uploaded anywhere.</span></p>
+<p class="p4"><span class="s3">Choose "cards" folder</span></p>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px Times; -webkit-text-stroke: #000000"><span class="s1"><b>2. Build a deck</b></span></h2>
+<p class="p5"><span class="s1"></span><br></p>
+<p class="p6"><span class="s1">0 / 40 cards</span></p>
+<p class="p5"><span class="s1"></span><br></p>
+<p class="p4"><span class="s3">Save Deck</span></p>
+<h3 style="margin: 0.0px 0.0px 14.0px 0.0px; font: 14.0px Times; -webkit-text-stroke: #000000"><span class="s1"><b>Saved decks</b></span></h3>
+<p class="p5"><span class="s1"></span><br></p>
+<h2 style="margin: 0.0px 0.0px 14.9px 0.0px; font: 18.0px Times; -webkit-text-stroke: #000000"><span class="s1"><b>3. Play</b></span></h2>
+<p class="p4"><span class="s3">Create Private Game</span></p>
+<p class="p4"><span class="s3">Join Game</span></p>
+<p class="p4"><span class="s3">Practice Mode (Solo)</span></p>
+<p class="p5"><span class="s1"></span><br></p>
 </body>
 </html>
