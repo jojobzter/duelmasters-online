@@ -15,6 +15,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const rooms = new Map();
+const connMeta = new Map(); // ws -> { roomCode, idx (null until seated) }
 
 function newRoomCode() {
   let code;
@@ -46,9 +47,6 @@ function broadcastState(room) {
   }
 }
 
-// Per-player filtered view. Hand and shield *identity* are only ever sent to
-// the owner (and shields never reveal identity at all, even to the owner —
-// only a stable "key" so the owner can still target/resolve them).
 function viewFor(room, viewerIdx) {
   const s = room.state;
   const mask = (p, isSelf) => ({
@@ -65,58 +63,58 @@ function viewFor(room, viewerIdx) {
     turn: s.turn,
     phase: s.phase,
     die: s.die,
-    ready: room.decks.every(d => d),
-    started: room.started,
     players: [mask(s.players[0], viewerIdx === 0), mask(s.players[1], viewerIdx === 1)],
     you: viewerIdx
   };
 }
 
-function startGameIfReady(room) {
-  if (room.started) return;
-  if (!room.decks[0] || !room.decks[1]) return;
-  if (!room.sockets[0] || !room.sockets[1]) return;
-
-  room.started = true;
+// Deal ONE player's own zone from their own submitted deck. Independent of the
+// other player — nobody has to wait for an opponent to see their own hand.
+function dealPlayer(room, idx) {
   const s = room.state;
-  s.players = [emptyPlayerState(), emptyPlayerState()];
+  const deck = shuffle(room.decks[idx]);
+  const p = s.players[idx];
+  p.shields = deck.splice(0, 6).map(id => ({ id, key: newKey(), targeted: false }));
+  p.hand = deck.splice(0, 5);
+  p.deck = deck;
+  if (s.phase === 'waiting') s.phase = 'setup';
+}
 
-  for (let i = 0; i < 2; i++) {
-    const deck = shuffle(room.decks[i]);
-    const p = s.players[i];
-    p.shields = deck.splice(0, 6).map(id => ({ id, key: newKey(), targeted: false }));
-    p.hand = deck.splice(0, 5);
-    p.deck = deck;
-  }
-
+function maybeStartMatch(room) {
+  const s = room.state;
+  if (s.die[0] !== null) return; // already rolled
+  if (!room.decks[0] || !room.decks[1]) return; // both must have dealt
   s.die = [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
   while (s.die[0] === s.die[1]) {
     s.die = [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
   }
   s.turn = s.die[0] > s.die[1] ? 0 : 1;
   s.phase = 'charge';
-  broadcastState(room);
+}
+
+function cleanupRoom(room) {
+  if (!room.sockets[0] && !room.sockets[1] && !room.pendingJoin) rooms.delete(room.code);
 }
 
 wss.on('connection', (ws) => {
-  let roomCode = null;
-  let idx = null;
+  connMeta.set(ws, { roomCode: null, idx: null });
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    const meta = connMeta.get(ws);
 
     if (msg.type === 'create') {
-      roomCode = newRoomCode();
+      const roomCode = newRoomCode();
       const room = {
         code: roomCode,
         sockets: [ws, null],
+        pendingJoin: null,
         decks: [null, null],
-        started: false,
         state: { turn: 0, phase: 'waiting', die: [null, null], players: [emptyPlayerState(), emptyPlayerState()] }
       };
       rooms.set(roomCode, room);
-      idx = 0;
+      meta.roomCode = roomCode; meta.idx = 0;
       send(ws, { type: 'joined', room: roomCode, you: 0 });
       return;
     }
@@ -124,28 +122,48 @@ wss.on('connection', (ws) => {
     if (msg.type === 'join') {
       const room = rooms.get((msg.room || '').toUpperCase());
       if (!room) { send(ws, { type: 'error', message: 'Room not found.' }); return; }
-      if (room.sockets[0] && room.sockets[1]) { send(ws, { type: 'error', message: 'Room is full.' }); return; }
-      idx = room.sockets[0] ? 1 : 0;
-      room.sockets[idx] = ws;
-      roomCode = room.code;
-      send(ws, { type: 'joined', room: roomCode, you: idx });
-      broadcastState(room);
+      if (room.sockets[1]) { send(ws, { type: 'error', message: 'Room is full.' }); return; }
+      if (!room.sockets[0]) { send(ws, { type: 'error', message: 'Host is not connected.' }); return; }
+      if (room.pendingJoin) { send(ws, { type: 'error', message: 'Someone else is already asking to join — try again shortly.' }); return; }
+      room.pendingJoin = ws;
+      meta.roomCode = room.code; meta.idx = null;
+      send(ws, { type: 'joinPending' });
+      send(room.sockets[0], { type: 'joinRequest' });
       return;
     }
 
-    const room = rooms.get(roomCode);
-    if (!room || idx === null) return;
+    if (msg.type === 'respondJoin') {
+      const room = rooms.get(meta.roomCode);
+      if (!room || meta.idx !== 0 || !room.pendingJoin) return;
+      const reqWs = room.pendingJoin;
+      room.pendingJoin = null;
+      if (msg.accept) {
+        room.sockets[1] = reqWs;
+        connMeta.get(reqWs).idx = 1;
+        send(reqWs, { type: 'joined', room: room.code, you: 1 });
+        broadcastState(room);
+      } else {
+        send(reqWs, { type: 'joinDeclined' });
+      }
+      return;
+    }
+
+    if (!meta.roomCode || meta.idx === null) return;
+    const room = rooms.get(meta.roomCode);
+    if (!room) return;
+    const idx = meta.idx;
 
     if (msg.type === 'submitDeck') {
-      if (!Array.isArray(msg.deck)) return;
+      if (!Array.isArray(msg.deck) || !msg.deck.length) return;
       room.decks[idx] = msg.deck.slice(0, 40);
+      dealPlayer(room, idx);
+      maybeStartMatch(room);
       broadcastState(room);
-      startGameIfReady(room);
       return;
     }
 
-    if (!room.started) return;
     const s = room.state;
+    if (!room.decks[idx]) return; // must have dealt your own hand first
     const me = s.players[idx];
     const opp = s.players[idx === 0 ? 1 : 0];
 
@@ -249,12 +267,15 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (!roomCode) return;
-    const room = rooms.get(roomCode);
+    const meta = connMeta.get(ws);
+    connMeta.delete(ws);
+    if (!meta || !meta.roomCode) return;
+    const room = rooms.get(meta.roomCode);
     if (!room) return;
-    room.sockets[idx] = null;
+    if (room.pendingJoin === ws) room.pendingJoin = null;
+    if (meta.idx !== null) room.sockets[meta.idx] = null;
     broadcastState(room);
-    if (!room.sockets[0] && !room.sockets[1]) rooms.delete(roomCode);
+    cleanupRoom(room);
   });
 });
 
