@@ -191,7 +191,13 @@ wss.on('connection', (ws) => {
         const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const [c] = me.hand.splice(i, 1);
-        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x: null, y: null });
+        // spread new cards across a grid (percent of battlefield) so nothing ever spawns on top of another
+        const slot = me.battlezone.length;
+        const cols = 6;
+        const col = slot % cols, row = Math.floor(slot / cols);
+        const x = 4 + col * 15.5;
+        const y = 4 + row * 34;
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         break;
       }
       case 'discardFromHand': {
