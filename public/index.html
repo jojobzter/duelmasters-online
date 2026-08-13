@@ -14,7 +14,8 @@
   <section class="panel">
     <h2>1. Load your card images</h2>
     <p class="hint">
-      Select your main <code>cards</code> folder (the one containing <code>DM-1</code>, <code>DM-2</code>, etc.).
+      Select your main <code>cards</code> folder (the one containing <code>DM-1</code>, <code>DM-2</code>, etc.,
+      and optionally a <code>card back</code> folder with your card-back art).
       This only reads images from your computer — nothing is uploaded anywhere.
     </p>
     <button id="btn-load-folder">Choose "cards" folder</button>
@@ -46,16 +47,12 @@
   <section class="panel">
     <h2>3. Play</h2>
     <div class="play-row">
-      <div>
-        <button id="btn-create-room">Create Private Game</button>
-      </div>
+      <div><button id="btn-create-room">Create Private Game</button></div>
       <div>
         <input id="join-code" placeholder="Room code" maxlength="6" style="text-transform:uppercase" />
         <button id="btn-join-room">Join Game</button>
       </div>
-      <div>
-        <button id="btn-practice">Practice Mode (Solo)</button>
-      </div>
+      <div><button id="btn-practice">Practice Mode (Solo)</button></div>
     </div>
     <div id="connect-progress-wrap" class="progress-wrap" style="display:none">
       <div id="connect-progress-bar" class="progress-bar indeterminate"></div>
@@ -76,53 +73,87 @@
 
 <div id="screen-die" class="screen" style="display:none">
   <div class="die-box">
-    <h1>Rolling for first turn...</h1>
+    <h1>Rolling to see who goes first...</h1>
     <div id="die-result" class="die-result"></div>
+    <p class="hint">Just for fun — either of you can act at any time from here on.</p>
   </div>
 </div>
 
 <div id="screen-table" class="screen table-screen" style="display:none">
   <div id="table">
-    <div class="opp-row">
-      <div class="zone-label">Opponent Hand</div>
-      <div id="opp-hand" class="zone hand-zone opp-hand"></div>
+    <div class="zone-label">Opponent Hand</div>
+    <div id="opp-hand" class="zone hand-zone opp-hand"></div>
+
+    <div class="row-with-side">
+      <div class="row-main">
+        <div class="zone-label">Opponent Mana Zone</div>
+        <div id="opp-mana" class="zone mana-zone selectable-zone"></div>
+      </div>
+      <div class="row-side">
+        <div class="deck-gy-pair">
+          <div class="deck-gy-slot">
+            <div class="zone-label">Deck</div>
+            <div id="opp-deck" class="zone deck-zone"></div>
+          </div>
+          <div class="deck-gy-slot">
+            <div class="zone-label">Graveyard</div>
+            <div id="opp-gy" class="zone gy-zone"></div>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="zone-label">Opponent Mana Zone</div>
-    <div id="opp-mana" class="zone mana-zone"></div>
-    <div class="zone-label">Opponent Shield Zone</div>
-    <div id="opp-shields" class="zone shield-zone"></div>
-    <div class="zone-label">Battlezone</div>
+
+    <div class="zone-label center-label">Opponent Shield Zone</div>
+    <div id="opp-shields" class="zone shield-zone centered-zone selectable-zone"></div>
+
+    <div class="zone-label center-label">Battlezone</div>
     <div class="zone battle-zone">
-      <div id="opp-battle" class="battle-half"></div>
+      <div id="opp-battle" class="battle-half selectable-zone"></div>
       <div class="battle-divider"></div>
-      <div id="my-battle" class="battle-half"></div>
+      <div id="my-battle" class="battle-half selectable-zone"></div>
     </div>
-    <div class="zone-label">Your Shield Zone</div>
-    <div id="my-shields" class="zone shield-zone"></div>
-    <div class="zone-label">Your Mana Zone</div>
-    <div id="my-mana" class="zone mana-zone"></div>
+
+    <div class="zone-label center-label">Your Shield Zone</div>
+    <div id="my-shields" class="zone shield-zone centered-zone selectable-zone"></div>
+
+    <div class="row-with-side">
+      <div class="row-main">
+        <div class="zone-label">Your Mana Zone</div>
+        <div id="my-mana" class="zone mana-zone selectable-zone"></div>
+      </div>
+      <div class="row-side">
+        <div class="deck-gy-pair">
+          <div class="deck-gy-slot">
+            <div class="zone-label">Deck</div>
+            <div id="my-deck" class="zone deck-zone"></div>
+          </div>
+          <div class="deck-gy-slot">
+            <div class="zone-label">Graveyard</div>
+            <div id="my-gy" class="zone gy-zone"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="zone-label">Your Hand</div>
     <div id="my-hand" class="zone hand-zone"></div>
   </div>
 
   <div id="sidebar">
     <div id="turn-indicator" class="turn-indicator"></div>
-    <div id="graveyards">
-      <div>Your Graveyard (<span id="my-gy-count">0</span>) <button id="btn-view-my-gy">View</button></div>
-      <div>Opp Graveyard (<span id="opp-gy-count">0</span>) <button id="btn-view-opp-gy">View</button></div>
-    </div>
-    <div id="deck-counts">
-      <div>Your deck: <span id="my-deck-count">0</span></div>
-      <div>Opp deck: <span id="opp-deck-count">0</span></div>
-    </div>
-    <div id="phase-controls">
-      <div id="phase-label"></div>
-      <button id="btn-draw" style="display:none">Draw</button>
-      <button id="btn-end-phase">End Phase</button>
-      <button id="btn-end-turn">End Turn</button>
-    </div>
     <div id="log" class="log"></div>
+    <div class="sidebar-actions">
+      <button id="btn-surrender" class="danger-btn">Surrender</button>
+      <button id="btn-end-game" class="danger-btn">End Game</button>
+    </div>
   </div>
+
+  <div id="showing-hand-banner" class="showing-hand-banner" style="display:none">
+    You're showing your hand to your opponent.
+    <button id="btn-stop-showing">Stop Showing</button>
+  </div>
+
+  <div id="selection-box" class="selection-box" style="display:none"></div>
 </div>
 
 <div id="context-menu" class="context-menu" style="display:none"></div>
@@ -137,6 +168,25 @@
 <div id="magnify-overlay" class="magnify-overlay" style="display:none">
   <div id="magnify-card" class="magnify-card"></div>
 </div>
+
+<div id="end-game-request-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3>Your opponent wants to end the game.</h3>
+    <button id="btn-accept-end">Agree, End Game</button>
+    <button id="btn-decline-end">Decline</button>
+  </div>
+</div>
+
+<div id="game-over-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="game-over-title">Game Over</h3>
+    <button id="btn-rematch">Rematch</button>
+    <button id="btn-quit">Quit to Menu</button>
+    <div id="rematch-status" class="hint"></div>
+  </div>
+</div>
+
+<div id="orientation-hint" class="orientation-hint">Rotate your phone to landscape for the best experience.</div>
 
 <script src="client.js"></script>
 </body>

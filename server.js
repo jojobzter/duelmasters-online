@@ -1,6 +1,6 @@
-// Duel Masters virtual tabletop — relay/authority server
-// Serves the static client and keeps authoritative game state per room.
-// Card images never touch this server — only filenames/paths (strings) do.
+// Duel Masters virtual tabletop — relay/authority server.
+// No phases, no turn locks — both players can act on their own cards at any
+// time (per the user's request). Server only enforces ownership, not turn order.
 
 const express = require('express');
 const http = require('http');
@@ -15,7 +15,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const rooms = new Map();
-const connMeta = new Map(); // ws -> { roomCode, idx (null until seated) }
+const connMeta = new Map(); // ws -> { roomCode, idx }
 
 function newRoomCode() {
   let code;
@@ -34,7 +34,10 @@ function shuffle(arr) {
 }
 
 function emptyPlayerState() {
-  return { hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [] };
+  return {
+    hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [],
+    showingHand: false
+  };
 }
 
 function send(ws, msg) { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); }
@@ -46,50 +49,55 @@ function broadcastState(room) {
     send(ws, { type: 'state', you: i, state: viewFor(room, i) });
   }
 }
+function broadcastRaw(room, msg) {
+  for (let i = 0; i < 2; i++) send(room.sockets[i], msg);
+}
 
 function viewFor(room, viewerIdx) {
   const s = room.state;
   const mask = (p, isSelf) => ({
-    handCount: p.hand.length,
-    hand: isSelf ? p.hand : undefined,
+    hand: p.hand.map(c => ({ key: c.key, id: (isSelf || p.showingHand) ? c.id : undefined })),
+    showingHand: isSelf ? p.showingHand : undefined,
     deckCount: p.deck.length,
     mana: p.mana,
     battlezone: p.battlezone,
-    shieldCount: p.shields.length,
-    shields: p.shields.map(sh => ({ key: sh.key, targeted: sh.targeted })),
+    shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, id: sh.faceUp ? sh.id : undefined })),
     graveyard: p.graveyard
   });
   return {
-    turn: s.turn,
-    phase: s.phase,
     die: s.die,
+    dealt: [!!room.decks[0], !!room.decks[1]],
+    gameOver: s.gameOver,
+    endGameRequestBy: s.endGameRequestBy,
+    rematch: s.rematch,
     players: [mask(s.players[0], viewerIdx === 0), mask(s.players[1], viewerIdx === 1)],
     you: viewerIdx
   };
 }
 
-// Deal ONE player's own zone from their own submitted deck. Independent of the
-// other player — nobody has to wait for an opponent to see their own hand.
 function dealPlayer(room, idx) {
   const s = room.state;
   const deck = shuffle(room.decks[idx]);
   const p = s.players[idx];
-  p.shields = deck.splice(0, 6).map(id => ({ id, key: newKey(), targeted: false }));
-  p.hand = deck.splice(0, 5);
+  p.shields = deck.splice(0, 6).map(id => ({ id, key: newKey(), targeted: false, faceUp: false }));
+  p.hand = deck.splice(0, 5).map(id => ({ id, key: newKey() }));
   p.deck = deck;
-  if (s.phase === 'waiting') s.phase = 'setup';
+  p.battlezone = []; p.mana = []; p.graveyard = []; p.showingHand = false;
 }
 
-function maybeStartMatch(room) {
+function maybeRollDie(room) {
   const s = room.state;
-  if (s.die[0] !== null) return; // already rolled
-  if (!room.decks[0] || !room.decks[1]) return; // both must have dealt
+  if (s.die[0] !== null) return;
+  if (!room.decks[0] || !room.decks[1]) return;
   s.die = [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
   while (s.die[0] === s.die[1]) {
     s.die = [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
   }
-  s.turn = s.die[0] > s.die[1] ? 0 : 1;
-  s.phase = 'charge';
+}
+
+function freshMatchState() {
+  return { die: [null, null], gameOver: null, endGameRequestBy: null, rematch: [false, false],
+    players: [emptyPlayerState(), emptyPlayerState()] };
 }
 
 function cleanupRoom(room) {
@@ -106,13 +114,7 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'create') {
       const roomCode = newRoomCode();
-      const room = {
-        code: roomCode,
-        sockets: [ws, null],
-        pendingJoin: null,
-        decks: [null, null],
-        state: { turn: 0, phase: 'waiting', die: [null, null], players: [emptyPlayerState(), emptyPlayerState()] }
-      };
+      const room = { code: roomCode, sockets: [ws, null], pendingJoin: null, decks: [null, null], state: freshMatchState() };
       rooms.set(roomCode, room);
       meta.roomCode = roomCode; meta.idx = 0;
       send(ws, { type: 'joined', room: roomCode, you: 0 });
@@ -152,115 +154,149 @@ wss.on('connection', (ws) => {
     const room = rooms.get(meta.roomCode);
     if (!room) return;
     const idx = meta.idx;
+    const oppIdx = idx === 0 ? 1 : 0;
+    const s = room.state;
 
     if (msg.type === 'submitDeck') {
       if (!Array.isArray(msg.deck) || !msg.deck.length) return;
       room.decks[idx] = msg.deck.slice(0, 40);
       dealPlayer(room, idx);
-      maybeStartMatch(room);
+      maybeRollDie(room);
       broadcastState(room);
       return;
     }
 
-    const s = room.state;
+    if (msg.type === 'flash') {
+      // ephemeral visual ping — no ownership check, doesn't touch state
+      broadcastRaw(room, { type: 'flash', zone: msg.zone, ownerIdx: msg.ownerIdx, key: msg.key });
+      return;
+    }
+
     if (!room.decks[idx]) return; // must have dealt your own hand first
     const me = s.players[idx];
-    const opp = s.players[idx === 0 ? 1 : 0];
+    const opp = s.players[oppIdx];
 
     switch (msg.type) {
+      case 'drawCard': { const c = me.deck.shift(); if (c) me.hand.push({ id: c, key: newKey() }); break; }
+      case 'shuffleDeck': { me.deck = shuffle(me.deck); break; }
+
       case 'chargeMana': {
-        if (s.turn !== idx || s.phase !== 'charge') return;
-        const i = me.hand.indexOf(msg.cardId);
+        const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
-        me.hand.splice(i, 1);
-        me.mana.push({ id: msg.cardId, key: newKey(), tapped: false });
+        const [c] = me.hand.splice(i, 1);
+        me.mana.push({ id: c.id, key: c.key, tapped: false });
         break;
       }
-      case 'placeCard': {
-        if (s.turn !== idx || s.phase !== 'main') return;
-        const i = me.hand.indexOf(msg.cardId);
+      case 'summonCard': {
+        const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
-        me.hand.splice(i, 1);
-        me.battlezone.push({ id: msg.cardId, key: newKey(), tapped: false, targeted: false });
+        const [c] = me.hand.splice(i, 1);
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x: null, y: null });
         break;
       }
       case 'discardFromHand': {
-        const i = me.hand.indexOf(msg.cardId);
+        const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
-        me.hand.splice(i, 1);
-        me.graveyard.push(msg.cardId);
+        const [c] = me.hand.splice(i, 1);
+        me.graveyard.push({ id: c.id, key: c.key });
         break;
       }
-      case 'tapMana': {
-        const c = me.mana.find(c => c.key === msg.key);
-        if (c) c.tapped = !c.tapped;
+      case 'handCardToDeckShuffle': {
+        const i = me.hand.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = me.hand.splice(i, 1);
+        me.deck.push(c.id);
+        me.deck = shuffle(me.deck);
         break;
       }
-      case 'tapCard': {
+      case 'setShowingHand': { me.showingHand = !!msg.show; break; }
+
+      case 'manaTap': { const c = me.mana.find(c => c.key === msg.key); if (c) c.tapped = !c.tapped; break; }
+      case 'manaReturnToHand': {
+        const i = me.mana.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = me.mana.splice(i, 1);
+        me.hand.push({ id: c.id, key: c.key });
+        break;
+      }
+      case 'manaDestroy': {
+        const i = me.mana.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = me.mana.splice(i, 1);
+        me.graveyard.push({ id: c.id, key: c.key });
+        break;
+      }
+      case 'manaToDeckShuffle': {
+        const i = me.mana.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = me.mana.splice(i, 1);
+        me.deck.push(c.id);
+        me.deck = shuffle(me.deck);
+        break;
+      }
+
+      case 'shieldReturnToHand': {
+        const i = me.shields.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = me.shields.splice(i, 1);
+        me.hand.push({ id: c.id, key: c.key });
+        break;
+      }
+      case 'shieldToGraveyard': {
+        const i = me.shields.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = me.shields.splice(i, 1);
+        me.graveyard.push({ id: c.id, key: c.key });
+        break;
+      }
+      case 'shieldFlip': { const c = me.shields.find(c => c.key === msg.key); if (c) c.faceUp = !c.faceUp; break; }
+
+      case 'battleTap': {
         for (const owner of [me, opp]) {
           const c = owner.battlezone.find(c => c.key === msg.key);
           if (c) { c.tapped = !c.tapped; break; }
         }
         break;
       }
-      case 'targetCard': {
-        if (msg.zone === 'battlezone') {
-          const c = opp.battlezone.find(c => c.key === msg.key);
-          if (c) c.targeted = !c.targeted;
-        } else if (msg.zone === 'shield') {
-          const c = opp.shields.find(c => c.key === msg.key);
-          if (c) c.targeted = !c.targeted;
-        }
+      case 'battleMove': {
+        const c = me.battlezone.find(c => c.key === msg.key);
+        if (c) { c.x = msg.x; c.y = msg.y; }
         break;
       }
-      case 'resolveTarget': {
-        let i = me.battlezone.findIndex(c => c.key === msg.key && c.targeted);
-        if (i !== -1) {
-          const item = me.battlezone.splice(i, 1)[0];
-          if (msg.dest === 'hand') me.hand.push(item.id); else me.graveyard.push(item.id);
-          break;
-        }
-        i = me.shields.findIndex(c => c.key === msg.key && c.targeted);
-        if (i !== -1) {
-          const item = me.shields.splice(i, 1)[0];
-          if (msg.dest === 'hand') me.hand.push(item.id); else me.graveyard.push(item.id);
-          break;
-        }
-        break;
-      }
-      case 'sendManaToGraveyard': {
-        const i = me.mana.findIndex(c => c.key === msg.key);
-        if (i !== -1) { const item = me.mana.splice(i, 1)[0]; me.graveyard.push(item.id); }
-        break;
-      }
-      case 'sendBattleToGraveyard': {
+      case 'battleDestroy': {
         const i = me.battlezone.findIndex(c => c.key === msg.key);
-        if (i !== -1) { const item = me.battlezone.splice(i, 1)[0]; me.graveyard.push(item.id); }
+        if (i === -1) return;
+        const [c] = me.battlezone.splice(i, 1);
+        me.graveyard.push({ id: c.id, key: c.key });
         break;
       }
-      case 'battleToHand': {
+      case 'battleReturn': {
         const i = me.battlezone.findIndex(c => c.key === msg.key);
-        if (i !== -1) { const item = me.battlezone.splice(i, 1)[0]; me.hand.push(item.id); }
+        if (i === -1) return;
+        const [c] = me.battlezone.splice(i, 1);
+        me.hand.push({ id: c.id, key: c.key });
         break;
       }
-      case 'endPhase': {
-        if (s.turn !== idx) return;
-        if (s.phase === 'charge') s.phase = 'main';
-        else if (s.phase === 'main') s.phase = 'end';
+
+      case 'requestEndGame': { if (s.gameOver) return; s.endGameRequestBy = idx; break; }
+      case 'respondEndGame': {
+        if (s.endGameRequestBy === null || s.endGameRequestBy === idx) return;
+        if (msg.accept) s.gameOver = { reason: 'agreed' };
+        s.endGameRequestBy = null;
         break;
       }
-      case 'endTurn': {
-        if (s.turn !== idx) return;
-        s.turn = idx === 0 ? 1 : 0;
-        s.phase = 'charge';
+      case 'surrender': { s.gameOver = { reason: 'surrender', by: idx }; break; }
+      case 'rematchVote': {
+        s.rematch[idx] = true;
+        if (s.rematch[0] && s.rematch[1]) {
+          room.state = freshMatchState();
+          if (room.decks[0]) dealPlayer(room, 0);
+          if (room.decks[1]) dealPlayer(room, 1);
+          maybeRollDie(room);
+        }
         break;
       }
-      case 'drawCard': {
-        if (s.turn !== idx) return;
-        const c = me.deck.shift();
-        if (c) me.hand.push(c);
-        break;
-      }
+
       default: return;
     }
     broadcastState(room);
