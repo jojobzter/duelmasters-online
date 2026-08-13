@@ -430,7 +430,15 @@ function initSelectableZone(containerEl) {
 });
 
 // ====================== Context menu ======================
-function showContextMenu(x, y, items) {
+let menuAnchorEl = null;
+let menuAnchorRevertFn = null;
+
+function showContextMenu(x, y, items, anchorEl, revertFn) {
+  hideContextMenu(); // clean up any previously-focused card first
+  menuAnchorEl = anchorEl || null;
+  menuAnchorRevertFn = revertFn || null;
+  if (menuAnchorEl) menuAnchorEl.classList.add('menu-open');
+
   const menu = document.getElementById('context-menu');
   menu.innerHTML = '';
   items.forEach(item => {
@@ -446,7 +454,15 @@ function showContextMenu(x, y, items) {
   menu.style.top = Math.min(y, window.innerHeight - items.length * 36 - 20) + 'px';
   menu.style.display = 'block';
 }
-function hideContextMenu() { document.getElementById('context-menu').style.display = 'none'; }
+function hideContextMenu() {
+  document.getElementById('context-menu').style.display = 'none';
+  if (menuAnchorEl) {
+    menuAnchorEl.classList.remove('menu-open');
+    if (menuAnchorRevertFn) menuAnchorRevertFn();
+  }
+  menuAnchorEl = null;
+  menuAnchorRevertFn = null;
+}
 document.addEventListener('click', (e) => { if (!e.target.closest('.context-menu')) hideContextMenu(); });
 
 // ====================== Magnify ======================
@@ -561,12 +577,15 @@ function renderState(state) {
     const arcLift = -(Math.abs(mid - Math.abs(i - mid)) * 2.5);
     const restTransform = `rotate(${angle}deg) translateY(${arcLift}px)`;
     el.style.transform = restTransform;
-    el.addEventListener('mouseenter', () => { el.classList.add('hand-hover'); el.style.transform = 'rotate(0deg) translateY(-46px) scale(1.7)'; });
-    el.addEventListener('mouseleave', () => { el.classList.remove('hand-hover'); el.style.transform = restTransform; });
+    const enlargeHand = () => { el.classList.add('hand-hover'); el.style.transform = 'rotate(0deg) translateY(-46px) scale(1.7)'; };
+    const restoreHand = () => { el.classList.remove('hand-hover'); el.style.transform = restTransform; };
+    el.addEventListener('mouseenter', enlargeHand);
+    el.addEventListener('mouseleave', restoreHand);
     makeMagnifiable(el, c.id);
     attachFlashClick(el, 'hand', meIdx, c.key);
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      enlargeHand();
       const items = [
         ['Charge Mana', () => sendMsg({ type: 'chargeMana', key: c.key })],
         ['Summon', () => sendMsg({ type: 'summonCard', key: c.key })],
@@ -574,7 +593,7 @@ function renderState(state) {
         [me.showingHand ? 'Stop Showing Hand to Opponent' : 'Show Hand to Opponent', () => sendMsg({ type: 'setShowingHand', show: !me.showingHand })],
         ['Return Card to Deck & Shuffle', () => sendMsg({ type: 'handCardToDeckShuffle', key: c.key })]
       ];
-      showContextMenu(e.pageX, e.pageY, items);
+      showContextMenu(e.pageX, e.pageY, items, el, restoreHand);
     });
     myHand.appendChild(el);
   });
@@ -630,7 +649,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
             ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaReturnToHand', key: k })); clearSelection(); }],
             ['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaDestroy', key: k })); clearSelection(); }],
             ['Put Selected Back in Deck & Shuffle', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaToDeckShuffle', key: k })); clearSelection(); }]
-          ]);
+          ], div);
         } else {
           clearSelection();
           showContextMenu(e.pageX, e.pageY, [
@@ -638,7 +657,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
             ['Return to Hand', () => sendMsg({ type: 'manaReturnToHand', key: c.key })],
             ['Destroy', () => sendMsg({ type: 'manaDestroy', key: c.key })],
             ['Put Back in Deck & Shuffle', () => sendMsg({ type: 'manaToDeckShuffle', key: c.key })]
-          ]);
+          ], div);
         }
       });
     }
@@ -665,13 +684,13 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
             ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'shieldReturnToHand', key: k })); clearSelection(); }],
             ['Put Selected in Graveyard', () => { selectedKeys.forEach(k => sendMsg({ type: 'shieldToGraveyard', key: k })); clearSelection(); }],
             ['Flip Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'shieldFlip', key: k })); clearSelection(); }]
-          ]);
+          ], div);
         } else {
           clearSelection();
           const items = [['Return to Hand', () => sendMsg({ type: 'shieldReturnToHand', key: s.key })],
                           ['Put in Graveyard', () => sendMsg({ type: 'shieldToGraveyard', key: s.key })],
                           [faceUp ? 'Unflip' : 'Flip Card', () => sendMsg({ type: 'shieldFlip', key: s.key })]];
-          showContextMenu(e.pageX, e.pageY, items);
+          showContextMenu(e.pageX, e.pageY, items, div);
         }
       });
     }
@@ -682,12 +701,6 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
 function renderBattleHalf(elId, cards, isMine, ownerIdx) {
   const container = document.getElementById(elId);
   container.innerHTML = '';
-  const rect = container.getBoundingClientRect();
-  const cw = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--card-w')) || 100;
-  const ch = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--card-h')) || 140;
-  const gap = 10;
-  const cols = Math.max(1, Math.floor((rect.width || 600) / (cw + gap)));
-  let autoIndex = 0;
 
   cards.forEach(c => {
     const div = document.createElement('div');
@@ -696,16 +709,10 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
     div.innerHTML = cardImgHtml(c.id);
     makeMagnifiable(div, c.id);
 
-    let leftPx, topPx;
-    if (c.x !== null && c.x !== undefined) {
-      leftPx = (c.x / 100) * (rect.width || 600);
-      topPx = (c.y / 100) * (rect.height || 200);
-    } else {
-      const col = autoIndex % cols, row = Math.floor(autoIndex / cols);
-      leftPx = col * (cw + gap) + gap; topPx = row * (ch + gap) + gap;
-      autoIndex++;
-    }
-    div.style.left = leftPx + 'px'; div.style.top = topPx + 'px';
+    const xPct0 = (c.x != null) ? c.x : 4;
+    const yPct0 = (c.y != null) ? c.y : 4;
+    div.style.left = xPct0 + '%';
+    div.style.top = yPct0 + '%';
 
     div.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -715,7 +722,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
           batch.push(['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleDestroy', key: k })); clearSelection(); }]);
           batch.push(['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleReturn', key: k })); clearSelection(); }]);
         }
-        showContextMenu(e.pageX, e.pageY, batch);
+        showContextMenu(e.pageX, e.pageY, batch, div);
       } else {
         clearSelection();
         const items = [[c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]];
@@ -723,7 +730,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
           items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
           items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
         }
-        showContextMenu(e.pageX, e.pageY, items);
+        showContextMenu(e.pageX, e.pageY, items, div);
       }
     });
 
@@ -731,25 +738,29 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
       div.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMsg({ type: 'flash', zone: 'battlezone', ownerIdx, key: c.key }); return; }
+        e.preventDefault();
         e.stopPropagation();
+        const cr = container.getBoundingClientRect();
         const startX = e.clientX, startY = e.clientY;
-        const origLeft = parseFloat(div.style.left), origTop = parseFloat(div.style.top);
+        const origXPct = xPct0, origYPct = yPct0;
         let moved = false;
+        let finalXPct = origXPct, finalYPct = origYPct;
         function onMove(ev) {
           const dx = ev.clientX - startX, dy = ev.clientY - startY;
           if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
-          if (moved) { div.classList.add('dragging'); div.style.left = (origLeft + dx) + 'px'; div.style.top = (origTop + dy) + 'px'; }
+          if (moved) {
+            div.classList.add('dragging');
+            finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
+            finalYPct = Math.max(0, Math.min(80, origYPct + (dy / cr.height) * 100));
+            div.style.left = finalXPct + '%';
+            div.style.top = finalYPct + '%';
+          }
         }
         function onUp() {
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
           div.classList.remove('dragging');
-          if (moved) {
-            const cr = container.getBoundingClientRect();
-            const xPct = Math.max(0, Math.min(100, (parseFloat(div.style.left) / cr.width) * 100));
-            const yPct = Math.max(0, Math.min(100, (parseFloat(div.style.top) / cr.height) * 100));
-            sendMsg({ type: 'battleMove', key: c.key, x: xPct, y: yPct });
-          }
+          if (moved) sendMsg({ type: 'battleMove', key: c.key, x: finalXPct, y: finalYPct });
         }
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
