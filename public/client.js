@@ -580,7 +580,7 @@ function renderState(state) {
     const enlargeHand = () => { el.classList.add('hand-hover'); el.style.transform = 'rotate(0deg) translateY(-46px) scale(1.7)'; };
     const restoreHand = () => { el.classList.remove('hand-hover'); el.style.transform = restTransform; };
     el.addEventListener('mouseenter', enlargeHand);
-    el.addEventListener('mouseleave', restoreHand);
+    el.addEventListener('mouseleave', () => { if (menuAnchorEl === el) return; restoreHand(); });
     makeMagnifiable(el, c.id);
     attachFlashClick(el, 'hand', meIdx, c.key);
     el.addEventListener('contextmenu', (e) => {
@@ -593,7 +593,7 @@ function renderState(state) {
         [me.showingHand ? 'Stop Showing Hand to Opponent' : 'Show Hand to Opponent', () => sendMsg({ type: 'setShowingHand', show: !me.showingHand })],
         ['Return Card to Deck & Shuffle', () => sendMsg({ type: 'handCardToDeckShuffle', key: c.key })]
       ];
-      showContextMenu(e.pageX, e.pageY, items, el, restoreHand);
+      showContextMenu(e.clientX, e.clientY, items, el, restoreHand);
     });
     myHand.appendChild(el);
   });
@@ -644,7 +644,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
       div.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
-          showContextMenu(e.pageX, e.pageY, [
+          showContextMenu(e.clientX, e.clientY, [
             ['Tap / Untap Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaTap', key: k })); clearSelection(); }],
             ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaReturnToHand', key: k })); clearSelection(); }],
             ['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaDestroy', key: k })); clearSelection(); }],
@@ -652,7 +652,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
           ], div);
         } else {
           clearSelection();
-          showContextMenu(e.pageX, e.pageY, [
+          showContextMenu(e.clientX, e.clientY, [
             [c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'manaTap', key: c.key })],
             ['Return to Hand', () => sendMsg({ type: 'manaReturnToHand', key: c.key })],
             ['Destroy', () => sendMsg({ type: 'manaDestroy', key: c.key })],
@@ -680,7 +680,7 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
       div.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(s.key)) {
-          showContextMenu(e.pageX, e.pageY, [
+          showContextMenu(e.clientX, e.clientY, [
             ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'shieldReturnToHand', key: k })); clearSelection(); }],
             ['Put Selected in Graveyard', () => { selectedKeys.forEach(k => sendMsg({ type: 'shieldToGraveyard', key: k })); clearSelection(); }],
             ['Flip Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'shieldFlip', key: k })); clearSelection(); }]
@@ -690,7 +690,7 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
           const items = [['Return to Hand', () => sendMsg({ type: 'shieldReturnToHand', key: s.key })],
                           ['Put in Graveyard', () => sendMsg({ type: 'shieldToGraveyard', key: s.key })],
                           [faceUp ? 'Unflip' : 'Flip Card', () => sendMsg({ type: 'shieldFlip', key: s.key })]];
-          showContextMenu(e.pageX, e.pageY, items, div);
+          showContextMenu(e.clientX, e.clientY, items, div);
         }
       });
     }
@@ -722,7 +722,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
           batch.push(['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleDestroy', key: k })); clearSelection(); }]);
           batch.push(['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleReturn', key: k })); clearSelection(); }]);
         }
-        showContextMenu(e.pageX, e.pageY, batch, div);
+        showContextMenu(e.clientX, e.clientY, batch, div);
       } else {
         clearSelection();
         const items = [[c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]];
@@ -730,7 +730,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
           items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
           items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
         }
-        showContextMenu(e.pageX, e.pageY, items, div);
+        showContextMenu(e.clientX, e.clientY, items, div);
       }
     });
 
@@ -786,7 +786,7 @@ function renderDeckZone(elId, count, isMine) {
   el.oncontextmenu = (e) => {
     e.preventDefault();
     if (!isMine) return;
-    showContextMenu(e.pageX, e.pageY, [
+    showContextMenu(e.clientX, e.clientY, [
       ['Draw a Card', () => sendMsg({ type: 'drawCard' })],
       ['Shuffle Deck', () => sendMsg({ type: 'shuffleDeck' })]
     ]);
