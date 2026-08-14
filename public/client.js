@@ -223,7 +223,18 @@ function refreshSavedDecks() {
     const delBtn = document.createElement('button');
     delBtn.textContent = 'Delete';
     delBtn.addEventListener('click', () => { delete decks[name]; setSavedDecks(decks); refreshSavedDecks(); });
-    row.appendChild(loadBtn); row.appendChild(delBtn);
+    const shareBtn = document.createElement('button');
+    shareBtn.textContent = 'Share';
+    shareBtn.addEventListener('click', () => {
+      const code = encodeDeckCode(name, decks[name]);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(() => alert('Share code for "' + name + '" copied to clipboard!'))
+          .catch(() => prompt('Copy this share code:', code));
+      } else {
+        prompt('Copy this share code:', code);
+      }
+    });
+    row.appendChild(loadBtn); row.appendChild(shareBtn); row.appendChild(delBtn);
     wrap.appendChild(row);
     const opt = document.createElement('option');
     opt.value = name; opt.textContent = name + ' (' + decks[name].length + ')';
@@ -240,6 +251,47 @@ document.getElementById('btn-save-deck').addEventListener('click', () => {
   decks[name] = currentDeck.slice();
   setSavedDecks(decks);
   refreshSavedDecks();
+});
+
+// ---- share codes: a portable text blob a friend can paste to get your exact decklist ----
+function encodeDeckCode(name, cards) {
+  return btoa(unescape(encodeURIComponent(JSON.stringify({ n: name, c: cards }))));
+}
+function decodeDeckCode(code) {
+  const obj = JSON.parse(decodeURIComponent(escape(atob(code.trim()))));
+  if (!obj || !Array.isArray(obj.c) || !obj.c.length) throw new Error('bad code');
+  return { name: (obj.n || 'Imported Deck').toString().slice(0, 60), cards: obj.c };
+}
+document.getElementById('btn-share-deck').addEventListener('click', () => {
+  if (!currentDeck.length) { alert('Build a deck first.'); return; }
+  const name = (document.getElementById('deck-name').value || '').trim() || 'My Deck';
+  const code = encodeDeckCode(name, currentDeck);
+  const box = document.getElementById('share-code-box');
+  box.value = code;
+  box.style.display = 'block';
+  box.select();
+  const status = document.getElementById('share-code-status');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(code)
+      .then(() => { status.textContent = 'Copied to clipboard — paste it to a friend.'; })
+      .catch(() => { status.textContent = 'Select the code below and copy it manually.'; });
+  } else {
+    status.textContent = 'Select the code below and copy it manually.';
+  }
+});
+document.getElementById('btn-import-deck').addEventListener('click', () => {
+  const raw = document.getElementById('import-code').value;
+  if (!raw.trim()) return;
+  try {
+    const { name, cards } = decodeDeckCode(raw);
+    currentDeck = cards.slice(0, 40);
+    document.getElementById('deck-name').value = name;
+    refreshDeckList(); refreshCardGrid();
+    document.getElementById('import-code').value = '';
+    alert('Loaded "' + name + '" (' + currentDeck.length + ' cards) into the editor below. Click "Save Deck" to keep it — cards you don\'t have images for will just show as placeholders until you do.');
+  } catch (e) {
+    alert("That doesn't look like a valid share code.");
+  }
 });
 
 refreshSavedDecks();
@@ -276,17 +328,22 @@ function sendOnSeat(seatIndex, msg) {
   if (seat && seat.ws && seat.ws.readyState === WebSocket.OPEN) seat.ws.send(JSON.stringify(msg));
 }
 
+const nameInput = document.getElementById('player-name');
+nameInput.value = localStorage.getItem('dm_playername') || '';
+nameInput.addEventListener('change', () => localStorage.setItem('dm_playername', nameInput.value.trim().slice(0, 24)));
+function myName() { return nameInput.value.trim().slice(0, 24); }
+
 document.getElementById('btn-create-room').addEventListener('click', () => {
   isSolo = false;
   document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
-  openSeat(0, { type: 'create' });
+  openSeat(0, { type: 'create', name: myName() });
 });
 document.getElementById('btn-join-room').addEventListener('click', () => {
   isSolo = false;
   const code = document.getElementById('join-code').value.trim().toUpperCase();
   if (!code) return;
   document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
-  openSeat(0, { type: 'join', room: code });
+  openSeat(0, { type: 'join', room: code, name: myName() });
 });
 document.getElementById('btn-submit-deck').addEventListener('click', () => {
   const decks = getSavedDecks();
@@ -304,7 +361,7 @@ document.getElementById('btn-practice').addEventListener('click', () => {
   practiceDeck = deck; isSolo = true;
   document.getElementById('room-info').textContent = 'Starting practice game...';
   document.getElementById('ready-panel').style.display = 'block';
-  openSeat(0, { type: 'create' });
+  openSeat(0, { type: 'create', name: myName() });
 });
 document.getElementById('btn-accept-join').addEventListener('click', () => {
   document.getElementById('join-request-banner').style.display = 'none';
@@ -315,9 +372,6 @@ document.getElementById('btn-decline-join').addEventListener('click', () => {
   sendOnSeat(0, { type: 'respondJoin', accept: false });
 });
 
-let dieScreenShown = false;
-let prevGameOver = null;
-
 function handleSeatMessage(seatIndex, msg) {
   const seat = seats[seatIndex];
   if (msg.type === 'error') { alert(msg.message); return; }
@@ -325,8 +379,9 @@ function handleSeatMessage(seatIndex, msg) {
   if (msg.type === 'joined') {
     seat.idx = msg.you; seat.roomCode = msg.room;
     if (seatIndex === 0) {
+      const youLabel = myName() ? (myName() + ' (Player ' + (msg.you + 1) + ')') : ('Player ' + (msg.you + 1));
       document.getElementById('room-info').textContent =
-        'Room code: ' + msg.room + '  (share this with your opponent) — you are Player ' + (msg.you + 1);
+        'Room code: ' + msg.room + '  (share this with your opponent) — you are ' + youLabel;
       document.getElementById('ready-panel').style.display = 'block';
       refreshSavedDecks();
       if (isSolo) { sendOnSeat(0, { type: 'submitDeck', deck: practiceDeck }); openSeat(1, { type: 'join', room: msg.room }); }
@@ -335,7 +390,10 @@ function handleSeatMessage(seatIndex, msg) {
   }
   if (msg.type === 'joinRequest') {
     if (isSolo) sendOnSeat(0, { type: 'respondJoin', accept: true });
-    else document.getElementById('join-request-banner').style.display = 'flex';
+    else {
+      document.getElementById('join-request-text').textContent = (msg.name || 'Someone') + ' wants to join your game.';
+      document.getElementById('join-request-banner').style.display = 'flex';
+    }
     return;
   }
   if (msg.type === 'joinPending') { document.getElementById('room-info').textContent = 'Waiting for the host to accept your join request...'; return; }
@@ -343,6 +401,10 @@ function handleSeatMessage(seatIndex, msg) {
   if (msg.type === 'flash') {
     const el = document.querySelector(`[data-key="${msg.key}"]`);
     if (el) { el.classList.remove('flash-red'); void el.offsetWidth; el.classList.add('flash-red'); }
+    return;
+  }
+  if (msg.type === 'log') {
+    if (seatIndex === activeSeat) appendLog(msg.text);
     return;
   }
   if (msg.type === 'state') {
@@ -373,7 +435,6 @@ function appendLog(text) {
 function ensureTableVisible() {
   if (document.getElementById('screen-table').style.display !== 'flex') {
     document.getElementById('screen-setup').style.display = 'none';
-    document.getElementById('screen-die').style.display = 'none';
     document.getElementById('screen-table').style.display = 'flex';
   }
 }
@@ -483,7 +544,15 @@ function attachFlashClick(el, zone, ownerIdx, key) {
 }
 
 // ====================== Graveyard modal ======================
-function openGyModal(title, cards, ownerIdx) {
+function graveyardMenuItems(key) {
+  return [
+    ['Return to Hand', () => sendMsg({ type: 'gyReturnToHand', key })],
+    ['Return to Deck & Shuffle', () => sendMsg({ type: 'gyReturnToDeckShuffle', key })],
+    ['Return to Battlefield', () => sendMsg({ type: 'gyReturnToBattlefield', key })]
+  ];
+}
+
+function openGyModal(title, cards, ownerIdx, isMine) {
   document.getElementById('gy-modal-title').textContent = title;
   const grid = document.getElementById('gy-modal-grid');
   grid.innerHTML = '';
@@ -494,6 +563,12 @@ function openGyModal(title, cards, ownerIdx) {
     div.innerHTML = cardImgHtml(item.id);
     makeMagnifiable(div, item.id);
     attachFlashClick(div, 'graveyard', ownerIdx, item.key);
+    if (isMine) {
+      div.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showContextMenu(e.clientX, e.clientY, graveyardMenuItems(item.key), div);
+      });
+    }
     grid.appendChild(div);
   });
   document.getElementById('gy-modal').style.display = 'flex';
@@ -510,6 +585,7 @@ document.getElementById('btn-end-game').addEventListener('click', () => {
 });
 document.getElementById('btn-accept-end').addEventListener('click', () => sendMsg({ type: 'respondEndGame', accept: true }));
 document.getElementById('btn-decline-end').addEventListener('click', () => sendMsg({ type: 'respondEndGame', accept: false }));
+document.getElementById('btn-accept-surrender').addEventListener('click', () => sendMsg({ type: 'acceptSurrender' }));
 document.getElementById('btn-rematch').addEventListener('click', () => {
   sendMsg({ type: 'rematchVote' });
   document.getElementById('rematch-status').textContent = 'Waiting for opponent to accept rematch...';
@@ -528,26 +604,13 @@ function renderState(state) {
     document.getElementById('ready-status').textContent = 'Submit a deck to deal your hand — no need to wait for your opponent.';
     return;
   }
+  ensureTableVisible();
 
-  // rematch reset detection (must run before the die-roll screen check below)
-  if (prevGameOver && !state.gameOver) { dieScreenShown = false; }
-  prevGameOver = state.gameOver;
-
-  const dieRolled = state.die[0] !== null;
-  if (dieRolled && !dieScreenShown) {
-    dieScreenShown = true;
-    document.getElementById('screen-setup').style.display = 'none';
-    document.getElementById('screen-die').style.display = 'block';
-    document.getElementById('die-result').textContent =
-      'You rolled ' + state.die[meIdx] + '  —  Opponent rolled ' + state.die[oppIdx] + '.';
-    setTimeout(ensureTableVisible, 1800);
-  } else {
-    ensureTableVisible();
-  }
-
-  // ---- end game / game over modals ----
+  // ---- end game / surrender / game over modals ----
   document.getElementById('end-game-request-modal').style.display =
     (state.endGameRequestBy !== null && state.endGameRequestBy !== meIdx) ? 'flex' : 'none';
+  document.getElementById('surrender-accept-modal').style.display =
+    (state.surrenderBy !== null && state.surrenderBy !== meIdx) ? 'flex' : 'none';
   if (state.gameOver) {
     const g = state.gameOver;
     document.getElementById('game-over-title').textContent =
@@ -623,8 +686,9 @@ function renderState(state) {
   renderGyZone('opp-gy', opp.graveyard, false, oppIdx);
 
   const ti = document.getElementById('turn-indicator');
-  ti.textContent = dieRolled ? 'Free play — act anytime, either player' : 'Waiting for opponent to join & deal in...';
-  ti.className = 'turn-indicator' + (dieRolled ? ' my-turn' : '');
+  const oppLabel = (state.names && state.names[oppIdx]) ? state.names[oppIdx] : 'your opponent';
+  ti.textContent = state.dealt[oppIdx] ? ('Free play with ' + oppLabel + ' — act anytime') : 'Waiting for opponent to join & deal in...';
+  ti.className = 'turn-indicator' + (state.dealt[oppIdx] ? ' my-turn' : '');
 
   applySelectionClasses();
   window.__lastMe = me; window.__lastOpp = opp;
@@ -802,11 +866,18 @@ function renderGyZone(elId, cards, isMine, ownerIdx) {
     card.className = 'card';
     card.dataset.key = top.key;
     card.innerHTML = cardImgHtml(top.id);
+    if (isMine) {
+      card.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showContextMenu(e.clientX, e.clientY, graveyardMenuItems(top.key), card);
+      });
+    }
     el.appendChild(card);
     const badge = document.createElement('div');
     badge.className = 'stack-count';
     badge.textContent = cards.length;
     el.appendChild(badge);
   }
-  el.onclick = () => openGyModal(isMine ? 'Your Graveyard' : 'Opponent Graveyard', cards, ownerIdx);
+  el.onclick = () => openGyModal(isMine ? 'Your Graveyard' : 'Opponent Graveyard', cards, ownerIdx, isMine);
 }

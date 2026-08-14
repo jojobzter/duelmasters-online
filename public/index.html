@@ -38,6 +38,13 @@
         <div id="deck-count" class="hint">0 / 40 cards</div>
         <div id="deck-list" class="deck-list"></div>
         <button id="btn-save-deck">Save Deck</button>
+        <button id="btn-share-deck">Get Share Code</button>
+        <textarea id="share-code-box" class="hint share-code-box" readonly style="display:none"></textarea>
+        <div id="share-code-status" class="hint"></div>
+        <div class="import-row">
+          <input id="import-code" placeholder="Paste a friend's share code..." />
+          <button id="btn-import-deck">Import</button>
+        </div>
         <h3>Saved decks</h3>
         <div id="saved-decks" class="saved-decks"></div>
       </div>
@@ -46,6 +53,7 @@
 
   <section class="panel">
     <h2>3. Play</h2>
+    <input id="player-name" placeholder="Your name (shown to your opponent)" maxlength="24" />
     <div class="play-row">
       <div><button id="btn-create-room">Create Private Game</button></div>
       <div>
@@ -59,7 +67,7 @@
     </div>
     <div id="room-info" class="hint"></div>
     <div id="join-request-banner" class="join-request-banner" style="display:none">
-      <span>Someone wants to join your game.</span>
+      <span id="join-request-text">Someone wants to join your game.</span>
       <button id="btn-accept-join">Accept</button>
       <button id="btn-decline-join">Decline</button>
     </div>
@@ -71,13 +79,6 @@
   </section>
 </div>
 
-<div id="screen-die" class="screen" style="display:none">
-  <div class="die-box">
-    <h1>Rolling to see who goes first...</h1>
-    <div id="die-result" class="die-result"></div>
-    <p class="hint">Just for fun — either of you can act at any time from here on.</p>
-  </div>
-</div>
 
 <div id="screen-table" class="screen table-screen" style="display:none">
   <div id="table">
@@ -174,6 +175,13 @@
     <h3>Your opponent wants to end the game.</h3>
     <button id="btn-accept-end">Agree, End Game</button>
     <button id="btn-decline-end">Decline</button>
+  </div>
+</div>
+
+<div id="surrender-accept-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3>Your opponent has surrendered.</h3>
+    <button id="btn-accept-surrender">Accept & Win</button>
   </div>
 </div>
 
