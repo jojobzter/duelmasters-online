@@ -7,9 +7,47 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const crypto = require('crypto');
+const XLSX = require('xlsx');
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ---- Card database (name -> {name, cost, type, civs[]}), loaded from the
+// spreadsheet at carddata/Duel_Masters_Card_Database.xlsx. Re-upload that
+// file to update it — every deploy re-parses it automatically. Cards missing
+// from it, or missing a cost/type, are simply never gated (fail-open by design).
+const CARD_DATA_PATH = path.join(__dirname, 'carddata', 'Duel_Masters_Card_Database.xlsx');
+let CARD_DB = new Map();
+
+function loadCardDatabase() {
+  try {
+    const wb = XLSX.readFile(CARD_DATA_PATH);
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet);
+    const db = new Map();
+    for (const row of rows) {
+      const name = (row['Name'] || '').toString().trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (db.has(key)) continue; // first occurrence wins if the sheet has conflicting duplicate rows
+      const costRaw = row['Mana Cost'];
+      const costNum = Number(costRaw);
+      const cost = (costRaw === undefined || costRaw === null || costRaw === '' || !Number.isFinite(costNum)) ? null : costNum;
+      const type = (row['Type'] || '').toString().trim() || null;
+      const civRaw = (row['Civilization'] || '').toString().trim();
+      const civs = civRaw ? civRaw.split('/').map(s => s.trim()).filter(Boolean) : [];
+      db.set(key, { name, cost, type, civs });
+    }
+    CARD_DB = db;
+    console.log('Card database loaded:', CARD_DB.size, 'unique card names.');
+  } catch (e) {
+    console.warn('Card database not loaded (' + CARD_DATA_PATH + '):', e.message);
+    CARD_DB = new Map();
+  }
+}
+loadCardDatabase();
+
+app.get('/api/carddata', (req, res) => { res.json([...CARD_DB.values()]); });
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -118,6 +156,7 @@ function viewFor(room, viewerIdx) {
     endGameRequestBy: s.endGameRequestBy,
     surrenderBy: s.surrenderBy,
     rematch: s.rematch,
+    soundMap: s.soundMap,
     players: [mask(s.players[0], viewerIdx === 0), mask(s.players[1], viewerIdx === 1)],
     you: viewerIdx
   };
@@ -128,6 +167,33 @@ function battlefieldSlot(me) {
   const cols = 6;
   const col = slot % cols, row = Math.floor(slot / cols);
   return { x: 4 + col * 15.5, y: 4 + row * 34 };
+}
+
+function cardMeta(id) { return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
+
+// Figures out which untapped mana cards would pay for a card, respecting both
+// the total cost and needing at least one untapped mana of each required
+// civilization. Returns a Set of mana keys to tap, or null if it can't be paid.
+// Pure/read-only — callers tap the returned keys themselves.
+function planManaPayment(me, meta) {
+  const untapped = me.mana.filter(m => !m.tapped);
+  if (untapped.length < meta.cost) return null;
+  const reserved = new Set();
+  for (const civ of (meta.civs || [])) {
+    const found = untapped.find(m => {
+      if (reserved.has(m.key)) return false;
+      const mMeta = cardMeta(m.id);
+      return mMeta && mMeta.civs.includes(civ);
+    });
+    if (!found) return null;
+    reserved.add(found.key);
+  }
+  for (const m of untapped) {
+    if (reserved.size >= meta.cost) break;
+    reserved.add(m.key);
+  }
+  if (reserved.size < meta.cost) return null;
+  return reserved;
 }
 
 function dealPlayer(room, idx) {
@@ -141,8 +207,11 @@ function dealPlayer(room, idx) {
 }
 
 function freshMatchState() {
-  return { gameOver: null, endGameRequestBy: null, surrenderBy: null, rematch: [false, false],
-    players: [emptyPlayerState(), emptyPlayerState()] };
+  return {
+    gameOver: null, endGameRequestBy: null, surrenderBy: null, rematch: [false, false],
+    soundMap: Math.random() < 0.5 ? [0, 1] : [1, 0], // which chat-tone index (0 or 1) each player idx uses
+    players: [emptyPlayerState(), emptyPlayerState()]
+  };
 }
 
 function cleanupRoom(room) {
@@ -221,7 +290,7 @@ wss.on('connection', (ws) => {
     if (msg.type === 'chatMessage') {
       const text = (msg.text || '').toString().trim().slice(0, 500);
       if (!text) return;
-      broadcastRaw(room, { type: 'chat', from: playerLabel(room, idx), text });
+      broadcastRaw(room, { type: 'chat', from: playerLabel(room, idx), fromIdx: idx, text });
       return;
     }
 
@@ -238,6 +307,7 @@ wss.on('connection', (ws) => {
     const opp = s.players[oppIdx];
     let logText = null; // set by a case below to emit a log line after the switch
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
+    let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
 
     switch (msg.type) {
       case 'drawCard': {
@@ -258,6 +328,17 @@ wss.on('connection', (ws) => {
       case 'summonCard': {
         const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
+        const cardId = me.hand[i].id;
+        const meta = cardMeta(cardId);
+        if (meta && meta.cost != null) {
+          const plan = planManaPayment(me, meta);
+          if (!plan) {
+            const civText = meta.civs.length ? (' (needs ' + meta.civs.join('/') + ' civilization mana)') : '';
+            send(ws, { type: 'summonRejected', reason: 'Not enough mana to summon ' + cardLabel(cardId) + ' — costs ' + meta.cost + civText + '.' });
+            return;
+          }
+          plan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
+        }
         const [c] = me.hand.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
@@ -274,6 +355,7 @@ wss.on('connection', (ws) => {
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
+        sfxToPlay = 'shieldTrigger';
         if (cardLabel(c.id).toLowerCase() === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
         if (cardLabel(c.id).toLowerCase() === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
         break;
@@ -508,6 +590,7 @@ wss.on('connection', (ws) => {
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
+    if (sfxToPlay) broadcastRaw(room, { type: 'sfx', name: sfxToPlay });
   });
 
   ws.on('close', () => {
