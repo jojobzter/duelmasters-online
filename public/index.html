@@ -46,6 +46,7 @@
           <button id="btn-import-deck">Import</button>
         </div>
         <h3>Saved decks</h3>
+        <p class="hint">Click a deck's name to preview its cards. "Select" chooses which deck you'll play with below.</p>
         <div id="saved-decks" class="saved-decks"></div>
       </div>
     </div>
@@ -54,6 +55,7 @@
   <section class="panel">
     <h2>3. Play</h2>
     <input id="player-name" placeholder="Your name (shown to your opponent)" maxlength="24" />
+    <div id="selected-deck-display" class="selected-deck-display">No deck selected yet — pick one above and click "Select".</div>
     <div class="play-row">
       <div><button id="btn-create-room">Create Private Game</button></div>
       <div>
@@ -71,13 +73,17 @@
       <button id="btn-accept-join">Accept</button>
       <button id="btn-decline-join">Decline</button>
     </div>
-    <div id="ready-panel" style="display:none">
-      <label>Use deck: <select id="active-deck-select"></select></label>
-      <button id="btn-submit-deck">Ready</button>
-      <div id="ready-status" class="hint"></div>
-    </div>
   </section>
 </div>
+
+<div id="deck-view-modal" class="gy-modal" style="display:none">
+  <div class="gy-modal-inner">
+    <h3 id="deck-view-title">Deck</h3>
+    <div id="deck-view-grid" class="card-grid"></div>
+    <button id="deck-view-close">Close</button>
+  </div>
+</div>
+
 
 
 <div id="screen-table" class="screen table-screen" style="display:none">
@@ -142,7 +148,21 @@
 
   <div id="sidebar">
     <div id="turn-indicator" class="turn-indicator"></div>
+
+    <div class="sidebar-section-label">Chat</div>
+    <div id="chat-messages" class="chat-messages"></div>
+    <div class="chat-input-row">
+      <div class="emoji-wrap">
+        <button id="btn-emoji-picker" type="button" title="Insert emoji">😊</button>
+        <div id="emoji-picker" class="emoji-picker" style="display:none"></div>
+      </div>
+      <input id="chat-input" placeholder="Message your opponent..." maxlength="500" />
+      <button id="btn-chat-send">Send</button>
+    </div>
+
+    <div class="sidebar-section-label">Move Log</div>
     <div id="log" class="log"></div>
+
     <div class="sidebar-actions">
       <button id="btn-surrender" class="danger-btn">Surrender</button>
       <button id="btn-end-game" class="danger-btn">End Game</button>
@@ -154,6 +174,11 @@
     <button id="btn-stop-showing">Stop Showing</button>
   </div>
 
+  <div id="corile-banner" class="showing-hand-banner" style="display:none">
+    <span id="corile-banner-text"></span>
+    <button id="btn-skip-corile">Skip</button>
+  </div>
+
   <div id="selection-box" class="selection-box" style="display:none"></div>
 </div>
 
@@ -163,6 +188,14 @@
     <h3 id="gy-modal-title">Graveyard</h3>
     <div id="gy-modal-grid" class="card-grid"></div>
     <button id="gy-modal-close">Close</button>
+  </div>
+</div>
+
+<div id="search-modal" class="gy-modal" style="display:none">
+  <div class="gy-modal-inner">
+    <h3>Search Your Deck — right-click a card to take it</h3>
+    <div id="search-modal-grid" class="card-grid"></div>
+    <button id="search-modal-close">Close & Shuffle</button>
   </div>
 </div>
 
@@ -182,6 +215,16 @@
   <div class="modal-box">
     <h3>Your opponent has surrendered.</h3>
     <button id="btn-accept-surrender">Accept & Win</button>
+  </div>
+</div>
+
+<div id="shield-trigger-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3>Shield Trigger!</h3>
+    <div id="shield-trigger-preview" class="shield-trigger-preview"></div>
+    <p class="hint">Cast it for free right now, or just keep it in hand?</p>
+    <button id="btn-shield-trigger-yes">Cast for Free</button>
+    <button id="btn-shield-trigger-no">Keep in Hand</button>
   </div>
 </div>
 

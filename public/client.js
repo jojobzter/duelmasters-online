@@ -2,6 +2,8 @@
 let cardDB = new Map();      // id ("DM-1/Name.png") -> {url, name, set}
 let cardBackUrl = null;      // from a "card back" folder, if present
 const IMG_EXT = /\.(png|jpg|jpeg|webp|gif)$/i;
+function stripExt(id) { return typeof id === 'string' ? id.replace(IMG_EXT, '') : id; }
+function cardBaseName(id) { return id ? (id.split('/').pop() || id) : ''; }
 const CARD_BACK_FOLDER = /^card ?back$/i;
 
 function idbGet(key) {
@@ -64,8 +66,9 @@ async function scanDirHandle(dirHandle) {
     const url = URL.createObjectURL(file);
     if (CARD_BACK_FOLDER.test(setName)) { cardBackUrl = url; }
     else {
-      const id = setName + '/' + fileName;
-      cardDB.set(id, { url, name: fileName.replace(IMG_EXT, ''), set: setName });
+      const baseName = fileName.replace(IMG_EXT, '');
+      const id = setName + '/' + baseName; // extension-agnostic: renaming .png->.jpg etc. never breaks matching
+      cardDB.set(id, { url, name: baseName, set: setName });
     }
     if (i % 10 === 0 || i === total - 1) {
       progressUpdate(i + 1, total);
@@ -92,8 +95,9 @@ async function scanFileList(files) {
     const url = URL.createObjectURL(file);
     if (CARD_BACK_FOLDER.test(setName)) { cardBackUrl = url; }
     else {
-      const id = setName + '/' + fileName;
-      cardDB.set(id, { url, name: fileName.replace(IMG_EXT, ''), set: setName });
+      const baseName = fileName.replace(IMG_EXT, '');
+      const id = setName + '/' + baseName;
+      cardDB.set(id, { url, name: baseName, set: setName });
     }
     if (i % 10 === 0 || i === total - 1) {
       progressUpdate(i + 1, total);
@@ -200,19 +204,78 @@ function refreshDeckList() {
   document.getElementById('deck-count').textContent = currentDeck.length + ' / 40 cards';
 }
 
-function getSavedDecks() { try { return JSON.parse(localStorage.getItem('dm_decks') || '{}'); } catch { return {}; } }
+function getSavedDecks() {
+  try {
+    const decks = JSON.parse(localStorage.getItem('dm_decks') || '{}');
+    // migrate any legacy card ids that still include a file extension (e.g. from before a format change)
+    for (const name of Object.keys(decks)) decks[name] = decks[name].map(stripExt);
+    return decks;
+  } catch { return {}; }
+}
 function setSavedDecks(d) { localStorage.setItem('dm_decks', JSON.stringify(d)); }
+
+let selectedDeckName = localStorage.getItem('dm_selected_deck') || null;
+
+function updateSelectedDeckDisplay() {
+  const el = document.getElementById('selected-deck-display');
+  const decks = getSavedDecks();
+  if (selectedDeckName && decks[selectedDeckName]) {
+    el.textContent = 'Selected deck: ' + selectedDeckName + ' (' + decks[selectedDeckName].length + ' cards)';
+    el.classList.add('has-deck');
+  } else {
+    selectedDeckName = null;
+    localStorage.removeItem('dm_selected_deck');
+    el.textContent = 'No deck selected yet — pick one above and click "Select".';
+    el.classList.remove('has-deck');
+  }
+}
+
+function selectDeck(name) {
+  selectedDeckName = name;
+  localStorage.setItem('dm_selected_deck', name);
+  updateSelectedDeckDisplay();
+}
+
+function openDeckViewModal(name, cards) {
+  document.getElementById('deck-view-title').textContent = name + ' (' + cards.length + ' cards)';
+  const grid = document.getElementById('deck-view-grid');
+  grid.innerHTML = '';
+  const counts = new Map();
+  cards.forEach(id => counts.set(id, (counts.get(id) || 0) + 1));
+  [...counts.entries()].sort().forEach(([id, n]) => {
+    const div = document.createElement('div');
+    div.className = 'card-thumb';
+    const c = cardDB.get(id);
+    div.innerHTML = cardImgHtml(id) + (n > 1 ? `<div class="count-badge">${n}</div>` : '') +
+      `<div class="name">${c ? c.name : id}</div>`;
+    makeMagnifiable(div, id);
+    grid.appendChild(div);
+  });
+  document.getElementById('deck-view-modal').style.display = 'flex';
+}
+document.getElementById('deck-view-close').addEventListener('click', () => { document.getElementById('deck-view-modal').style.display = 'none'; });
 
 function refreshSavedDecks() {
   const wrap = document.getElementById('saved-decks');
-  const sel = document.getElementById('active-deck-select');
-  const prevVal = sel.value;
-  wrap.innerHTML = ''; sel.innerHTML = '';
+  wrap.innerHTML = '';
   const decks = getSavedDecks();
   for (const name of Object.keys(decks).sort()) {
     const row = document.createElement('div');
     row.className = 'saved-deck-row';
-    row.innerHTML = `<b>${name}</b> <span class="hint">(${decks[name].length} cards)</span>`;
+    const nameLink = document.createElement('b');
+    nameLink.className = 'deck-name-link';
+    nameLink.textContent = name;
+    nameLink.title = 'Click to preview the cards in this deck';
+    nameLink.addEventListener('click', () => openDeckViewModal(name, decks[name]));
+    row.appendChild(nameLink);
+    const countSpan = document.createElement('span');
+    countSpan.className = 'hint';
+    countSpan.textContent = ' (' + decks[name].length + ' cards) ';
+    row.appendChild(countSpan);
+
+    const selectBtn = document.createElement('button');
+    selectBtn.textContent = (selectedDeckName === name) ? 'Selected \u2713' : 'Select';
+    selectBtn.addEventListener('click', () => { selectDeck(name); refreshSavedDecks(); });
     const loadBtn = document.createElement('button');
     loadBtn.textContent = 'Edit';
     loadBtn.addEventListener('click', () => {
@@ -220,9 +283,6 @@ function refreshSavedDecks() {
       document.getElementById('deck-name').value = name;
       refreshDeckList(); refreshCardGrid();
     });
-    const delBtn = document.createElement('button');
-    delBtn.textContent = 'Delete';
-    delBtn.addEventListener('click', () => { delete decks[name]; setSavedDecks(decks); refreshSavedDecks(); });
     const shareBtn = document.createElement('button');
     shareBtn.textContent = 'Share';
     shareBtn.addEventListener('click', () => {
@@ -234,13 +294,17 @@ function refreshSavedDecks() {
         prompt('Copy this share code:', code);
       }
     });
-    row.appendChild(loadBtn); row.appendChild(shareBtn); row.appendChild(delBtn);
+    const delBtn = document.createElement('button');
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => {
+      delete decks[name]; setSavedDecks(decks);
+      if (selectedDeckName === name) { selectedDeckName = null; localStorage.removeItem('dm_selected_deck'); }
+      refreshSavedDecks(); updateSelectedDeckDisplay();
+    });
+    row.appendChild(selectBtn); row.appendChild(loadBtn); row.appendChild(shareBtn); row.appendChild(delBtn);
     wrap.appendChild(row);
-    const opt = document.createElement('option');
-    opt.value = name; opt.textContent = name + ' (' + decks[name].length + ')';
-    sel.appendChild(opt);
   }
-  if ([...sel.options].some(o => o.value === prevVal)) sel.value = prevVal;
+  updateSelectedDeckDisplay();
 }
 
 document.getElementById('btn-save-deck').addEventListener('click', () => {
@@ -250,6 +314,13 @@ document.getElementById('btn-save-deck').addEventListener('click', () => {
   const decks = getSavedDecks();
   decks[name] = currentDeck.slice();
   setSavedDecks(decks);
+  // clear the working list so the editor is ready for the next deck
+  currentDeck = [];
+  document.getElementById('deck-name').value = '';
+  document.getElementById('share-code-box').style.display = 'none';
+  document.getElementById('share-code-status').textContent = '';
+  refreshDeckList();
+  refreshCardGrid();
   refreshSavedDecks();
 });
 
@@ -260,7 +331,7 @@ function encodeDeckCode(name, cards) {
 function decodeDeckCode(code) {
   const obj = JSON.parse(decodeURIComponent(escape(atob(code.trim()))));
   if (!obj || !Array.isArray(obj.c) || !obj.c.length) throw new Error('bad code');
-  return { name: (obj.n || 'Imported Deck').toString().slice(0, 60), cards: obj.c };
+  return { name: (obj.n || 'Imported Deck').toString().slice(0, 60), cards: obj.c.map(stripExt) };
 }
 document.getElementById('btn-share-deck').addEventListener('click', () => {
   if (!currentDeck.length) { alert('Build a deck first.'); return; }
@@ -334,33 +405,26 @@ nameInput.addEventListener('change', () => localStorage.setItem('dm_playername',
 function myName() { return nameInput.value.trim().slice(0, 24); }
 
 document.getElementById('btn-create-room').addEventListener('click', () => {
+  const decks = getSavedDecks();
+  if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
   isSolo = false;
   document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
   openSeat(0, { type: 'create', name: myName() });
 });
 document.getElementById('btn-join-room').addEventListener('click', () => {
+  const decks = getSavedDecks();
+  if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
   isSolo = false;
   const code = document.getElementById('join-code').value.trim().toUpperCase();
   if (!code) return;
   document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
   openSeat(0, { type: 'join', room: code, name: myName() });
 });
-document.getElementById('btn-submit-deck').addEventListener('click', () => {
-  const decks = getSavedDecks();
-  const name = document.getElementById('active-deck-select').value;
-  const deck = decks[name];
-  if (!deck || !deck.length) { alert('Pick a saved deck first.'); return; }
-  sendOnSeat(0, { type: 'submitDeck', deck });
-  document.getElementById('ready-status').textContent = 'Deck submitted — your hand is dealt now, no need to wait for your opponent.';
-});
 document.getElementById('btn-practice').addEventListener('click', () => {
   const decks = getSavedDecks();
-  const name = document.getElementById('active-deck-select').value || Object.keys(decks)[0];
-  const deck = decks[name];
-  if (!deck || !deck.length) { alert('Save a deck first, then pick it in the "Use deck" dropdown.'); return; }
-  practiceDeck = deck; isSolo = true;
+  if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
+  practiceDeck = decks[selectedDeckName]; isSolo = true;
   document.getElementById('room-info').textContent = 'Starting practice game...';
-  document.getElementById('ready-panel').style.display = 'block';
   openSeat(0, { type: 'create', name: myName() });
 });
 document.getElementById('btn-accept-join').addEventListener('click', () => {
@@ -381,10 +445,12 @@ function handleSeatMessage(seatIndex, msg) {
     if (seatIndex === 0) {
       const youLabel = myName() ? (myName() + ' (Player ' + (msg.you + 1) + ')') : ('Player ' + (msg.you + 1));
       document.getElementById('room-info').textContent =
-        'Room code: ' + msg.room + '  (share this with your opponent) — you are ' + youLabel;
-      document.getElementById('ready-panel').style.display = 'block';
-      refreshSavedDecks();
-      if (isSolo) { sendOnSeat(0, { type: 'submitDeck', deck: practiceDeck }); openSeat(1, { type: 'join', room: msg.room }); }
+        'Room code: ' + msg.room + '  (share this with your opponent) — you are ' + youLabel +
+        ' — using deck "' + (isSolo ? (selectedDeckName || 'Practice') : selectedDeckName) + '"';
+      const decks = getSavedDecks();
+      const deckToUse = isSolo ? practiceDeck : decks[selectedDeckName];
+      if (deckToUse) sendOnSeat(0, { type: 'submitDeck', deck: deckToUse });
+      if (isSolo) { openSeat(1, { type: 'join', room: msg.room }); }
     } else if (isSolo) { sendOnSeat(1, { type: 'submitDeck', deck: practiceDeck }); showSeatSwitcher(); }
     return;
   }
@@ -405,6 +471,18 @@ function handleSeatMessage(seatIndex, msg) {
   }
   if (msg.type === 'log') {
     if (seatIndex === activeSeat) appendLog(msg.text);
+    return;
+  }
+  if (msg.type === 'chat') {
+    if (seatIndex === activeSeat) appendChatMessage(msg.from, msg.text);
+    return;
+  }
+  if (msg.type === 'searchDeckOffer') {
+    if (seatIndex === activeSeat) openSearchModal(msg.cards);
+    return;
+  }
+  if (msg.type === 'shieldTriggerOffer') {
+    if (seatIndex === activeSeat) openShieldTriggerModal(msg.key, msg.id);
     return;
   }
   if (msg.type === 'state') {
@@ -432,6 +510,51 @@ function appendLog(text) {
   log.appendChild(line);
   log.scrollTop = log.scrollHeight;
 }
+
+// ====================== Chat ======================
+function appendChatMessage(from, text) {
+  const box = document.getElementById('chat-messages');
+  const line = document.createElement('div');
+  line.className = 'chat-line';
+  const fromSpan = document.createElement('span');
+  fromSpan.className = 'chat-from';
+  fromSpan.textContent = from + ': ';
+  line.appendChild(fromSpan);
+  line.appendChild(document.createTextNode(text));
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+function sendChat() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  sendMsg({ type: 'chatMessage', text });
+  input.value = '';
+}
+document.getElementById('btn-chat-send').addEventListener('click', sendChat);
+document.getElementById('chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendChat(); });
+
+const EMOJI_LIST = ['😀','😂','😅','😉','😊','😍','😎','🤔','😮','😢','😡','👍','👎','👏','🙏','💪','🔥','⭐','🎉','🎲','⚔️','🛡️','💀','🐉','⚡','💧','🌿','☀️','🌑','🃏'];
+const emojiPicker = document.getElementById('emoji-picker');
+EMOJI_LIST.forEach(em => {
+  const span = document.createElement('span');
+  span.textContent = em;
+  span.addEventListener('click', () => {
+    const input = document.getElementById('chat-input');
+    input.value += em;
+    input.focus();
+    emojiPicker.style.display = 'none';
+  });
+  emojiPicker.appendChild(span);
+});
+document.getElementById('btn-emoji-picker').addEventListener('click', (e) => {
+  e.stopPropagation();
+  emojiPicker.style.display = emojiPicker.style.display === 'grid' ? 'none' : 'grid';
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.emoji-wrap')) emojiPicker.style.display = 'none';
+});
+
 function ensureTableVisible() {
   if (document.getElementById('screen-table').style.display !== 'flex') {
     document.getElementById('screen-setup').style.display = 'none';
@@ -575,6 +698,32 @@ function openGyModal(title, cards, ownerIdx, isMine) {
 }
 document.getElementById('gy-modal-close').addEventListener('click', () => { document.getElementById('gy-modal').style.display = 'none'; });
 
+function openSearchModal(cards) {
+  const grid = document.getElementById('search-modal-grid');
+  grid.innerHTML = '';
+  cards.forEach((id, index) => {
+    const div = document.createElement('div');
+    div.className = 'card-thumb';
+    div.innerHTML = cardImgHtml(id);
+    makeMagnifiable(div, id);
+    div.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showContextMenu(e.clientX, e.clientY, [
+        ['Return to Hand', () => {
+          sendMsg({ type: 'searchDeckPick', index });
+          document.getElementById('search-modal').style.display = 'none';
+        }]
+      ], div);
+    });
+    grid.appendChild(div);
+  });
+  document.getElementById('search-modal').style.display = 'flex';
+}
+document.getElementById('search-modal-close').addEventListener('click', () => {
+  document.getElementById('search-modal').style.display = 'none';
+  sendMsg({ type: 'searchDeckCancel' });
+});
+
 // ====================== End game / surrender ======================
 document.getElementById('btn-surrender').addEventListener('click', () => {
   if (confirm('Surrender this game?')) sendMsg({ type: 'surrender' });
@@ -592,6 +741,31 @@ document.getElementById('btn-rematch').addEventListener('click', () => {
 });
 document.getElementById('btn-quit').addEventListener('click', () => location.reload());
 document.getElementById('btn-stop-showing').addEventListener('click', () => sendMsg({ type: 'setShowingHand', show: false }));
+document.getElementById('btn-skip-corile').addEventListener('click', () => sendMsg({ type: 'corileSkip' }));
+
+// ====================== Shield Trigger prompt ======================
+let shieldTriggerQueue = [];
+let shieldTriggerPendingKey = null;
+function openShieldTriggerModal(key, id) {
+  shieldTriggerQueue.push({ key, id });
+  if (!shieldTriggerPendingKey) processNextShieldTrigger();
+}
+function processNextShieldTrigger() {
+  if (!shieldTriggerQueue.length) { shieldTriggerPendingKey = null; return; }
+  const next = shieldTriggerQueue.shift();
+  shieldTriggerPendingKey = next.key;
+  document.getElementById('shield-trigger-preview').innerHTML = cardImgHtml(next.id);
+  document.getElementById('shield-trigger-modal').style.display = 'flex';
+}
+document.getElementById('btn-shield-trigger-yes').addEventListener('click', () => {
+  if (shieldTriggerPendingKey) sendMsg({ type: 'castFreeFromHand', key: shieldTriggerPendingKey });
+  document.getElementById('shield-trigger-modal').style.display = 'none';
+  processNextShieldTrigger();
+});
+document.getElementById('btn-shield-trigger-no').addEventListener('click', () => {
+  document.getElementById('shield-trigger-modal').style.display = 'none';
+  processNextShieldTrigger();
+});
 
 // ====================== Table rendering ======================
 function renderState(state) {
@@ -601,7 +775,7 @@ function renderState(state) {
   const opp = state.players[oppIdx];
 
   if (!state.dealt[meIdx]) {
-    document.getElementById('ready-status').textContent = 'Submit a deck to deal your hand — no need to wait for your opponent.';
+    document.getElementById('room-info').textContent = 'Submitting your deck and dealing your hand...';
     return;
   }
   ensureTableVisible();
@@ -678,12 +852,24 @@ function renderState(state) {
   renderManaZone('opp-mana', opp.mana, false, oppIdx);
   renderShieldZone('my-shields', me.shields, true, meIdx);
   renderShieldZone('opp-shields', opp.shields, false, oppIdx);
-  renderBattleHalf('my-battle', me.battlezone, true, meIdx);
-  renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx);
-  renderDeckZone('my-deck', me.deckCount, true);
-  renderDeckZone('opp-deck', opp.deckCount, false);
+  const pendingCorileUses = me.pendingCorileUses || 0;
+  renderBattleHalf('my-battle', me.battlezone, true, meIdx, pendingCorileUses);
+  renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx, pendingCorileUses);
+  const canSearch = me.battlezone.some(c => cardBaseName(c.id).toLowerCase() === 'crystal memory');
+  renderDeckZone('my-deck', me.deckCount, true, canSearch, me.pendingSkyswordMana || 0, me.pendingSkyswordShield || 0);
+  renderDeckZone('opp-deck', opp.deckCount, false, false, 0, 0);
   renderGyZone('my-gy', me.graveyard, true, meIdx);
   renderGyZone('opp-gy', opp.graveyard, false, oppIdx);
+
+  // ---- Corile banner ----
+  const corileBanner = document.getElementById('corile-banner');
+  if (pendingCorileUses > 0) {
+    document.getElementById('corile-banner-text').textContent =
+      'Corile triggered (' + pendingCorileUses + ') — right-click an opponent\'s creature to put it on top of their deck.';
+    corileBanner.style.display = 'flex';
+  } else {
+    corileBanner.style.display = 'none';
+  }
 
   const ti = document.getElementById('turn-indicator');
   const oppLabel = (state.names && state.names[oppIdx]) ? state.names[oppIdx] : 'your opponent';
@@ -762,7 +948,7 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
   });
 }
 
-function renderBattleHalf(elId, cards, isMine, ownerIdx) {
+function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
   const container = document.getElementById(elId);
   container.innerHTML = '';
 
@@ -787,15 +973,18 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
           batch.push(['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleReturn', key: k })); clearSelection(); }]);
         }
         showContextMenu(e.clientX, e.clientY, batch, div);
-      } else {
-        clearSelection();
-        const items = [[c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]];
-        if (isMine) {
-          items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
-          items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
-        }
-        showContextMenu(e.clientX, e.clientY, items, div);
+        return;
       }
+      clearSelection();
+      // tap/untap is allowed on any creature — some cards let you tap an opponent's creature
+      const items = [[c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]];
+      if (isMine) {
+        items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
+        items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
+      } else if (pendingCorileUses > 0) {
+        items.push(["Put on Top of Opponent's Deck (Corile)", () => sendMsg({ type: 'corilePutOnDeck', key: c.key })]);
+      }
+      showContextMenu(e.clientX, e.clientY, items, div);
     });
 
     if (isMine) {
@@ -836,7 +1025,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx) {
   });
 }
 
-function renderDeckZone(elId, count, isMine) {
+function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pendingSkyswordShield) {
   const el = document.getElementById(elId);
   el.innerHTML = '';
   const card = document.createElement('div');
@@ -850,10 +1039,14 @@ function renderDeckZone(elId, count, isMine) {
   el.oncontextmenu = (e) => {
     e.preventDefault();
     if (!isMine) return;
-    showContextMenu(e.clientX, e.clientY, [
+    const items = [
       ['Draw a Card', () => sendMsg({ type: 'drawCard' })],
       ['Shuffle Deck', () => sendMsg({ type: 'shuffleDeck' })]
-    ]);
+    ];
+    if (canSearch) items.push(['Search Deck', () => sendMsg({ type: 'requestSearchDeck' })]);
+    if (pendingSkyswordMana > 0) items.push(['Put in Mana Zone (Skysword)', () => sendMsg({ type: 'skyswordToMana' })]);
+    else if (pendingSkyswordShield > 0) items.push(['Put in Shield Zone (Skysword)', () => sendMsg({ type: 'skyswordToShield' })]);
+    showContextMenu(e.clientX, e.clientY, items, card);
   };
 }
 
