@@ -31,6 +31,31 @@ function cardLabel(id) {
   return file.replace(/\.[^.]+$/, '');
 }
 
+// Names of cards whose "search your deck" ability the app is allowed to facilitate.
+// Add more here if other search-granting cards come up.
+const SEARCH_DECK_ENABLERS = ['crystal memory'];
+function hasNamedCard(player, nameLower) {
+  return player.battlezone.some(c => cardLabel(c.id).toLowerCase() === nameLower);
+}
+function canSearchDeck(player) {
+  return SEARCH_DECK_ENABLERS.some(n => hasNamedCard(player, n));
+}
+const SKYSWORD_NAME = 'skysword, the savage vizier';
+
+// Cards with Shield Trigger — when returned to hand FROM the shield zone specifically
+// (not destroyed, not from mana), the player may cast them immediately for free.
+const SHIELD_TRIGGER_CARDS = new Set([
+  'holy awe', 'solar ray', 'apocalypse day', 'logic cube', 'logic sphere', 'super spark',
+  'miele, vizier of lightning', 'kolon, the oracle', 'phal eega, dawn guardian',
+  'syforce, aurora elemental', 'spiral gate', 'teleportation', 'brain serum', 'crystal memory',
+  'liquid scope', 'aqua surfer', 'hunter fish', 'aqua jolter', 'terror pit', 'ghost touch',
+  'dark reversal', 'critical blade', 'zombie carnival', 'bone assassin, the ambusher',
+  'locomotiver', 'burst shot', 'tornado flame', "phantom dragon's flame", 'rikabu, the dismantler',
+  'natural snare', 'dimension gate', 'mana crisis', 'mystic inscription', 'torcon', 'dome shell',
+  'mighty shouter'
+]);
+function hasShieldTrigger(id) { return SHIELD_TRIGGER_CARDS.has(cardLabel(id).toLowerCase()); }
+
 function shuffle(arr) {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -43,7 +68,7 @@ function shuffle(arr) {
 function emptyPlayerState() {
   return {
     hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [],
-    showingHand: false
+    showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0
   };
 }
 
@@ -81,7 +106,10 @@ function viewFor(room, viewerIdx) {
     mana: p.mana,
     battlezone: p.battlezone,
     shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, id: sh.faceUp ? sh.id : undefined })),
-    graveyard: p.graveyard
+    graveyard: p.graveyard,
+    pendingCorileUses: isSelf ? (p.pendingCorileUses || 0) : undefined,
+    pendingSkyswordMana: isSelf ? (p.pendingSkyswordMana || 0) : undefined,
+    pendingSkyswordShield: isSelf ? (p.pendingSkyswordShield || 0) : undefined
   });
   return {
     dealt: [!!room.decks[0], !!room.decks[1]],
@@ -190,10 +218,26 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.type === 'chatMessage') {
+      const text = (msg.text || '').toString().trim().slice(0, 500);
+      if (!text) return;
+      broadcastRaw(room, { type: 'chat', from: playerLabel(room, idx), text });
+      return;
+    }
+
+    if (msg.type === 'requestSearchDeck') {
+      if (!room.decks[idx]) return;
+      const me0 = s.players[idx];
+      if (!canSearchDeck(me0)) return;
+      send(ws, { type: 'searchDeckOffer', cards: me0.deck.slice() });
+      return;
+    }
+
     if (!room.decks[idx]) return; // must have dealt your own hand first
     const me = s.players[idx];
     const opp = s.players[oppIdx];
     let logText = null; // set by a case below to emit a log line after the switch
+    let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
 
     switch (msg.type) {
       case 'drawCard': {
@@ -218,6 +262,20 @@ wss.on('connection', (ws) => {
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'summoned ' + cardLabel(c.id) + '.';
+        if (cardLabel(c.id).toLowerCase() === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
+        if (cardLabel(c.id).toLowerCase() === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
+        break;
+      }
+      case 'castFreeFromHand': {
+        const i = me.hand.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        if (!hasShieldTrigger(me.hand[i].id)) return; // only valid for actual Shield Trigger cards
+        const [c] = me.hand.splice(i, 1);
+        const { x, y } = battlefieldSlot(me);
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
+        logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
+        if (cardLabel(c.id).toLowerCase() === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
+        if (cardLabel(c.id).toLowerCase() === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
         break;
       }
       case 'discardFromHand': {
@@ -280,6 +338,7 @@ wss.on('connection', (ws) => {
         const [c] = me.shields.splice(i, 1);
         me.hand.push({ id: c.id, key: c.key });
         logText = c.faceUp ? ('returned shield ' + cardLabel(c.id) + ' to hand.') : 'returned a shield to hand.';
+        if (hasShieldTrigger(c.id)) { shieldTriggerOfferKey = c.key; shieldTriggerOfferId = c.id; }
         break;
       }
       case 'shieldToGraveyard': {
@@ -297,6 +356,7 @@ wss.on('connection', (ws) => {
       }
 
       case 'battleTap': {
+        // deliberately not owner-restricted: some cards let you tap an opponent's creature
         for (const owner of [me, opp]) {
           const c = owner.battlezone.find(c => c.key === msg.key);
           if (c) { c.tapped = !c.tapped; logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.'; break; }
@@ -352,6 +412,60 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'searchDeckPick': {
+        if (!canSearchDeck(me)) return;
+        const i = msg.index;
+        if (typeof i !== 'number' || i < 0 || i >= me.deck.length) return;
+        const [cardId] = me.deck.splice(i, 1);
+        me.hand.push({ id: cardId, key: newKey() });
+        me.deck = shuffle(me.deck);
+        logText = 'searched their deck and shuffled.'; // card taken is intentionally not named, per privacy
+        break;
+      }
+      case 'searchDeckCancel': {
+        if (!canSearchDeck(me)) return;
+        me.deck = shuffle(me.deck);
+        logText = 'searched their deck and shuffled.';
+        break;
+      }
+      case 'corilePutOnDeck': {
+        if (!me.pendingCorileUses) return;
+        const i = opp.battlezone.findIndex(c => c.key === msg.key);
+        if (i === -1) return;
+        const [c] = opp.battlezone.splice(i, 1);
+        opp.deck.unshift(c.id);
+        me.pendingCorileUses -= 1;
+        logText = "used Corile to put " + cardLabel(c.id) + " on top of their opponent's deck.";
+        break;
+      }
+      case 'corileSkip': {
+        if (!me.pendingCorileUses) return;
+        me.pendingCorileUses -= 1;
+        logText = 'chose not to use a pending Corile ability.';
+        break;
+      }
+      case 'skyswordToMana': {
+        if (!me.pendingSkyswordMana) return;
+        const cardId = me.deck.shift();
+        me.pendingSkyswordMana -= 1;
+        me.pendingSkyswordShield = (me.pendingSkyswordShield || 0) + 1;
+        if (cardId) {
+          me.mana.push({ id: cardId, key: newKey(), tapped: false });
+          logText = 'used Skysword, the Savage Vizier to put ' + cardLabel(cardId) + ' from their deck into their mana zone.';
+        } else {
+          logText = "used Skysword, the Savage Vizier, but their deck was empty.";
+        }
+        break;
+      }
+      case 'skyswordToShield': {
+        if (!me.pendingSkyswordShield) return;
+        const cardId = me.deck.shift();
+        me.pendingSkyswordShield -= 1;
+        if (cardId) me.shields.push({ id: cardId, key: newKey(), faceUp: false });
+        logText = 'used Skysword, the Savage Vizier to put the next card of their deck face down into their shield zone.';
+        break;
+      }
+
       case 'requestEndGame': {
         if (s.gameOver) return;
         s.endGameRequestBy = idx;
@@ -393,6 +507,7 @@ wss.on('connection', (ws) => {
     }
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
+    if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
   });
 
   ws.on('close', () => {
