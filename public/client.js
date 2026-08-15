@@ -155,6 +155,76 @@ function cardImgHtml(id) {
 // ====================== Deck builder ======================
 let currentDeck = [];
 
+// ---- Card metadata (civilization/type/cost), loaded from the server's parsed spreadsheet ----
+let cardMetaDB = new Map(); // lowercase card name -> {name, cost, type, civs}
+let activeCivFilters = new Set();
+let activeTypeFilters = new Set();
+const CIV_COLORS = { Fire: '#c0392b', Water: '#2980b9', Nature: '#27ae60', Light: '#c99a1e', Darkness: '#6a3f9e' };
+
+async function loadCardMetaDB() {
+  try {
+    const res = await fetch('/api/carddata');
+    const arr = await res.json();
+    cardMetaDB = new Map();
+    const civSet = new Set(), typeSet = new Set();
+    arr.forEach(c => {
+      cardMetaDB.set(c.name.toLowerCase(), c);
+      (c.civs || []).forEach(v => civSet.add(v));
+      if (c.type) typeSet.add(c.type);
+    });
+    buildFilterUI([...civSet].sort(), [...typeSet].sort());
+  } catch (e) {
+    console.warn('Could not load card database:', e);
+  }
+}
+loadCardMetaDB();
+
+function buildFilterUI(civs, types) {
+  const civWrap = document.getElementById('civ-filters');
+  const typeWrap = document.getElementById('type-filters');
+  if (!civWrap || !typeWrap) return;
+  civWrap.innerHTML = '';
+  civs.forEach(civ => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'filter-chip';
+    btn.textContent = civ;
+    btn.style.setProperty('--chip-color', CIV_COLORS[civ] || '#555a66');
+    btn.addEventListener('click', () => {
+      if (activeCivFilters.has(civ)) activeCivFilters.delete(civ); else activeCivFilters.add(civ);
+      btn.classList.toggle('active');
+      refreshCardGrid();
+    });
+    civWrap.appendChild(btn);
+  });
+  typeWrap.innerHTML = '';
+  types.forEach(type => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'filter-chip';
+    btn.textContent = type;
+    btn.addEventListener('click', () => {
+      if (activeTypeFilters.has(type)) activeTypeFilters.delete(type); else activeTypeFilters.add(type);
+      btn.classList.toggle('active');
+      refreshCardGrid();
+    });
+    typeWrap.appendChild(btn);
+  });
+}
+
+// Cards missing from the spreadsheet, or missing a civ/type, always pass through
+// unfiltered — incomplete data should never hide a card, only unlock filtering for it.
+function cardPassesFilters(id) {
+  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  if (activeCivFilters.size) {
+    if (!meta || !meta.civs || !meta.civs.some(c => activeCivFilters.has(c))) return false;
+  }
+  if (activeTypeFilters.size) {
+    if (!meta || !meta.type || !activeTypeFilters.has(meta.type)) return false;
+  }
+  return true;
+}
+
 function refreshCardGrid() {
   const grid = document.getElementById('card-grid');
   const query = (document.getElementById('card-search').value || '').toLowerCase();
@@ -163,11 +233,14 @@ function refreshCardGrid() {
   for (const id of ids) {
     const c = cardDB.get(id);
     if (query && !c.name.toLowerCase().includes(query) && !c.set.toLowerCase().includes(query)) continue;
+    if (!cardPassesFilters(id)) continue;
+    const meta = cardMetaDB.get(c.name.toLowerCase());
     const div = document.createElement('div');
     div.className = 'card-thumb';
     const count = currentDeck.filter(x => x === id).length;
     div.innerHTML = `<img src="${c.url}" title="${c.name}">` +
       (count ? `<div class="count-badge">${count}</div>` : '') +
+      (meta && meta.cost != null ? `<div class="cost-badge">${meta.cost}</div>` : '') +
       `<div class="zoom-btn" title="Preview">\u{1F50D}</div>` +
       `<div class="name">${c.name}</div>`;
     div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
@@ -474,7 +547,19 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'chat') {
-    if (seatIndex === activeSeat) appendChatMessage(msg.from, msg.text);
+    if (seatIndex === activeSeat) {
+      appendChatMessage(msg.from, msg.text, msg.fromIdx);
+      const soundMap = seat.state && seat.state.soundMap;
+      playChatTone(msg.fromIdx, soundMap);
+    }
+    return;
+  }
+  if (msg.type === 'sfx') {
+    if (seatIndex === activeSeat) playSfx(msg.name);
+    return;
+  }
+  if (msg.type === 'summonRejected') {
+    if (seatIndex === activeSeat) alert(msg.reason);
     return;
   }
   if (msg.type === 'searchDeckOffer') {
@@ -511,13 +596,36 @@ function appendLog(text) {
   log.scrollTop = log.scrollHeight;
 }
 
+// ====================== Sound effects ======================
+// Drop your two chosen message tones at public/sounds/chat-tone-1.mp3 and
+// chat-tone-2.mp3, and a Shield Trigger sound at public/sounds/shield-trigger.mp3.
+// Missing files just fail silently — nothing breaks if they're not there yet.
+const CHAT_TONE_FILES = ['sounds/chat-tone-1.mp3', 'sounds/chat-tone-2.mp3'];
+const SFX_FILES = { shieldTrigger: 'sounds/shield-trigger.mp3' };
+function playSound(path) {
+  try {
+    const audio = new Audio(path);
+    audio.volume = 0.55;
+    audio.play().catch(() => {});
+  } catch (e) { /* ignore */ }
+}
+function playChatTone(fromIdx, soundMap) {
+  const toneIndex = (soundMap && soundMap[fromIdx] != null) ? soundMap[fromIdx] : fromIdx;
+  playSound(CHAT_TONE_FILES[toneIndex] || CHAT_TONE_FILES[0]);
+}
+function playSfx(name) {
+  const path = SFX_FILES[name];
+  if (path) playSound(path);
+}
+
 // ====================== Chat ======================
-function appendChatMessage(from, text) {
+function appendChatMessage(from, text, fromIdx) {
   const box = document.getElementById('chat-messages');
   const line = document.createElement('div');
-  line.className = 'chat-line';
+  const colorClass = (fromIdx === 0 || fromIdx === 1) ? ('player-' + fromIdx) : '';
+  line.className = 'chat-line' + (colorClass ? ' ' + colorClass : '');
   const fromSpan = document.createElement('span');
-  fromSpan.className = 'chat-from';
+  fromSpan.className = 'chat-from' + (colorClass ? ' ' + colorClass : '');
   fromSpan.textContent = from + ': ';
   line.appendChild(fromSpan);
   line.appendChild(document.createTextNode(text));
@@ -894,8 +1002,16 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
       div.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
+          const targetTapped = !c.tapped; // the action matches whatever this specific card needs
+          const tapLabel = targetTapped ? 'Tap Selected' : 'Untap Selected';
           showContextMenu(e.clientX, e.clientY, [
-            ['Tap / Untap Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaTap', key: k })); clearSelection(); }],
+            [tapLabel, () => {
+              selectedKeys.forEach(k => {
+                const card = mana.find(m => m.key === k);
+                if (card && card.tapped !== targetTapped) sendMsg({ type: 'manaTap', key: k });
+              });
+              clearSelection();
+            }],
             ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaReturnToHand', key: k })); clearSelection(); }],
             ['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaDestroy', key: k })); clearSelection(); }],
             ['Put Selected Back in Deck & Shuffle', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaToDeckShuffle', key: k })); clearSelection(); }]
@@ -967,7 +1083,15 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
     div.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
-        const batch = [['Tap / Untap Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleTap', key: k })); clearSelection(); }]];
+        const targetTapped = !c.tapped;
+        const tapLabel = targetTapped ? 'Tap Selected' : 'Untap Selected';
+        const batch = [[tapLabel, () => {
+          selectedKeys.forEach(k => {
+            const card = cards.find(cc => cc.key === k);
+            if (card && card.tapped !== targetTapped) sendMsg({ type: 'battleTap', key: k });
+          });
+          clearSelection();
+        }]];
         if (isMine) {
           batch.push(['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleDestroy', key: k })); clearSelection(); }]);
           batch.push(['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleReturn', key: k })); clearSelection(); }]);
