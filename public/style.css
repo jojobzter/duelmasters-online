@@ -34,7 +34,7 @@ input {
   font-size: 1em;
 }
 
-.screen { padding: 16px; max-width: 1300px; margin: 0 auto; }
+.screen { padding: 16px; max-width: 1700px; margin: 0 auto; }
 
 .panel {
   background: #1a1e25;
@@ -44,9 +44,9 @@ input {
   margin-bottom: 14px;
 }
 
-.deckbuilder { display: flex; gap: 16px; flex-wrap: wrap; }
-.card-browser { flex: 2; min-width: 280px; }
-.deck-editor { flex: 1; min-width: 220px; }
+.deckbuilder { display: flex; gap: 24px; flex-wrap: wrap; }
+.card-browser { flex: 3; min-width: 280px; }
+.deck-editor { flex: 2; min-width: 440px; }
 
 .card-grid {
   display: flex;
@@ -80,7 +80,10 @@ input {
 .deck-list-item button { padding: 2px 8px; font-size: 0.8em; background: #6a3a3a; }
 
 .saved-decks { display: flex; flex-direction: column; gap: 4px; }
-.saved-deck-row { display: flex; gap: 6px; align-items: center; font-size: 0.85em; flex-wrap: wrap; }
+.saved-deck-row { display: flex; gap: 6px; align-items: center; font-size: 0.85em; flex-wrap: nowrap; overflow-x: auto; padding: 6px 0; border-bottom: 1px solid #2a2f3a; }
+.saved-deck-row .deck-name-link { flex-shrink: 0; }
+.saved-deck-row .hint { flex-shrink: 0; white-space: nowrap; }
+.saved-deck-row button { padding: 6px 10px; font-size: 0.9em; margin: 0; flex-shrink: 0; }
 .deck-name-link { cursor: pointer; }
 .deck-name-link:hover { color: #8ab4ff; text-decoration: underline; }
 
