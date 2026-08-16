@@ -244,6 +244,7 @@ input {
 /* per-player log colors — deliberately the same hues as the chat panel */
 .log .log-line.player-0 { color: #6ab4ff; }
 .log .log-line.player-1 { color: #ff9a5a; }
+.log .log-line.log-flagged { background: rgba(200,40,40,0.22); border-left: 4px solid #e03b3b; padding-left: 5px; font-weight: bold; color: #ff8a8a !important; }
 .sidebar-actions { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
 
 .sidebar-section-label { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa0a8; margin: 12px 0 4px; }
