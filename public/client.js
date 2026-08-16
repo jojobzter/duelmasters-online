@@ -872,7 +872,24 @@ document.getElementById('btn-rematch').addEventListener('click', () => {
   sendMsg({ type: 'rematchVote' });
   document.getElementById('rematch-status').textContent = 'Waiting for opponent to accept rematch...';
 });
-document.getElementById('btn-quit').addEventListener('click', () => location.reload());
+document.getElementById('btn-quit').addEventListener('click', () => {
+  // return to the lobby without a page reload, so the loaded card images survive
+  seats.forEach(s => { try { if (s.ws) s.ws.close(); } catch (e) {} s.ws = null; s.idx = null; s.state = null; });
+  activeSeat = 0; isSolo = false; lastActiveTurn = null;
+  document.getElementById('game-over-modal').style.display = 'none';
+  document.getElementById('end-game-request-modal').style.display = 'none';
+  document.getElementById('surrender-accept-modal').style.display = 'none';
+  document.getElementById('table-room-code').style.display = 'none';
+  document.getElementById('table-join-banner').style.display = 'none';
+  const sw = document.getElementById('seat-switcher');
+  if (sw) sw.remove();
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('chat-messages').innerHTML = '';
+  document.getElementById('screen-table').style.display = 'none';
+  document.getElementById('screen-setup').style.display = 'block';
+  document.getElementById('room-info').textContent = '';
+  document.getElementById('join-request-banner').style.display = 'none';
+});
 document.getElementById('btn-stop-showing').addEventListener('click', () => sendMsg({ type: 'setShowingHand', show: false }));
 document.getElementById('btn-skip-corile').addEventListener('click', () => sendMsg({ type: 'corileSkip' }));
 document.getElementById('btn-end-turn').addEventListener('click', () => sendMsg({ type: 'endTurn' }));
