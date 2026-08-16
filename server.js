@@ -409,7 +409,14 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'drawCard': {
         const c = me.deck.shift();
-        if (c) { me.hand.push({ id: c, key: newKey() }); logText = 'drew a card.'; sfxToPlay = 'draw'; }
+        if (c) {
+          me.hand.push({ id: c, key: newKey() });
+          // Off-turn draws are legitimate (shield triggers, forced draws, etc.) but
+          // are flagged in the log so an accidental one is easy to spot after the fact.
+          const offTurn = (s.activeTurn !== null && s.activeTurn !== undefined && s.activeTurn !== idx);
+          logText = offTurn ? 'drew a card OUT OF TURN.' : 'drew a card.';
+          sfxToPlay = 'draw';
+        }
         break;
       }
       case 'shuffleDeck': { me.deck = shuffle(me.deck); logText = 'shuffled their deck.'; break; }
