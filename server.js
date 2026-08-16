@@ -195,7 +195,7 @@ function viewFor(room, viewerIdx) {
     deckCount: p.deck.length,
     mana: p.mana,
     battlezone: p.battlezone,
-    shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, id: sh.faceUp ? sh.id : undefined })),
+    shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, slot: sh.slot, id: sh.faceUp ? sh.id : undefined })),
     graveyard: p.graveyard,
     pendingCorileUses: isSelf ? (p.pendingCorileUses || 0) : undefined,
     pendingSkyswordMana: isSelf ? (p.pendingSkyswordMana || 0) : undefined,
@@ -233,6 +233,15 @@ function manaSlot(me) {
   const cols = 14;
   const col = slot % cols;
   return { x: 2 + col * 7, y: 0 };
+}
+
+// Shields keep a fixed slot so breaking one leaves a visible gap instead of the
+// rest sliding over. A newly added shield fills the lowest free slot.
+function nextShieldSlot(me) {
+  const used = new Set(me.shields.map(s => s.slot));
+  let i = 0;
+  while (used.has(i)) i++;
+  return i;
 }
 
 function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
@@ -285,7 +294,7 @@ function dealPlayer(room, idx) {
   const s = room.state;
   const deck = shuffle(room.decks[idx]);
   const p = s.players[idx];
-  p.shields = deck.splice(0, 6).map(id => ({ id, key: newKey(), targeted: false, faceUp: false }));
+  p.shields = deck.splice(0, 6).map((id, i) => ({ id, key: newKey(), targeted: false, faceUp: false, slot: i }));
   p.hand = deck.splice(0, 5).map(id => ({ id, key: newKey() }));
   p.deck = deck;
   p.battlezone = []; p.mana = []; p.graveyard = []; p.showingHand = false;
@@ -656,7 +665,7 @@ wss.on('connection', (ws) => {
         if (!me.pendingSkyswordShield) return;
         const cardId = me.deck.shift();
         me.pendingSkyswordShield -= 1;
-        if (cardId) me.shields.push({ id: cardId, key: newKey(), faceUp: false });
+        if (cardId) me.shields.push({ id: cardId, key: newKey(), faceUp: false, slot: nextShieldSlot(me) });
         logText = 'used Skysword, the Savage Vizier to put the next card of their deck face down into their shield zone.';
         break;
       }
