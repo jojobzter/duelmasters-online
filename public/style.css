@@ -148,6 +148,8 @@ input {
 .shield-track { position: relative; height: var(--card-h); flex-shrink: 0; }
 .shield-track .card { position: absolute; top: 0; }
 .centered-zone { justify-content: center; }
+/* the active player's zones get a soft accent so it's obvious whose turn it is */
+.zone.active-side { box-shadow: inset 0 0 0 2px rgba(120,220,140,0.55); background: rgba(40,90,50,0.28); }
 .selectable-zone { position: relative; }
 
 .row-with-side { display: flex; gap: 10px; align-items: flex-end; }

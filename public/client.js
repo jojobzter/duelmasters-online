@@ -474,6 +474,15 @@ let seats = [
 ];
 let activeSeat = 0;
 let lastActiveTurn = null; // tracks turn changes so the banner can pulse when it becomes yours
+
+// True only when a turn has actually been claimed AND it isn't the viewing player's.
+// Before anyone presses "End My Turn" there's no turn order at all, so nothing is "off turn".
+function isOffTurnForMe() {
+  const st = seats[activeSeat] && seats[activeSeat].state;
+  if (!st) return false;
+  if (st.activeTurn === null || st.activeTurn === undefined) return false;
+  return st.activeTurn !== st.you;
+}
 let isSolo = false;
 let practiceDeck = null;
 
@@ -637,6 +646,8 @@ function appendLog(text, fromIdx) {
   const line = document.createElement('div');
   line.textContent = text;
   if (fromIdx === 0 || fromIdx === 1) line.className = 'log-line player-' + fromIdx;
+  // make out-of-turn actions stand out when scanning back through the log
+  if (text.indexOf('OUT OF TURN') !== -1) line.className += ' log-flagged';
   log.appendChild(line);
   log.scrollTop = log.scrollHeight;
 }
@@ -1055,14 +1066,23 @@ function renderState(state) {
   // ---- advisory turn banner ----
   const banner = document.getElementById('turn-banner');
   const endTurnBtn = document.getElementById('btn-end-turn');
+  // highlight whichever side of the table is the active player
+  const mySide = ['my-hand', 'my-mana', 'my-battle', 'my-shields'];
+  const oppSide = ['opp-hand', 'opp-mana', 'opp-battle', 'opp-shields'];
+  const setSide = (ids, on) => ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active-side', on);
+  });
   if (state.activeTurn === null || state.activeTurn === undefined) {
     banner.style.display = 'none';
     endTurnBtn.style.display = state.dealt[oppIdx] ? 'block' : 'none';
+    setSide(mySide, false); setSide(oppSide, false);
   } else {
     const isMine = state.activeTurn === meIdx;
     banner.textContent = isMine ? 'Your turn' : (oppLabel + "'s turn");
     banner.className = 'turn-banner ' + (isMine ? 'mine' : 'theirs');
     banner.style.display = 'block';
+    setSide(mySide, isMine); setSide(oppSide, !isMine);
     // only offer "end my turn" when it's actually your turn
     endTurnBtn.style.display = isMine ? 'block' : 'none';
     if (isMine && lastActiveTurn !== null && lastActiveTurn !== meIdx) {
@@ -1309,7 +1329,14 @@ function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pen
     e.preventDefault();
     if (!isMine) return;
     const items = [
-      ['Draw a Card', () => sendMsg({ type: 'drawCard' })],
+      ['Draw a Card', () => {
+        // Off-turn draws are legitimate (shield triggers, forced draws) — just confirm
+        // so an accidental misclick during the opponent's turn doesn't slip through.
+        if (isOffTurnForMe()) {
+          if (!confirm("It's not your turn. Draw anyway?\n\n(Legitimate for shield triggers and forced draws — this will be flagged in the move log.)")) return;
+        }
+        sendMsg({ type: 'drawCard' });
+      }],
       ['Shuffle Deck', () => sendMsg({ type: 'shuffleDeck' })]
     ];
     if (canSearch) items.push(['Search Deck', () => sendMsg({ type: 'requestSearchDeck' })]);
