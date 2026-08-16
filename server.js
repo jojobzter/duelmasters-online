@@ -184,7 +184,7 @@ function playerLabel(room, idx) {
   return nameFor(room, idx) || ('Player ' + (idx + 1));
 }
 function logMsg(room, idx, text) {
-  broadcastRaw(room, { type: 'log', text: playerLabel(room, idx) + ': ' + text });
+  broadcastRaw(room, { type: 'log', fromIdx: idx, text: playerLabel(room, idx) + ': ' + text });
 }
 
 function viewFor(room, viewerIdx) {
@@ -221,16 +221,18 @@ function viewFor(room, viewerIdx) {
 // Cards render at 1.35x in the battlezone, so columns are spaced wider to match.
 function battlefieldSlot(me) {
   const slot = me.battlezone.length;
-  const cols = 5;
+  const cols = 7;
   const col = slot % cols, row = Math.floor(slot / cols);
-  return { x: 3 + col * 19, y: Math.min(20, row * 20) };
+  return { x: 2 + col * 13.8, y: Math.min(20, row * 20) };
 }
 
+// Mana cards rotate 90° when tapped, so their on-screen width becomes the card's
+// HEIGHT — columns are spaced for that worst case, otherwise tapped mana overlaps.
 function manaSlot(me) {
   const slot = me.mana.length;
-  const cols = 8;
+  const cols = 9;
   const col = slot % cols, row = Math.floor(slot / cols);
-  return { x: 3 + col * 12, y: 4 + row * 44 };
+  return { x: 2 + col * 10.8, y: Math.min(45, row * 45) };
 }
 
 function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
