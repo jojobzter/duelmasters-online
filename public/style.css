@@ -143,7 +143,7 @@ input {
 .zone { background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .hand-zone { min-height: calc(var(--card-h) + 40px); position: relative; align-items: flex-end; padding-top: 34px; }
 .opp-hand { min-height: calc(var(--card-h) * 0.55); align-items: center; padding-top: 8px; }
-.mana-zone { min-height: calc(var(--card-h) * 2.15 + 16px); }
+.mana-zone { min-height: calc(var(--card-h) * 1.25 + 16px); }
 .shield-zone { min-height: calc(var(--card-h) * 0.55); }
 .centered-zone { justify-content: center; }
 .selectable-zone { position: relative; }
@@ -154,14 +154,15 @@ input {
 .deck-gy-pair { display: flex; gap: 8px; }
 .deck-gy-slot { text-align: center; }
 .deck-zone, .gy-zone {
-  width: calc(var(--card-w) * 0.75); height: calc(var(--card-h) * 0.75);
+  width: calc(var(--card-w) * 1.15); height: calc(var(--card-h) * 1.15);
   background: rgba(0,0,0,0.25); border-radius: 6px; display: flex; align-items: center; justify-content: center;
   position: relative; cursor: pointer;
 }
 .deck-zone .card, .gy-zone .card { width: 100%; height: 100%; }
 .deck-zone .stack-count, .gy-zone .stack-count {
-  position: absolute; bottom: -2px; right: -2px; background: #3a5ba0; border-radius: 50%;
-  width: 24px; height: 24px; font-size: 0.7em; display: flex; align-items: center; justify-content: center; z-index: 5;
+  position: absolute; bottom: -4px; right: -4px; background: #3a5ba0; border-radius: 50%;
+  width: 32px; height: 32px; font-size: 0.85em; font-weight: bold; border: 2px solid #14171c;
+  display: flex; align-items: center; justify-content: center; z-index: 5;
 }
 
 .battle-zone { flex-direction: column; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; }
