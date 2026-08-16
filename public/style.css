@@ -38,6 +38,8 @@ input {
 }
 
 .screen { padding: 16px; max-width: 1700px; margin: 0 auto; }
+/* the table itself gets much more room than the deck-builder screens */
+.table-screen { max-width: 2600px; }
 
 .panel {
   background: #1a1e25;
@@ -141,7 +143,7 @@ input {
 .zone { background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .hand-zone { min-height: calc(var(--card-h) + 40px); position: relative; align-items: flex-end; padding-top: 34px; }
 .opp-hand { min-height: calc(var(--card-h) * 0.55); align-items: center; padding-top: 8px; }
-.mana-zone { min-height: calc(var(--card-h) * 1.3 + 16px); }
+.mana-zone { min-height: calc(var(--card-h) * 2.15 + 16px); }
 .shield-zone { min-height: calc(var(--card-h) * 0.55); }
 .centered-zone { justify-content: center; }
 .selectable-zone { position: relative; }
@@ -191,19 +193,25 @@ input {
 .battle-half .card { width: var(--bz-card-w); height: var(--bz-card-h); }
 .battle-half .card.tapped { margin: 0 calc(var(--bz-card-w) * 0.29); }
 .battle-half .card.dragging, .mana-zone .card.dragging { z-index: 500 !important; cursor: grabbing; }
-.mana-zone { position: relative; }
+.mana-zone { position: relative; overflow: hidden; }
 
 /* fanned hand */
 .hand-zone .card { margin-left: calc(var(--card-w) * -0.42); transform-origin: bottom center; }
 .hand-zone .card:first-child { margin-left: 0; }
 .hand-zone .card.hand-hover { z-index: 200 !important; box-shadow: 0 12px 30px rgba(0,0,0,0.65); outline: 2px solid #6a9fff; }
 
+/* Mana cards sit upside down, like slotting them into the mana zone in the real game.
+   Tapped mana is that same inversion rotated a further 90°. The magnify overlay
+   renders outside .mana-zone, so double-clicking always shows the card upright. */
+.mana-zone .card { transform: rotate(180deg); }
+.mana-zone .card.tapped { transform: rotate(270deg); margin: 0 calc(var(--card-w) * 0.29); }
+
 /* No hover scaling outside the hand — cards in play sit at a fixed size.
    The menu-open lift stays: it keeps a card raised while its right-click menu is open. */
-.mana-zone .card.menu-open,
+.mana-zone .card.menu-open { transform: rotate(180deg) scale(1.2); z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
 .shield-zone .card.menu-open { transform: translateY(-8px) scale(1.2); z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
 .battle-half .card.menu-open:not(.dragging) { z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); outline: 2px solid #6a9fff; }
-.mana-zone .card.tapped.menu-open { transform: rotate(90deg) scale(1.15); }
+.mana-zone .card.tapped.menu-open { transform: rotate(270deg) scale(1.15); }
 .battle-half .card.tapped.menu-open:not(.dragging) { transform: rotate(90deg); }
 
 #right-column { display: flex; flex-direction: column; gap: 12px; width: 280px; flex-shrink: 0; }
@@ -216,6 +224,9 @@ input {
 .table-room-code .code { font-size: 1.35em; font-weight: bold; letter-spacing: 0.12em; color: #9fc4ff; display: block; margin-top: 2px; }
 .turn-indicator.my-turn { background: #2a4a2a; }
 .log { margin-top: 10px; font-size: 0.78em; color: #9aa0a8; max-height: 160px; overflow-y: auto; border-top: 1px solid #2a2f3a; padding-top: 6px; }
+/* per-player log colors — deliberately the same hues as the chat panel */
+.log .log-line.player-0 { color: #6ab4ff; }
+.log .log-line.player-1 { color: #ff9a5a; }
 .sidebar-actions { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
 
 .sidebar-section-label { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa0a8; margin: 12px 0 4px; }

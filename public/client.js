@@ -557,7 +557,7 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'log') {
-    if (seatIndex === activeSeat) appendLog(msg.text);
+    if (seatIndex === activeSeat) appendLog(msg.text, msg.fromIdx);
     return;
   }
   if (msg.type === 'chat') {
@@ -602,10 +602,11 @@ function showSeatSwitcher() {
 }
 function switchSeat(seatIndex) { activeSeat = seatIndex; clearSelection(); if (seats[seatIndex].state) renderState(seats[seatIndex].state); }
 
-function appendLog(text) {
+function appendLog(text, fromIdx) {
   const log = document.getElementById('log');
   const line = document.createElement('div');
   line.textContent = text;
+  if (fromIdx === 0 || fromIdx === 1) line.className = 'log-line player-' + fromIdx;
   log.appendChild(line);
   log.scrollTop = log.scrollHeight;
 }
@@ -1065,7 +1066,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
           if (moved) {
             div.classList.add('dragging');
             finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
-            finalYPct = Math.max(0, Math.min(70, origYPct + (dy / cr.height) * 100));
+            finalYPct = Math.max(0, Math.min(50, origYPct + (dy / cr.height) * 100));
             div.style.left = finalXPct + '%';
             div.style.top = finalYPct + '%';
           }
