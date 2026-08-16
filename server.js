@@ -416,7 +416,11 @@ wss.on('connection', (ws) => {
       case 'endTurn': {
         // advisory only — passes the turn marker, doesn't restrict what either player can do
         s.activeTurn = oppIdx;
-        logText = 'ended their turn.';
+        // untap step: the player whose turn is starting untaps their mana and creatures
+        let untapped = 0;
+        for (const m of opp.mana) { if (m.tapped) { m.tapped = false; untapped++; } }
+        for (const c of opp.battlezone) { if (c.tapped) { c.tapped = false; untapped++; } }
+        logText = 'ended their turn.' + (untapped ? " (Opponent's cards untapped.)" : '');
         sfxToPlay = 'turn';
         break;
       }
