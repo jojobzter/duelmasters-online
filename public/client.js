@@ -449,6 +449,7 @@ let seats = [
   { ws: null, idx: null, roomCode: null, state: null }
 ];
 let activeSeat = 0;
+let lastActiveTurn = null; // tracks turn changes so the banner can pulse when it becomes yours
 let isSolo = false;
 let practiceDeck = null;
 
@@ -600,7 +601,12 @@ function showSeatSwitcher() {
   document.getElementById('btn-view-seat0').addEventListener('click', () => switchSeat(0));
   document.getElementById('btn-view-seat1').addEventListener('click', () => switchSeat(1));
 }
-function switchSeat(seatIndex) { activeSeat = seatIndex; clearSelection(); if (seats[seatIndex].state) renderState(seats[seatIndex].state); }
+function switchSeat(seatIndex) {
+  activeSeat = seatIndex;
+  clearSelection();
+  lastActiveTurn = null; // avoid a spurious "it's your turn" pulse just from switching view
+  if (seats[seatIndex].state) renderState(seats[seatIndex].state);
+}
 
 function appendLog(text, fromIdx) {
   const log = document.getElementById('log');
@@ -616,7 +622,11 @@ function appendLog(text, fromIdx) {
 // chat-tone-2.mp3, and a Shield Trigger sound at public/sounds/shield-trigger.mp3.
 // Missing files just fail silently — nothing breaks if they're not there yet.
 const CHAT_TONE_FILES = ['sounds/chat-tone-1.mp3', 'sounds/chat-tone-2.mp3'];
-const SFX_FILES = { shieldTrigger: 'sounds/shield-trigger.mp3' };
+const SFX_FILES = {
+  shieldTrigger: 'sounds/shield-trigger.mp3',
+  draw: 'sounds/draw-card.mp3',
+  turn: 'sounds/turn-change.mp3'
+};
 function playSound(path) {
   try {
     const audio = new Audio(path);
@@ -865,6 +875,7 @@ document.getElementById('btn-rematch').addEventListener('click', () => {
 document.getElementById('btn-quit').addEventListener('click', () => location.reload());
 document.getElementById('btn-stop-showing').addEventListener('click', () => sendMsg({ type: 'setShowingHand', show: false }));
 document.getElementById('btn-skip-corile').addEventListener('click', () => sendMsg({ type: 'corileSkip' }));
+document.getElementById('btn-end-turn').addEventListener('click', () => sendMsg({ type: 'endTurn' }));
 
 // ====================== Shield Trigger prompt ======================
 let shieldTriggerQueue = [];
@@ -999,6 +1010,26 @@ function renderState(state) {
   ti.textContent = state.dealt[oppIdx] ? ('Free play with ' + oppLabel + ' — act anytime') : 'Waiting for opponent to join & deal in...';
   // once the opponent is actually in, the room code is no longer useful
   if (state.dealt[oppIdx]) document.getElementById('table-room-code').style.display = 'none';
+
+  // ---- advisory turn banner ----
+  const banner = document.getElementById('turn-banner');
+  const endTurnBtn = document.getElementById('btn-end-turn');
+  if (state.activeTurn === null || state.activeTurn === undefined) {
+    banner.style.display = 'none';
+    endTurnBtn.style.display = state.dealt[oppIdx] ? 'block' : 'none';
+  } else {
+    const isMine = state.activeTurn === meIdx;
+    banner.textContent = isMine ? 'Your turn' : (oppLabel + "'s turn");
+    banner.className = 'turn-banner ' + (isMine ? 'mine' : 'theirs');
+    banner.style.display = 'block';
+    // only offer "end my turn" when it's actually your turn
+    endTurnBtn.style.display = isMine ? 'block' : 'none';
+    if (isMine && lastActiveTurn !== null && lastActiveTurn !== meIdx) {
+      banner.classList.add('just-changed');
+      setTimeout(() => banner.classList.remove('just-changed'), 3000);
+    }
+  }
+  lastActiveTurn = (state.activeTurn === undefined) ? null : state.activeTurn;
   ti.className = 'turn-indicator' + (state.dealt[oppIdx] ? ' my-turn' : '');
 
   applySelectionClasses();
@@ -1066,7 +1097,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
           if (moved) {
             div.classList.add('dragging');
             finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
-            finalYPct = Math.max(0, Math.min(50, origYPct + (dy / cr.height) * 100));
+            finalYPct = Math.max(0, Math.min(15, origYPct + (dy / cr.height) * 100));
             div.style.left = finalXPct + '%';
             div.style.top = finalYPct + '%';
           }
