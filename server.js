@@ -6,6 +6,7 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const XLSX = require('xlsx');
 
@@ -14,10 +15,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ---- Card database (name -> {name, cost, type, civs[]}), loaded from the
 // spreadsheet at carddata/Duel_Masters_Card_Database.xlsx. Re-upload that
-// file to update it — every deploy re-parses it automatically. Cards missing
-// from it, or missing a cost/type, are simply never gated (fail-open by design).
+// file (same path) to update it — checked on every request via its file
+// modified-time, so no server restart is needed for changes to take effect.
+// Cards missing from it, or missing a cost/type, are simply never gated (fail-open by design).
 const CARD_DATA_PATH = path.join(__dirname, 'carddata', 'Duel_Masters_Card_Database.xlsx');
 let CARD_DB = new Map();
+let CARD_DB_MTIME = 0;
 
 function loadCardDatabase() {
   try {
@@ -39,15 +42,31 @@ function loadCardDatabase() {
       db.set(key, { name, cost, type, civs });
     }
     CARD_DB = db;
-    console.log('Card database loaded:', CARD_DB.size, 'unique card names.');
+    console.log('Card database (re)loaded:', CARD_DB.size, 'unique card names.');
   } catch (e) {
     console.warn('Card database not loaded (' + CARD_DATA_PATH + '):', e.message);
     CARD_DB = new Map();
   }
 }
-loadCardDatabase();
 
-app.get('/api/carddata', (req, res) => { res.json([...CARD_DB.values()]); });
+function ensureCardDatabaseFresh() {
+  try {
+    const stat = fs.statSync(CARD_DATA_PATH);
+    if (stat.mtimeMs !== CARD_DB_MTIME) {
+      loadCardDatabase();
+      CARD_DB_MTIME = stat.mtimeMs;
+    }
+  } catch (e) {
+    // file missing — leave CARD_DB whatever it last was (likely empty on first boot)
+  }
+}
+ensureCardDatabaseFresh();
+
+app.get('/api/carddata', (req, res) => {
+  ensureCardDatabaseFresh();
+  res.set('Cache-Control', 'no-store');
+  res.json({ count: CARD_DB.size, cards: [...CARD_DB.values()] });
+});
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -79,6 +98,15 @@ function canSearchDeck(player) {
   return SEARCH_DECK_ENABLERS.some(n => hasNamedCard(player, n));
 }
 const SKYSWORD_NAME = 'skysword, the savage vizier';
+const BRONZE_ARM_NAME = 'bronze-arm tribe';
+
+// Shared by summonCard and castFreeFromHand — both are "a card entered the battlezone" events.
+function applyOnSummonTriggers(me, cardId) {
+  const name = cardLabel(cardId).toLowerCase();
+  if (name === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
+  if (name === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
+  if (name === BRONZE_ARM_NAME) me.pendingBronzeArm = (me.pendingBronzeArm || 0) + 1;
+}
 
 // Cards with Shield Trigger — when returned to hand FROM the shield zone specifically
 // (not destroyed, not from mana), the player may cast them immediately for free.
@@ -106,7 +134,7 @@ function shuffle(arr) {
 function emptyPlayerState() {
   return {
     hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [],
-    showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0
+    showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0, pendingBronzeArm: 0
   };
 }
 
@@ -147,7 +175,8 @@ function viewFor(room, viewerIdx) {
     graveyard: p.graveyard,
     pendingCorileUses: isSelf ? (p.pendingCorileUses || 0) : undefined,
     pendingSkyswordMana: isSelf ? (p.pendingSkyswordMana || 0) : undefined,
-    pendingSkyswordShield: isSelf ? (p.pendingSkyswordShield || 0) : undefined
+    pendingSkyswordShield: isSelf ? (p.pendingSkyswordShield || 0) : undefined,
+    pendingBronzeArm: isSelf ? (p.pendingBronzeArm || 0) : undefined
   });
   return {
     dealt: [!!room.decks[0], !!room.decks[1]],
@@ -169,12 +198,25 @@ function battlefieldSlot(me) {
   return { x: 4 + col * 15.5, y: 4 + row * 34 };
 }
 
-function cardMeta(id) { return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
+function manaSlot(me) {
+  const slot = me.mana.length;
+  const cols = 8;
+  const col = slot % cols, row = Math.floor(slot / cols);
+  return { x: 3 + col * 12, y: 4 + row * 44 };
+}
+
+function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
 
 // Figures out which untapped mana cards would pay for a card, respecting both
 // the total cost and needing at least one untapped mana of each required
 // civilization. Returns a Set of mana keys to tap, or null if it can't be paid.
 // Pure/read-only — callers tap the returned keys themselves.
+//
+// After covering the civilization requirements, the remaining generic cost is
+// filled by preferring whichever civilization currently has the MOST spare
+// untapped mana — e.g. with 2 Nature + 2 Fire untapped and a cost-2 mono-Nature
+// card, this pays with 1 Nature + 1 Fire (not 2 Nature), so a second copy of
+// that same card can still be paid for afterward instead of getting starved.
 function planManaPayment(me, meta) {
   const untapped = me.mana.filter(m => !m.tapped);
   if (untapped.length < meta.cost) return null;
@@ -188,11 +230,24 @@ function planManaPayment(me, meta) {
     if (!found) return null;
     reserved.add(found.key);
   }
-  for (const m of untapped) {
-    if (reserved.size >= meta.cost) break;
-    reserved.add(m.key);
+  while (reserved.size < meta.cost) {
+    const remaining = untapped.filter(m => !reserved.has(m.key));
+    if (!remaining.length) return null;
+    const civCounts = new Map();
+    for (const m of remaining) {
+      const mMeta = cardMeta(m.id);
+      const civs = (mMeta && mMeta.civs.length) ? mMeta.civs : ['__unknown__'];
+      for (const cv of civs) civCounts.set(cv, (civCounts.get(cv) || 0) + 1);
+    }
+    let best = remaining[0], bestScore = -1;
+    for (const m of remaining) {
+      const mMeta = cardMeta(m.id);
+      const civs = (mMeta && mMeta.civs.length) ? mMeta.civs : ['__unknown__'];
+      const score = Math.max(...civs.map(cv => civCounts.get(cv) || 0));
+      if (score > bestScore) { bestScore = score; best = m; }
+    }
+    reserved.add(best.key);
   }
-  if (reserved.size < meta.cost) return null;
   return reserved;
 }
 
@@ -321,7 +376,8 @@ wss.on('connection', (ws) => {
         const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const [c] = me.hand.splice(i, 1);
-        me.mana.push({ id: c.id, key: c.key, tapped: false });
+        const mSlot = manaSlot(me);
+        me.mana.push({ id: c.id, key: c.key, tapped: false, x: mSlot.x, y: mSlot.y });
         logText = 'charged ' + cardLabel(c.id) + ' to their mana zone.';
         break;
       }
@@ -343,8 +399,7 @@ wss.on('connection', (ws) => {
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'summoned ' + cardLabel(c.id) + '.';
-        if (cardLabel(c.id).toLowerCase() === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
-        if (cardLabel(c.id).toLowerCase() === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
+        applyOnSummonTriggers(me, c.id);
         break;
       }
       case 'castFreeFromHand': {
@@ -356,8 +411,7 @@ wss.on('connection', (ws) => {
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
         sfxToPlay = 'shieldTrigger';
-        if (cardLabel(c.id).toLowerCase() === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
-        if (cardLabel(c.id).toLowerCase() === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
+        applyOnSummonTriggers(me, c.id);
         break;
       }
       case 'discardFromHand': {
@@ -386,6 +440,11 @@ wss.on('connection', (ws) => {
       case 'manaTap': {
         const c = me.mana.find(c => c.key === msg.key);
         if (c) { c.tapped = !c.tapped; logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + ' in their mana zone.'; }
+        break;
+      }
+      case 'manaMove': {
+        const c = me.mana.find(c => c.key === msg.key);
+        if (c) { c.x = msg.x; c.y = msg.y; logText = 'repositioned ' + cardLabel(c.id) + ' in their mana zone.'; }
         break;
       }
       case 'manaReturnToHand': {
@@ -532,7 +591,8 @@ wss.on('connection', (ws) => {
         me.pendingSkyswordMana -= 1;
         me.pendingSkyswordShield = (me.pendingSkyswordShield || 0) + 1;
         if (cardId) {
-          me.mana.push({ id: cardId, key: newKey(), tapped: false });
+          const mSlot = manaSlot(me);
+          me.mana.push({ id: cardId, key: newKey(), tapped: false, x: mSlot.x, y: mSlot.y });
           logText = 'used Skysword, the Savage Vizier to put ' + cardLabel(cardId) + ' from their deck into their mana zone.';
         } else {
           logText = "used Skysword, the Savage Vizier, but their deck was empty.";
@@ -545,6 +605,19 @@ wss.on('connection', (ws) => {
         me.pendingSkyswordShield -= 1;
         if (cardId) me.shields.push({ id: cardId, key: newKey(), faceUp: false });
         logText = 'used Skysword, the Savage Vizier to put the next card of their deck face down into their shield zone.';
+        break;
+      }
+      case 'bronzeArmToMana': {
+        if (!me.pendingBronzeArm) return;
+        const cardId = me.deck.shift();
+        me.pendingBronzeArm -= 1;
+        if (cardId) {
+          const mSlot = manaSlot(me);
+          me.mana.push({ id: cardId, key: newKey(), tapped: false, x: mSlot.x, y: mSlot.y });
+          logText = 'used Bronze-Arm Tribe to put ' + cardLabel(cardId) + ' from their deck into their mana zone.';
+        } else {
+          logText = 'used Bronze-Arm Tribe, but their deck was empty.';
+        }
         break;
       }
 
