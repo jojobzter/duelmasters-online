@@ -13,18 +13,35 @@ const XLSX = require('xlsx');
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---- Card database (name -> {name, cost, type, civs[]}), loaded from the
-// spreadsheet at carddata/Duel_Masters_Card_Database.xlsx. Re-upload that
-// file (same path) to update it — checked on every request via its file
-// modified-time, so no server restart is needed for changes to take effect.
+// ---- Card database (name -> {name, cost, type, civs[]}), loaded from any
+// .xlsx file sitting in the carddata/ folder — no specific filename required.
+// Re-upload an updated file (same folder, any name) to update it — checked on
+// every request via file modified-time, so no server restart is needed.
 // Cards missing from it, or missing a cost/type, are simply never gated (fail-open by design).
-const CARD_DATA_PATH = path.join(__dirname, 'carddata', 'Duel_Masters_Card_Database.xlsx');
+const CARD_DATA_DIR = path.join(__dirname, 'carddata');
 let CARD_DB = new Map();
+let CARD_DB_SOURCE_PATH = null;
 let CARD_DB_MTIME = 0;
 
-function loadCardDatabase() {
+function findCardDataFile() {
   try {
-    const wb = XLSX.readFile(CARD_DATA_PATH);
+    const files = fs.readdirSync(CARD_DATA_DIR).filter(f => f.toLowerCase().endsWith('.xlsx'));
+    if (!files.length) return null;
+    // if more than one .xlsx is sitting in there, use whichever was modified most recently
+    let chosen = files[0], latest = -1;
+    for (const f of files) {
+      const m = fs.statSync(path.join(CARD_DATA_DIR, f)).mtimeMs;
+      if (m > latest) { latest = m; chosen = f; }
+    }
+    return path.join(CARD_DATA_DIR, chosen);
+  } catch (e) {
+    return null;
+  }
+}
+
+function loadCardDatabase(filePath) {
+  try {
+    const wb = XLSX.readFile(filePath);
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet);
     const db = new Map();
@@ -42,22 +59,29 @@ function loadCardDatabase() {
       db.set(key, { name, cost, type, civs });
     }
     CARD_DB = db;
-    console.log('Card database (re)loaded:', CARD_DB.size, 'unique card names.');
+    console.log('Card database (re)loaded from', filePath, '-', CARD_DB.size, 'unique card names.');
   } catch (e) {
-    console.warn('Card database not loaded (' + CARD_DATA_PATH + '):', e.message);
+    console.warn('Card database not loaded (' + filePath + '):', e.message);
     CARD_DB = new Map();
   }
 }
 
 function ensureCardDatabaseFresh() {
+  const filePath = findCardDataFile();
+  if (!filePath) {
+    if (CARD_DB.size > 0) console.warn('No .xlsx file found in carddata/ anymore — card database cleared.');
+    CARD_DB = new Map(); CARD_DB_SOURCE_PATH = null; CARD_DB_MTIME = 0;
+    return;
+  }
   try {
-    const stat = fs.statSync(CARD_DATA_PATH);
-    if (stat.mtimeMs !== CARD_DB_MTIME) {
-      loadCardDatabase();
+    const stat = fs.statSync(filePath);
+    if (filePath !== CARD_DB_SOURCE_PATH || stat.mtimeMs !== CARD_DB_MTIME) {
+      loadCardDatabase(filePath);
+      CARD_DB_SOURCE_PATH = filePath;
       CARD_DB_MTIME = stat.mtimeMs;
     }
   } catch (e) {
-    // file missing — leave CARD_DB whatever it last was (likely empty on first boot)
+    // ignore transient read errors — keep whatever was last loaded
   }
 }
 ensureCardDatabaseFresh();
@@ -390,7 +414,15 @@ wss.on('connection', (ws) => {
           const plan = planManaPayment(me, meta);
           if (!plan) {
             const civText = meta.civs.length ? (' (needs ' + meta.civs.join('/') + ' civilization mana)') : '';
-            send(ws, { type: 'summonRejected', reason: 'Not enough mana to summon ' + cardLabel(cardId) + ' — costs ' + meta.cost + civText + '.' });
+            const untappedDesc = me.mana.filter(m => !m.tapped).map(m => {
+              const mMeta = cardMeta(m.id);
+              const civLabel = !mMeta ? 'not found in card database' : (mMeta.civs.length ? mMeta.civs.join('/') : 'no civilization data');
+              return cardLabel(m.id) + ' [' + civLabel + ']';
+            }).join(', ') || 'none';
+            send(ws, {
+              type: 'summonRejected',
+              reason: 'Not enough mana to summon ' + cardLabel(cardId) + ' — costs ' + meta.cost + civText + '.\n\nYour untapped mana: ' + untappedDesc
+            });
             return;
           }
           plan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
