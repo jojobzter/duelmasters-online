@@ -676,6 +676,14 @@ wss.on('connection', (ws) => {
 
       case 'requestEndGame': {
         if (s.gameOver) return;
+        // If no opponent is actually seated/dealt in, there's nobody to agree —
+        // end it straight away instead of waiting on a confirmation that can never come.
+        if (!room.sockets[oppIdx] || !room.decks[oppIdx]) {
+          s.gameOver = { reason: 'agreed' };
+          s.endGameRequestBy = null;
+          logText = 'ended the game.';
+          break;
+        }
         s.endGameRequestBy = idx;
         logText = 'asked to end the game.';
         break;
@@ -689,6 +697,12 @@ wss.on('connection', (ws) => {
       }
       case 'surrender': {
         if (s.gameOver || s.surrenderBy !== null) return;
+        // no opponent seated to accept it — just end the game
+        if (!room.sockets[oppIdx] || !room.decks[oppIdx]) {
+          s.gameOver = { reason: 'agreed' };
+          logText = 'ended the game.';
+          break;
+        }
         s.surrenderBy = idx;
         logText = 'surrendered.';
         break;
@@ -703,7 +717,9 @@ wss.on('connection', (ws) => {
       case 'rematchVote': {
         s.rematch[idx] = true;
         logText = 'voted for a rematch.';
-        if (s.rematch[0] && s.rematch[1]) {
+        // solo in the room: no second vote is coming, so restart immediately
+        const oppPresent = room.sockets[oppIdx] && room.decks[oppIdx];
+        if ((s.rematch[0] && s.rematch[1]) || !oppPresent) {
           room.state = freshMatchState();
           if (room.decks[0]) dealPlayer(room, 0);
           if (room.decks[1]) dealPlayer(room, 1);
