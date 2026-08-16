@@ -131,17 +131,41 @@ document.getElementById('fallback-input').addEventListener('change', async (e) =
 });
 document.getElementById('btn-load-folder').addEventListener('click', loadFolder);
 
+// Browsers won't silently re-read local files after a page reload, but they WILL
+// re-grant with a single confirmation click on a remembered folder — much less
+// friction than re-navigating the whole folder picker every time.
+let rememberedFolderHandle = null;
+async function reloadRememberedFolder() {
+  if (!rememberedFolderHandle) return;
+  const statusEl = document.getElementById('load-status');
+  try {
+    const perm = await rememberedFolderHandle.requestPermission({ mode: 'read' });
+    if (perm !== 'granted') { statusEl.textContent = 'Permission denied — use "Choose cards folder" instead.'; return; }
+    await scanDirHandle(rememberedFolderHandle);
+    statusEl.textContent = cardDB.size + ' cards loaded from "' + rememberedFolderHandle.name + '".' + (cardBackUrl ? ' Card back found.' : '');
+    document.getElementById('btn-reload-folder').style.display = 'none';
+    refreshCardGrid();
+  } catch (e) {
+    statusEl.textContent = 'Could not reload folder: ' + e.message;
+  }
+}
+document.getElementById('btn-reload-folder').addEventListener('click', reloadRememberedFolder);
+
 (async () => {
   if (!window.showDirectoryPicker) return;
   const handle = await idbGet('cardsFolder');
   if (!handle) return;
+  rememberedFolderHandle = handle;
   const perm = await handle.queryPermission({ mode: 'read' });
   if (perm === 'granted') {
     await scanDirHandle(handle);
     document.getElementById('load-status').textContent = cardDB.size + ' cards loaded from "' + handle.name + '" (remembered).';
     refreshCardGrid();
   } else {
-    document.getElementById('load-status').textContent = 'Click "Choose cards folder" to reload your images (' + handle.name + ').';
+    const btn = document.getElementById('btn-reload-folder');
+    btn.textContent = 'Reload "' + handle.name + '"';
+    btn.style.display = 'inline-block';
+    document.getElementById('load-status').textContent = 'One click to reload your images.';
   }
 })();
 
@@ -1138,11 +1162,22 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
 function renderShieldZone(elId, shields, isMine, ownerIdx) {
   const el = document.getElementById(elId);
   el.innerHTML = '';
-  shields.forEach(s => {
+  // Shields sit at fixed slots so a broken shield leaves its gap behind.
+  // Width is sized to the highest slot in use, and the row stays centred.
+  const maxSlot = shields.reduce((m, s) => Math.max(m, (s.slot != null ? s.slot : 0)), 0);
+  const slotCount = Math.max(6, maxSlot + 1);
+  const track = document.createElement('div');
+  track.className = 'shield-track';
+  track.style.width = 'calc((var(--card-w) + 8px) * ' + slotCount + ')';
+  el.appendChild(track);
+
+  shields.forEach((s, i) => {
+    const slot = (s.slot != null) ? s.slot : i;
     const div = document.createElement('div');
     const faceUp = !!s.faceUp;
     div.className = 'card' + (faceUp ? '' : ' face-down');
     div.dataset.key = s.key;
+    div.style.left = 'calc((var(--card-w) + 8px) * ' + slot + ')';
     div.innerHTML = faceUp ? cardImgHtml(s.id) : faceDownHtml();
     if (faceUp) makeMagnifiable(div, s.id);
     attachFlashClick(div, 'shield', ownerIdx, s.key);
@@ -1164,7 +1199,7 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
         }
       });
     }
-    el.appendChild(div);
+    track.appendChild(div);
   });
 }
 

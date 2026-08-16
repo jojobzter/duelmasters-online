@@ -144,7 +144,9 @@ input {
 .hand-zone { min-height: calc(var(--card-h) + 40px); position: relative; align-items: flex-end; padding-top: 34px; }
 .opp-hand { min-height: calc(var(--card-h) * 0.55); align-items: center; padding-top: 8px; }
 .mana-zone { min-height: calc(var(--card-h) * 1.25 + 16px); }
-.shield-zone { min-height: calc(var(--card-h) * 0.55); }
+.shield-zone { min-height: calc(var(--card-h) + 16px); }
+.shield-track { position: relative; height: var(--card-h); flex-shrink: 0; }
+.shield-track .card { position: absolute; top: 0; }
 .centered-zone { justify-content: center; }
 .selectable-zone { position: relative; }
 
