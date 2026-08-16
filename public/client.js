@@ -163,8 +163,9 @@ const CIV_COLORS = { Fire: '#c0392b', Water: '#2980b9', Nature: '#27ae60', Light
 
 async function loadCardMetaDB() {
   try {
-    const res = await fetch('/api/carddata');
-    const arr = await res.json();
+    const res = await fetch('/api/carddata', { cache: 'no-store' });
+    const data = await res.json();
+    const arr = data.cards || [];
     cardMetaDB = new Map();
     const civSet = new Set(), typeSet = new Set();
     arr.forEach(c => {
@@ -173,6 +174,7 @@ async function loadCardMetaDB() {
       if (c.type) typeSet.add(c.type);
     });
     buildFilterUI([...civSet].sort(), [...typeSet].sort());
+    console.log('Card database loaded in browser:', arr.length, 'cards.');
   } catch (e) {
     console.warn('Could not load card database:', e);
   }
@@ -964,8 +966,8 @@ function renderState(state) {
   renderBattleHalf('my-battle', me.battlezone, true, meIdx, pendingCorileUses);
   renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx, pendingCorileUses);
   const canSearch = me.battlezone.some(c => cardBaseName(c.id).toLowerCase() === 'crystal memory');
-  renderDeckZone('my-deck', me.deckCount, true, canSearch, me.pendingSkyswordMana || 0, me.pendingSkyswordShield || 0);
-  renderDeckZone('opp-deck', opp.deckCount, false, false, 0, 0);
+  renderDeckZone('my-deck', me.deckCount, true, canSearch, me.pendingSkyswordMana || 0, me.pendingSkyswordShield || 0, me.pendingBronzeArm || 0);
+  renderDeckZone('opp-deck', opp.deckCount, false, false, 0, 0, 0);
   renderGyZone('my-gy', me.graveyard, true, meIdx);
   renderGyZone('opp-gy', opp.graveyard, false, oppIdx);
 
@@ -989,45 +991,84 @@ function renderState(state) {
 }
 
 function renderManaZone(elId, mana, isMine, ownerIdx) {
-  const el = document.getElementById(elId);
-  el.innerHTML = '';
+  const container = document.getElementById(elId);
+  container.innerHTML = '';
   mana.forEach(c => {
     const div = document.createElement('div');
     div.className = 'card' + (c.tapped ? ' tapped' : '');
     div.dataset.key = c.key;
     div.innerHTML = cardImgHtml(c.id);
     makeMagnifiable(div, c.id);
-    attachFlashClick(div, 'mana', ownerIdx, c.key);
+
+    const xPct0 = (c.x != null) ? c.x : 3;
+    const yPct0 = (c.y != null) ? c.y : 4;
+    div.style.left = xPct0 + '%';
+    div.style.top = yPct0 + '%';
+
+    div.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (!isMine) return;
+      if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
+        const targetTapped = !c.tapped; // the action matches whatever this specific card needs
+        const tapLabel = targetTapped ? 'Tap Selected' : 'Untap Selected';
+        showContextMenu(e.clientX, e.clientY, [
+          [tapLabel, () => {
+            selectedKeys.forEach(k => {
+              const card = mana.find(m => m.key === k);
+              if (card && card.tapped !== targetTapped) sendMsg({ type: 'manaTap', key: k });
+            });
+            clearSelection();
+          }],
+          ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaReturnToHand', key: k })); clearSelection(); }],
+          ['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaDestroy', key: k })); clearSelection(); }],
+          ['Put Selected Back in Deck & Shuffle', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaToDeckShuffle', key: k })); clearSelection(); }]
+        ], div);
+      } else {
+        clearSelection();
+        showContextMenu(e.clientX, e.clientY, [
+          [c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'manaTap', key: c.key })],
+          ['Return to Hand', () => sendMsg({ type: 'manaReturnToHand', key: c.key })],
+          ['Destroy', () => sendMsg({ type: 'manaDestroy', key: c.key })],
+          ['Put Back in Deck & Shuffle', () => sendMsg({ type: 'manaToDeckShuffle', key: c.key })]
+        ], div);
+      }
+    });
+
     if (isMine) {
-      div.addEventListener('contextmenu', (e) => {
+      div.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        if (e.ctrlKey || e.metaKey) { e.preventDefault(); sendMsg({ type: 'flash', zone: 'mana', ownerIdx, key: c.key }); return; }
         e.preventDefault();
-        if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
-          const targetTapped = !c.tapped; // the action matches whatever this specific card needs
-          const tapLabel = targetTapped ? 'Tap Selected' : 'Untap Selected';
-          showContextMenu(e.clientX, e.clientY, [
-            [tapLabel, () => {
-              selectedKeys.forEach(k => {
-                const card = mana.find(m => m.key === k);
-                if (card && card.tapped !== targetTapped) sendMsg({ type: 'manaTap', key: k });
-              });
-              clearSelection();
-            }],
-            ['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaReturnToHand', key: k })); clearSelection(); }],
-            ['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaDestroy', key: k })); clearSelection(); }],
-            ['Put Selected Back in Deck & Shuffle', () => { selectedKeys.forEach(k => sendMsg({ type: 'manaToDeckShuffle', key: k })); clearSelection(); }]
-          ], div);
-        } else {
-          clearSelection();
-          showContextMenu(e.clientX, e.clientY, [
-            [c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'manaTap', key: c.key })],
-            ['Return to Hand', () => sendMsg({ type: 'manaReturnToHand', key: c.key })],
-            ['Destroy', () => sendMsg({ type: 'manaDestroy', key: c.key })],
-            ['Put Back in Deck & Shuffle', () => sendMsg({ type: 'manaToDeckShuffle', key: c.key })]
-          ], div);
+        e.stopPropagation();
+        const cr = container.getBoundingClientRect();
+        const startX = e.clientX, startY = e.clientY;
+        const origXPct = xPct0, origYPct = yPct0;
+        let moved = false;
+        let finalXPct = origXPct, finalYPct = origYPct;
+        function onMove(ev) {
+          const dx = ev.clientX - startX, dy = ev.clientY - startY;
+          if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+          if (moved) {
+            div.classList.add('dragging');
+            finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
+            finalYPct = Math.max(0, Math.min(70, origYPct + (dy / cr.height) * 100));
+            div.style.left = finalXPct + '%';
+            div.style.top = finalYPct + '%';
+          }
         }
+        function onUp() {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          div.classList.remove('dragging');
+          if (moved) sendMsg({ type: 'manaMove', key: c.key, x: finalXPct, y: finalYPct });
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
       });
+    } else {
+      attachFlashClick(div, 'mana', ownerIdx, c.key);
     }
-    el.appendChild(div);
+    container.appendChild(div);
   });
 }
 
@@ -1077,8 +1118,14 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
 
     const xPct0 = (c.x != null) ? c.x : 4;
     const yPct0 = (c.y != null) ? c.y : 4;
+    // y is stored as "distance from the battle divider" from the owner's own
+    // perspective. My own half already renders that way (top edge = divider).
+    // The opponent's half is physically the top row on screen, so its near-divider
+    // edge is its *bottom* — flip the percentage there so "forward" looks the
+    // same to both players instead of only matching whoever owns the card.
+    const topPct = isMine ? yPct0 : (100 - yPct0);
     div.style.left = xPct0 + '%';
-    div.style.top = yPct0 + '%';
+    div.style.top = topPct + '%';
 
     div.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -1149,7 +1196,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
   });
 }
 
-function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pendingSkyswordShield) {
+function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pendingSkyswordShield, pendingBronzeArm) {
   const el = document.getElementById(elId);
   el.innerHTML = '';
   const card = document.createElement('div');
@@ -1170,6 +1217,7 @@ function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pen
     if (canSearch) items.push(['Search Deck', () => sendMsg({ type: 'requestSearchDeck' })]);
     if (pendingSkyswordMana > 0) items.push(['Put in Mana Zone (Skysword)', () => sendMsg({ type: 'skyswordToMana' })]);
     else if (pendingSkyswordShield > 0) items.push(['Put in Shield Zone (Skysword)', () => sendMsg({ type: 'skyswordToShield' })]);
+    if (pendingBronzeArm > 0) items.push(['Add to Mana Zone (Bronze-Arm Tribe)', () => sendMsg({ type: 'bronzeArmToMana' })]);
     showContextMenu(e.clientX, e.clientY, items, card);
   };
 }
