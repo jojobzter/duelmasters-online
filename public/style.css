@@ -2,6 +2,9 @@
 :root {
   --card-w: 108px;
   --card-h: 151px;
+  /* battlezone cards render permanently at the old hover size */
+  --bz-card-w: calc(var(--card-w) * 1.35);
+  --bz-card-h: calc(var(--card-h) * 1.35);
 }
 body {
   margin: 0;
@@ -159,8 +162,8 @@ input {
   width: 24px; height: 24px; font-size: 0.7em; display: flex; align-items: center; justify-content: center; z-index: 5;
 }
 
-.battle-zone { flex-direction: column; min-height: calc(var(--card-h) * 3.1 + 40px); padding: 6px; }
-.battle-half { position: relative; width: 100%; min-height: calc(var(--card-h) * 1.55 + 16px); padding: 4px; overflow: hidden; }
+.battle-zone { flex-direction: column; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; }
+.battle-half { position: relative; width: 100%; min-height: calc(var(--bz-card-h) * 1.15 + 16px); padding: 4px; overflow: hidden; }
 .battle-divider { height: 1px; background: rgba(255,255,255,0.15); margin: 4px 0; }
 
 .card {
@@ -185,6 +188,8 @@ input {
 
 /* battlezone and mana zone: free-positioned cards (drag to reposition/stack) */
 .battle-half .card, .mana-zone .card { position: absolute; }
+.battle-half .card { width: var(--bz-card-w); height: var(--bz-card-h); }
+.battle-half .card.tapped { margin: 0 calc(var(--bz-card-w) * 0.29); }
 .battle-half .card.dragging, .mana-zone .card.dragging { z-index: 500 !important; cursor: grabbing; }
 .mana-zone { position: relative; }
 
@@ -193,11 +198,13 @@ input {
 .hand-zone .card:first-child { margin-left: 0; }
 .hand-zone .card.hand-hover { z-index: 200 !important; box-shadow: 0 12px 30px rgba(0,0,0,0.65); outline: 2px solid #6a9fff; }
 
-.mana-zone .card:not(.tapped):hover, .mana-zone .card.menu-open,
-.shield-zone .card:not(.tapped):hover, .shield-zone .card.menu-open { transform: translateY(-8px) scale(1.35); z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
-.battle-half .card:not(.tapped):not(.dragging):hover, .battle-half .card.menu-open:not(.dragging) { transform: scale(1.35); z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
-.mana-zone .card.tapped.menu-open { transform: rotate(90deg) scale(1.3); }
-.battle-half .card.tapped.menu-open:not(.dragging) { transform: rotate(90deg) scale(1.35); }
+/* No hover scaling outside the hand — cards in play sit at a fixed size.
+   The menu-open lift stays: it keeps a card raised while its right-click menu is open. */
+.mana-zone .card.menu-open,
+.shield-zone .card.menu-open { transform: translateY(-8px) scale(1.2); z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
+.battle-half .card.menu-open:not(.dragging) { z-index: 50; box-shadow: 0 10px 24px rgba(0,0,0,0.6); outline: 2px solid #6a9fff; }
+.mana-zone .card.tapped.menu-open { transform: rotate(90deg) scale(1.15); }
+.battle-half .card.tapped.menu-open:not(.dragging) { transform: rotate(90deg); }
 
 #right-column { display: flex; flex-direction: column; gap: 12px; width: 280px; flex-shrink: 0; }
 #sidebar { width: 100%; background: #1a1e25; border-radius: 10px; padding: 14px; font-size: 0.95em; box-sizing: border-box; }

@@ -1131,7 +1131,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
     makeMagnifiable(div, c.id);
 
     const xPct0 = (c.x != null) ? c.x : 4;
-    const yPct0 = Math.max(0, Math.min(45, (c.y != null) ? c.y : 4));
+    const yPct0 = Math.max(0, Math.min(22, (c.y != null) ? c.y : 4));
     // y = "distance from the owner's own base", same meaning for both players.
     // Anchor from the edge that IS that player's base so the card body always
     // grows inward (toward the divider) instead of spilling out of the zone:
@@ -1189,7 +1189,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
             div.classList.add('dragging');
             finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
             // anchored from my base (bottom edge), so dragging down = smaller y
-            finalYPct = Math.max(0, Math.min(45, origYPct - (dy / cr.height) * 100));
+            finalYPct = Math.max(0, Math.min(22, origYPct - (dy / cr.height) * 100));
             div.style.left = finalXPct + '%';
             div.style.bottom = finalYPct + '%';
           }
