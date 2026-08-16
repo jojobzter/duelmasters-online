@@ -1118,12 +1118,12 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
 
     const xPct0 = (c.x != null) ? c.x : 4;
     const yPct0 = (c.y != null) ? c.y : 4;
-    // y is stored as "distance from the battle divider" from the owner's own
-    // perspective. My own half already renders that way (top edge = divider).
-    // The opponent's half is physically the top row on screen, so its near-divider
-    // edge is its *bottom* — flip the percentage there so "forward" looks the
-    // same to both players instead of only matching whoever owns the card.
-    const topPct = isMine ? yPct0 : (100 - yPct0);
+    // y is stored as "distance from the owner's own base" (0 = right at your
+    // shields, higher = toward the center divider) — the same meaning for
+    // both players. My own half is the bottom row on screen, so my base is
+    // its *bottom* edge — flip there. The opponent's half is the top row, so
+    // their base is already its top edge (y=0) — no flip needed.
+    const topPct = isMine ? (100 - yPct0) : yPct0;
     div.style.left = xPct0 + '%';
     div.style.top = topPct + '%';
 
@@ -1175,9 +1175,11 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
           if (moved) {
             div.classList.add('dragging');
             finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
-            finalYPct = Math.max(0, Math.min(80, origYPct + (dy / cr.height) * 100));
+            // my-battle is rendered flipped (see above), so dragging down on screen
+            // means moving toward my own base, i.e. the stored y should DEcrease
+            finalYPct = Math.max(0, Math.min(80, origYPct - (dy / cr.height) * 100));
             div.style.left = finalXPct + '%';
-            div.style.top = finalYPct + '%';
+            div.style.top = (100 - finalYPct) + '%';
           }
         }
         function onUp() {
