@@ -215,11 +215,14 @@ function viewFor(room, viewerIdx) {
   };
 }
 
+// y is "distance from the owner's own base": 0 = right at their shields.
+// Kept within 0-45 because a card is taller than the half-zone is deep — going
+// higher pushes the card body out past the zone and into the shield row.
 function battlefieldSlot(me) {
   const slot = me.battlezone.length;
   const cols = 6;
   const col = slot % cols, row = Math.floor(slot / cols);
-  return { x: 4 + col * 15.5, y: 4 + row * 34 };
+  return { x: 4 + col * 15.5, y: Math.min(45, row * 22) };
 }
 
 function manaSlot(me) {
