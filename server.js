@@ -210,6 +210,7 @@ function viewFor(room, viewerIdx) {
     surrenderBy: s.surrenderBy,
     rematch: s.rematch,
     soundMap: s.soundMap,
+    activeTurn: s.activeTurn,
     players: [mask(s.players[0], viewerIdx === 0), mask(s.players[1], viewerIdx === 1)],
     you: viewerIdx
   };
@@ -226,13 +227,12 @@ function battlefieldSlot(me) {
   return { x: 2 + col * 13.8, y: Math.min(20, row * 20) };
 }
 
-// Mana cards rotate 90° when tapped, so their on-screen width becomes the card's
-// HEIGHT — columns are spaced for that worst case, otherwise tapped mana overlaps.
+// Single row — overlap is fine and preferred over wrapping to a second row.
 function manaSlot(me) {
   const slot = me.mana.length;
-  const cols = 9;
-  const col = slot % cols, row = Math.floor(slot / cols);
-  return { x: 2 + col * 10.8, y: Math.min(45, row * 45) };
+  const cols = 14;
+  const col = slot % cols;
+  return { x: 2 + col * 7, y: 0 };
 }
 
 function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
@@ -295,6 +295,9 @@ function freshMatchState() {
   return {
     gameOver: null, endGameRequestBy: null, surrenderBy: null, rematch: [false, false],
     soundMap: Math.random() < 0.5 ? [0, 1] : [1, 0], // which chat-tone index (0 or 1) each player idx uses
+    // Purely advisory — nothing is actually locked to turns, this just tracks
+    // whose turn the players have agreed it is. null until someone ends a turn.
+    activeTurn: null,
     players: [emptyPlayerState(), emptyPlayerState()]
   };
 }
@@ -397,10 +400,22 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'drawCard': {
         const c = me.deck.shift();
-        if (c) { me.hand.push({ id: c, key: newKey() }); logText = 'drew a card.'; }
+        if (c) { me.hand.push({ id: c, key: newKey() }); logText = 'drew a card.'; sfxToPlay = 'draw'; }
         break;
       }
       case 'shuffleDeck': { me.deck = shuffle(me.deck); logText = 'shuffled their deck.'; break; }
+      case 'endTurn': {
+        // advisory only — passes the turn marker, doesn't restrict what either player can do
+        s.activeTurn = oppIdx;
+        logText = 'ended their turn.';
+        sfxToPlay = 'turn';
+        break;
+      }
+      case 'claimTurn': {
+        s.activeTurn = idx;
+        logText = 'took the turn.';
+        break;
+      }
 
       case 'chargeMana': {
         const i = me.hand.findIndex(c => c.key === msg.key);
