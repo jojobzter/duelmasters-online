@@ -502,14 +502,15 @@ document.getElementById('btn-practice').addEventListener('click', () => {
   document.getElementById('room-info').textContent = 'Starting practice game...';
   openSeat(0, { type: 'create', name: myName() });
 });
-document.getElementById('btn-accept-join').addEventListener('click', () => {
+function respondToJoin(accept) {
   document.getElementById('join-request-banner').style.display = 'none';
-  sendOnSeat(0, { type: 'respondJoin', accept: true });
-});
-document.getElementById('btn-decline-join').addEventListener('click', () => {
-  document.getElementById('join-request-banner').style.display = 'none';
-  sendOnSeat(0, { type: 'respondJoin', accept: false });
-});
+  document.getElementById('table-join-banner').style.display = 'none';
+  sendOnSeat(0, { type: 'respondJoin', accept });
+}
+document.getElementById('btn-accept-join').addEventListener('click', () => respondToJoin(true));
+document.getElementById('btn-decline-join').addEventListener('click', () => respondToJoin(false));
+document.getElementById('btn-table-accept-join').addEventListener('click', () => respondToJoin(true));
+document.getElementById('btn-table-decline-join').addEventListener('click', () => respondToJoin(false));
 
 function handleSeatMessage(seatIndex, msg) {
   const seat = seats[seatIndex];
@@ -522,6 +523,12 @@ function handleSeatMessage(seatIndex, msg) {
       document.getElementById('room-info').textContent =
         'Room code: ' + msg.room + '  (share this with your opponent) — you are ' + youLabel +
         ' — using deck "' + (isSolo ? (selectedDeckName || 'Practice') : selectedDeckName) + '"';
+      // also show it on the table itself — the setup screen disappears as soon as you're dealt in
+      if (!isSolo) {
+        const rc = document.getElementById('table-room-code');
+        rc.innerHTML = 'Room code — share with your opponent:<span class="code">' + msg.room + '</span>';
+        rc.style.display = 'block';
+      }
       const decks = getSavedDecks();
       const deckToUse = isSolo ? practiceDeck : decks[selectedDeckName];
       if (deckToUse) sendOnSeat(0, { type: 'submitDeck', deck: deckToUse });
@@ -532,8 +539,13 @@ function handleSeatMessage(seatIndex, msg) {
   if (msg.type === 'joinRequest') {
     if (isSolo) sendOnSeat(0, { type: 'respondJoin', accept: true });
     else {
-      document.getElementById('join-request-text').textContent = (msg.name || 'Someone') + ' wants to join your game.';
+      const text = (msg.name || 'Someone') + ' wants to join your game.';
+      // show on BOTH the setup screen and the table — the host is usually already at the table by now
+      document.getElementById('join-request-text').textContent = text;
       document.getElementById('join-request-banner').style.display = 'flex';
+      document.getElementById('table-join-text').textContent = text;
+      document.getElementById('table-join-banner').style.display = 'flex';
+      appendLog(text);
     }
     return;
   }
@@ -984,6 +996,8 @@ function renderState(state) {
   const ti = document.getElementById('turn-indicator');
   const oppLabel = (state.names && state.names[oppIdx]) ? state.names[oppIdx] : 'your opponent';
   ti.textContent = state.dealt[oppIdx] ? ('Free play with ' + oppLabel + ' — act anytime') : 'Waiting for opponent to join & deal in...';
+  // once the opponent is actually in, the room code is no longer useful
+  if (state.dealt[oppIdx]) document.getElementById('table-room-code').style.display = 'none';
   ti.className = 'turn-indicator' + (state.dealt[oppIdx] ? ' my-turn' : '');
 
   applySelectionClasses();
@@ -1117,15 +1131,14 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
     makeMagnifiable(div, c.id);
 
     const xPct0 = (c.x != null) ? c.x : 4;
-    const yPct0 = (c.y != null) ? c.y : 4;
-    // y is stored as "distance from the owner's own base" (0 = right at your
-    // shields, higher = toward the center divider) — the same meaning for
-    // both players. My own half is the bottom row on screen, so my base is
-    // its *bottom* edge — flip there. The opponent's half is the top row, so
-    // their base is already its top edge (y=0) — no flip needed.
-    const topPct = isMine ? (100 - yPct0) : yPct0;
+    const yPct0 = Math.max(0, Math.min(45, (c.y != null) ? c.y : 4));
+    // y = "distance from the owner's own base", same meaning for both players.
+    // Anchor from the edge that IS that player's base so the card body always
+    // grows inward (toward the divider) instead of spilling out of the zone:
+    // my half's base is its bottom edge, the opponent's is their top edge.
     div.style.left = xPct0 + '%';
-    div.style.top = topPct + '%';
+    if (isMine) { div.style.bottom = yPct0 + '%'; div.style.top = 'auto'; }
+    else { div.style.top = yPct0 + '%'; div.style.bottom = 'auto'; }
 
     div.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -1175,11 +1188,10 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
           if (moved) {
             div.classList.add('dragging');
             finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
-            // my-battle is rendered flipped (see above), so dragging down on screen
-            // means moving toward my own base, i.e. the stored y should DEcrease
-            finalYPct = Math.max(0, Math.min(80, origYPct - (dy / cr.height) * 100));
+            // anchored from my base (bottom edge), so dragging down = smaller y
+            finalYPct = Math.max(0, Math.min(45, origYPct - (dy / cr.height) * 100));
             div.style.left = finalXPct + '%';
-            div.style.top = (100 - finalYPct) + '%';
+            div.style.bottom = finalYPct + '%';
           }
         }
         function onUp() {
