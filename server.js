@@ -139,8 +139,15 @@ const TARGET_EFFECTS = {
 // "The opponent discards from hand."
 const OPPONENT_DISCARD_EFFECTS = {
   'ghost touch':   { kind: 'random', count: 1 },
+  'locomotiver':   { kind: 'random', count: 1 },
   'cranium clamp': { kind: 'choose', count: 2 },
   'lost soul':     { kind: 'all' }
+};
+
+// Abilities that fire when a creature ATTACKS. Tapping alone isn't enough — spells
+// can tap a creature too — so the owner is asked to confirm it was an attack.
+const ATTACK_TRIGGERS = {
+  'horrid worm': { effect: 'oppDiscardRandom', prompt: 'Did Horrid Worm attack? Your opponent will discard a card at random.' }
 };
 
 // Shared by summonCard and castFreeFromHand — both are "a card entered the battlezone" events.
@@ -263,11 +270,19 @@ function viewFor(room, viewerIdx) {
 // Clamped because a card is taller than the half-zone is deep — going higher
 // pushes the card body out past the zone and into the shield row.
 // Cards render at 1.35x in the battlezone, so columns are spaced wider to match.
+// Picks the first UNOCCUPIED slot rather than counting cards: after something dies
+// the count drops, and reusing that index would drop the next summon on top of a
+// creature that's still there.
 function battlefieldSlot(me) {
-  const slot = me.battlezone.length;
   const cols = 7;
-  const col = slot % cols, row = Math.floor(slot / cols);
-  return { x: 2 + col * 13.8, y: Math.min(20, row * 20) };
+  const slotXY = i => ({ x: 2 + (i % cols) * 13.8, y: Math.min(20, Math.floor(i / cols) * 20) });
+  const taken = pos => me.battlezone.some(c =>
+    c.x != null && Math.abs(c.x - pos.x) < 4 && Math.abs((c.y == null ? 0 : c.y) - pos.y) < 6);
+  for (let i = 0; i < cols * 3; i++) {
+    const pos = slotXY(i);
+    if (!taken(pos)) return pos;
+  }
+  return slotXY(me.battlezone.length % (cols * 3));
 }
 
 // Single row — overlap is fine and preferred over wrapping to a second row.
@@ -461,6 +476,7 @@ wss.on('connection', (ws) => {
 
     let logText = null; // set by a case below to emit a log line after the switch
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
+    let attackOfferKey = null, attackOfferPrompt = null; // set when an attack-trigger creature is tapped by its owner
     let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
 
     switch (msg.type) {
@@ -630,9 +646,35 @@ wss.on('connection', (ws) => {
         // deliberately not owner-restricted: some cards let you tap an opponent's creature
         for (const owner of [me, opp]) {
           const c = owner.battlezone.find(c => c.key === msg.key);
-          if (c) { c.tapped = !c.tapped; logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.'; break; }
+          if (!c) continue;
+          c.tapped = !c.tapped;
+          logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.';
+          if (!c.tapped) c.atkResolved = false;   // ready to attack again next time
+          // Offer the attack trigger only to the creature's OWNER, and only once per tap.
+          const trig = ATTACK_TRIGGERS[cardLabel(c.id).toLowerCase()];
+          if (trig && c.tapped && !c.atkResolved && owner === me) {
+            attackOfferKey = c.key; attackOfferPrompt = trig.prompt;
+          }
+          break;
         }
         break;
+      }
+      case 'attackTriggerConfirm': {
+        const c = me.battlezone.find(c => c.key === msg.key);
+        if (!c || !c.tapped || c.atkResolved) return;
+        const trig = ATTACK_TRIGGERS[cardLabel(c.id).toLowerCase()];
+        if (!trig) return;
+        c.atkResolved = true;
+        if (trig.effect === 'oppDiscardRandom' && opp.hand.length) {
+          opp.pendingDiscards.push({ id: newKey(), kind: 'random', count: 1, source: cardLabel(c.id) });
+        }
+        logText = 'attacked with ' + cardLabel(c.id) + ' — opponent must discard at random.';
+        break;
+      }
+      case 'attackTriggerDecline': {
+        const c = me.battlezone.find(c => c.key === msg.key);
+        if (c) c.atkResolved = true;   // don't nag again until it untaps
+        return;
       }
       case 'battleMove': {
         const c = me.battlezone.find(c => c.key === msg.key);
@@ -885,6 +927,7 @@ wss.on('connection', (ws) => {
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
+    if (attackOfferKey) send(ws, { type: 'attackTriggerOffer', key: attackOfferKey, prompt: attackOfferPrompt });
     if (sfxToPlay) broadcastRaw(room, { type: 'sfx', name: sfxToPlay });
   });
 
