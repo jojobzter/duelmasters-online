@@ -150,7 +150,13 @@ input {
 .zone { background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 /* Hand sits over toward the right, clear of the deck/graveyard column above it. */
 .hand-zone { min-height: calc(var(--hand-card-h) + 30px); position: relative; align-items: flex-end; padding-top: 26px; justify-content: flex-end; padding-right: calc(var(--card-w) * 2.6); }
-.opp-hand { min-height: calc(var(--card-h) * 0.55); align-items: center; padding-top: 8px; }
+/* Opponent's hand is all card backs, so there's nothing to read — keep it at the
+   original small size and left-aligned rather than scaling it up like your own hand.
+   Selectors are deliberately more specific than the .hand-zone rules below and in
+   the mobile media queries, so those can't override these regardless of order. */
+.zone.opp-hand { min-height: calc(var(--card-h) + 12px); align-items: center; padding-top: 8px; justify-content: flex-start; padding-right: 8px; }
+.zone.opp-hand .card { width: var(--card-w); height: var(--card-h); margin-left: calc(var(--card-w) * -0.42); }
+.zone.opp-hand .card:first-child { margin-left: 0; }
 .mana-zone { min-height: calc(var(--card-h) * 1.25 + 16px); }
 .shield-zone { min-height: calc(var(--card-h) + 16px); }
 .shield-track { position: relative; height: var(--card-h); flex-shrink: 0; }
@@ -199,6 +205,10 @@ input {
 .card .placeholder-label { font-size: 0.6em; color: #ddd; padding: 2px; word-break: break-word; text-align: center; }
 
 .card.selected, .card-thumb.selected { outline: 3px solid #4be0e0; outline-offset: 2px; box-shadow: 0 0 14px rgba(75,224,224,0.7); }
+/* fanned hand cards overlap, so a selected one is raised to the front — otherwise its
+   highlight hides under the neighbour sitting on top of it (!important because the
+   fan sets z-index inline per card) */
+.hand-zone .card.selected { z-index: 160 !important; outline-width: 4px; }
 .card.flash-red, .card-thumb.flash-red { animation: flash-blink 0.28s steps(1) 5; }
 @keyframes flash-blink {
   0%, 100% { outline: 4px solid transparent; box-shadow: none; }

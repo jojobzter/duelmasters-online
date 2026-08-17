@@ -816,7 +816,7 @@ function initSelectableZone(containerEl) {
     e.preventDefault();
   });
 }
-['opp-mana', 'my-mana', 'opp-shields', 'my-shields', 'opp-battle', 'my-battle'].forEach(id => {
+['opp-mana', 'my-mana', 'opp-shields', 'my-shields', 'opp-battle', 'my-battle', 'my-hand'].forEach(id => {
   const el = document.getElementById(id);
   if (el) initSelectableZone(el);
 });
@@ -1157,9 +1157,38 @@ function renderState(state) {
     el.addEventListener('mouseleave', () => { if (menuAnchorEl === el) return; restoreHand(); });
     makeMagnifiable(el, c.id);
     attachFlashClick(el, 'hand', meIdx, c.key);
+    // Shift+click toggles a single card in/out of the selection. The fan overlaps
+    // heavily, so a drag-box alone can't reliably pick out individual cards.
+    el.addEventListener('click', (e) => {
+      if (!e.shiftKey) return;
+      e.preventDefault(); e.stopPropagation();
+      if (selectedContainerId !== 'my-hand') { clearSelection(); selectedContainerId = 'my-hand'; }
+      if (selectedKeys.has(c.key)) selectedKeys.delete(c.key); else selectedKeys.add(c.key);
+      if (!selectedKeys.size) selectedContainerId = null;
+      applySelectionClasses();
+    });
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       enlargeHand();
+      if (selectedKeys.size > 1 && selectedContainerId === 'my-hand' && selectedKeys.has(c.key)) {
+        const keys = [...selectedKeys];
+        showContextMenu(e.clientX, e.clientY, [
+          ['Discard Selected (' + keys.length + ')', () => {
+            keys.forEach(k => sendMsg({ type: 'discardFromHand', key: k }));
+            clearSelection();
+          }],
+          ['Charge Selected to Mana (' + keys.length + ')', () => {
+            keys.forEach(k => sendMsg({ type: 'chargeMana', key: k }));
+            clearSelection();
+          }],
+          ['Return Selected to Deck & Shuffle (' + keys.length + ')', () => {
+            keys.forEach(k => sendMsg({ type: 'handCardToDeckShuffle', key: k }));
+            clearSelection();
+          }]
+        ], el, restoreHand);
+        return;
+      }
+      clearSelection();
       const items = [
         ['Charge Mana', () => sendMsg({ type: 'chargeMana', key: c.key })],
         ['Summon', () => sendMsg({ type: 'summonCard', key: c.key })],
