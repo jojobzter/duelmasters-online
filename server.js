@@ -123,13 +123,52 @@ function canSearchDeck(player) {
 }
 const SKYSWORD_NAME = 'skysword, the savage vizier';
 const BRONZE_ARM_NAME = 'bronze-arm tribe';
+const ICE_VAPOR_NAME = 'ice vapor, shadow of anguish';
+
+// --- Card effect tables -------------------------------------------------
+// Adding another card with one of these behaviours is a one-line change.
+
+// "Choose a creature in the opponent's battlezone and do X to it."
+const TARGET_EFFECTS = {
+  'spiral gate':  { kind: 'returnToHand' },
+  'aqua surfer':  { kind: 'returnToHand' },
+  'terror pit':   { kind: 'destroy' },
+  'death smoke':  { kind: 'destroyUntapped' }   // untapped creatures only
+};
+
+// "The opponent discards from hand."
+const OPPONENT_DISCARD_EFFECTS = {
+  'ghost touch':   { kind: 'random', count: 1 },
+  'cranium clamp': { kind: 'choose', count: 2 },
+  'lost soul':     { kind: 'all' }
+};
 
 // Shared by summonCard and castFreeFromHand — both are "a card entered the battlezone" events.
-function applyOnSummonTriggers(me, cardId) {
+function applyOnSummonTriggers(me, opp, cardId) {
   const name = cardLabel(cardId).toLowerCase();
   if (name === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
   if (name === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
   if (name === BRONZE_ARM_NAME) me.pendingBronzeArm = (me.pendingBronzeArm || 0) + 1;
+
+  const targetEff = TARGET_EFFECTS[name];
+  if (targetEff) me.pendingTargets.push({ id: newKey(), kind: targetEff.kind, source: cardLabel(cardId) });
+
+  const discardEff = OPPONENT_DISCARD_EFFECTS[name];
+  if (discardEff) opp.pendingDiscards.push({ id: newKey(), kind: discardEff.kind, count: discardEff.count || 0, source: cardLabel(cardId) });
+
+  // Ice Vapor is a passive on the OPPONENT's board: casting a spell into it costs
+  // the caster a card from hand and one from mana. Each half is only queued if the
+  // caster actually has cards there — otherwise it would sit pending forever.
+  const meta = cardMeta(cardId);
+  const isSpell = meta && meta.type && /spell/i.test(meta.type);
+  if (isSpell && opp.battlezone.some(c => cardLabel(c.id).toLowerCase() === ICE_VAPOR_NAME)) {
+    if (me.hand.length) {
+      me.pendingDiscards.push({ id: newKey(), kind: 'choose', count: 1, source: 'Ice Vapor, Shadow of Anguish' });
+    }
+    if (me.mana.length) {
+      me.pendingManaDiscards = (me.pendingManaDiscards || 0) + 1;
+    }
+  }
 }
 
 // Cards with Shield Trigger — when returned to hand FROM the shield zone specifically
@@ -158,7 +197,8 @@ function shuffle(arr) {
 function emptyPlayerState() {
   return {
     hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [],
-    showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0, pendingBronzeArm: 0
+    showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0, pendingBronzeArm: 0,
+    pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0
   };
 }
 
@@ -200,7 +240,10 @@ function viewFor(room, viewerIdx) {
     pendingCorileUses: isSelf ? (p.pendingCorileUses || 0) : undefined,
     pendingSkyswordMana: isSelf ? (p.pendingSkyswordMana || 0) : undefined,
     pendingSkyswordShield: isSelf ? (p.pendingSkyswordShield || 0) : undefined,
-    pendingBronzeArm: isSelf ? (p.pendingBronzeArm || 0) : undefined
+    pendingBronzeArm: isSelf ? (p.pendingBronzeArm || 0) : undefined,
+    pendingTargets: isSelf ? p.pendingTargets : undefined,
+    pendingDiscards: isSelf ? p.pendingDiscards : undefined,
+    pendingManaDiscards: isSelf ? (p.pendingManaDiscards || 0) : undefined
   });
   return {
     dealt: [!!room.decks[0], !!room.decks[1]],
@@ -402,6 +445,20 @@ wss.on('connection', (ws) => {
     if (!room.decks[idx]) return; // must have dealt your own hand first
     const me = s.players[idx];
     const opp = s.players[oppIdx];
+
+    // An unpaid Ice Vapor mana cost blocks the caster's own plays until it's paid.
+    // Only their own board actions are gated — they can still chat, resolve the
+    // debt itself, tap/untap, or concede, so it can never soft-lock the game.
+    const BLOCKED_WHILE_OWING = new Set([
+      'chargeMana', 'summonCard', 'castFreeFromHand', 'drawCard', 'shuffleDeck',
+      'requestSearchDeck', 'searchDeckPick', 'endTurn',
+      'skyswordToMana', 'skyswordToShield', 'bronzeArmToMana'
+    ]);
+    if (me.pendingManaDiscards > 0 && BLOCKED_WHILE_OWING.has(msg.type)) {
+      send(ws, { type: 'summonRejected', reason: 'Ice Vapor: you must send a card from your mana zone to the graveyard first.\n\nRight-click a card in your mana zone and choose "Send to Graveyard (Ice Vapor)".' });
+      return;
+    }
+
     let logText = null; // set by a case below to emit a log line after the switch
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
     let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
@@ -472,7 +529,7 @@ wss.on('connection', (ws) => {
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'summoned ' + cardLabel(c.id) + '.';
-        applyOnSummonTriggers(me, c.id);
+        applyOnSummonTriggers(me, opp, c.id);
         break;
       }
       case 'castFreeFromHand': {
@@ -484,7 +541,7 @@ wss.on('connection', (ws) => {
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
         sfxToPlay = 'shieldTrigger';
-        applyOnSummonTriggers(me, c.id);
+        applyOnSummonTriggers(me, opp, c.id);
         break;
       }
       case 'discardFromHand': {
@@ -691,6 +748,82 @@ wss.on('connection', (ws) => {
         } else {
           logText = 'used Bronze-Arm Tribe, but their deck was empty.';
         }
+        break;
+      }
+
+      case 'effectTarget': {
+        const i = me.pendingTargets.findIndex(t => t.id === msg.effectId);
+        if (i === -1) return;
+        const eff = me.pendingTargets[i];
+        const ci = opp.battlezone.findIndex(c => c.key === msg.key);
+        if (ci === -1) return;
+        const card = opp.battlezone[ci];
+        if (eff.kind === 'destroyUntapped' && card.tapped) {
+          send(ws, { type: 'summonRejected', reason: eff.source + ' can only destroy an UNTAPPED creature. That one is tapped.' });
+          return;
+        }
+        opp.battlezone.splice(ci, 1);
+        if (eff.kind === 'returnToHand') {
+          opp.hand.push({ id: card.id, key: card.key });
+          logText = 'used ' + eff.source + ' to return ' + cardLabel(card.id) + " to their opponent's hand.";
+        } else {
+          opp.graveyard.push({ id: card.id, key: card.key });
+          logText = 'used ' + eff.source + ' to destroy ' + cardLabel(card.id) + '.';
+        }
+        me.pendingTargets.splice(i, 1);
+        break;
+      }
+      case 'effectTargetSkip': {
+        const i = me.pendingTargets.findIndex(t => t.id === msg.effectId);
+        if (i === -1) return;
+        logText = "didn't use " + me.pendingTargets[i].source + '.';
+        me.pendingTargets.splice(i, 1);
+        break;
+      }
+      case 'effectDiscardResolve': {
+        const i = me.pendingDiscards.findIndex(d => d.id === msg.effectId);
+        if (i === -1) return;
+        const eff = me.pendingDiscards[i];
+        const moved = [];
+        if (eff.kind === 'random') {
+          if (me.hand.length) {
+            const r = Math.floor(Math.random() * me.hand.length);
+            const [c] = me.hand.splice(r, 1);
+            me.graveyard.push({ id: c.id, key: c.key });
+            moved.push(cardLabel(c.id));
+          }
+        } else if (eff.kind === 'all') {
+          while (me.hand.length) {
+            const [c] = me.hand.splice(0, 1);
+            me.graveyard.push({ id: c.id, key: c.key });
+            moved.push(cardLabel(c.id));
+          }
+        } else { // 'choose'
+          const keys = Array.isArray(msg.keys) ? msg.keys.slice(0, eff.count) : [];
+          for (const k of keys) {
+            const idx = me.hand.findIndex(c => c.key === k);
+            if (idx !== -1) {
+              const [c] = me.hand.splice(idx, 1);
+              me.graveyard.push({ id: c.id, key: c.key });
+              moved.push(cardLabel(c.id));
+            }
+          }
+        }
+        // naming them is fine — they're in the graveyard now, which both players can inspect
+        logText = moved.length
+          ? ('discarded ' + moved.join(', ') + ' to ' + eff.source + '.')
+          : ('had no cards to discard to ' + eff.source + '.');
+        me.pendingDiscards.splice(i, 1);
+        break;
+      }
+      case 'effectDiscardMana': {
+        if (!me.pendingManaDiscards) return;
+        const idx = me.mana.findIndex(c => c.key === msg.key);
+        if (idx === -1) return;
+        const [c] = me.mana.splice(idx, 1);
+        me.graveyard.push({ id: c.id, key: c.key });
+        me.pendingManaDiscards -= 1;
+        logText = 'sent ' + cardLabel(c.id) + ' from mana to the graveyard (Ice Vapor).';
         break;
       }
 
