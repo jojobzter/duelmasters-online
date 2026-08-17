@@ -602,6 +602,10 @@ function handleSeatMessage(seatIndex, msg) {
     }
     return;
   }
+  if (msg.type === 'notice') {
+    if (seatIndex === activeSeat) showNotice(msg.text);
+    return;
+  }
   if (msg.type === 'sfx') {
     if (seatIndex === activeSeat) playSfx(msg.name);
     return;
@@ -717,6 +721,19 @@ function playChatTone(fromIdx, soundMap) {
 function playSfx(name) {
   const path = SFX_FILES[name];
   if (path) playSound(path);
+}
+
+// ====================== On-screen notices ======================
+function showNotice(text) {
+  const stack = document.getElementById('notice-stack');
+  const el = document.createElement('div');
+  el.className = 'notice-toast';
+  el.textContent = text;
+  stack.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('fading');
+    setTimeout(() => el.remove(), 450);
+  }, 4200);
 }
 
 // ====================== Chat ======================
