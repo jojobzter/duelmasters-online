@@ -614,6 +614,10 @@ function handleSeatMessage(seatIndex, msg) {
     if (seatIndex === activeSeat) openSearchModal(msg.cards);
     return;
   }
+  if (msg.type === 'attackTriggerOffer') {
+    if (seatIndex === activeSeat) openAttackTriggerModal(msg.key, msg.prompt);
+    return;
+  }
   if (msg.type === 'shieldTriggerOffer') {
     if (seatIndex === activeSeat) openShieldTriggerModal(msg.key, msg.id);
     return;
@@ -908,16 +912,18 @@ function openSearchModal(cards) {
   cards.forEach((id, index) => {
     const div = document.createElement('div');
     div.className = 'card-thumb';
-    div.innerHTML = cardImgHtml(id);
-    makeMagnifiable(div, id);
-    div.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      showContextMenu(e.clientX, e.clientY, [
-        ['Return to Hand', () => {
-          sendMsg({ type: 'searchDeckPick', index });
-          document.getElementById('search-modal').style.display = 'none';
-        }]
-      ], div);
+    const c = cardDB.get(id);
+    // A dedicated Take button rather than right-click: right-click doesn't exist on
+    // a phone, so the old version made picking a card impossible there.
+    div.innerHTML = cardImgHtml(id) +
+      '<div class="zoom-btn" title="Preview">\u{1F50D}</div>' +
+      '<div class="name">' + (c ? c.name : cardBaseName(id)) + '</div>' +
+      '<button class="take-btn">Take</button>';
+    div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
+    div.querySelector('.take-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      sendMsg({ type: 'searchDeckPick', index });
+      document.getElementById('search-modal').style.display = 'none';
     });
     grid.appendChild(div);
   });
@@ -1040,6 +1046,26 @@ document.getElementById('btn-skip-effect').addEventListener('click', () => {
   if (mine.pendingTargets && mine.pendingTargets.length) {
     sendMsg({ type: 'effectTargetSkip', effectId: mine.pendingTargets[0].id });
   }
+});
+
+// ---- attack triggers (Horrid Worm) ----
+let attackOfferKeyClient = null;
+function openAttackTriggerModal(key, prompt) {
+  attackOfferKeyClient = key;
+  document.getElementById('attack-trigger-text').textContent = prompt;
+  document.getElementById('attack-trigger-modal').style.display = 'flex';
+}
+function closeAttackTriggerModal() {
+  attackOfferKeyClient = null;
+  document.getElementById('attack-trigger-modal').style.display = 'none';
+}
+document.getElementById('btn-attack-yes').addEventListener('click', () => {
+  if (attackOfferKeyClient) sendMsg({ type: 'attackTriggerConfirm', key: attackOfferKeyClient });
+  closeAttackTriggerModal();
+});
+document.getElementById('btn-attack-no').addEventListener('click', () => {
+  if (attackOfferKeyClient) sendMsg({ type: 'attackTriggerDecline', key: attackOfferKeyClient });
+  closeAttackTriggerModal();
 });
 
 function processNextShieldTrigger() {
