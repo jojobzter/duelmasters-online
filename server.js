@@ -194,6 +194,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
   const name = cardLabel(cardId).toLowerCase();
   let defer = false, sfx = null;
   const extraLog = [];
+  const notices = [];
 
   if (name === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
   if (name === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
@@ -221,7 +222,9 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
       me.hand.push({ id: c, key: newKey() });
       drawn++;
     }
-    extraLog.push(cardLabel(cardId) + ': drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + '.');
+    extraLog.push('drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + ' with ' + cardLabel(cardId) + '.');
+    notices.push({ self: cardLabel(cardId) + ' \u2014 you drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + '.',
+                   other: cardLabel(cardId) + ' let %p draw ' + drawn + ' card' + (drawn === 1 ? '' : 's') + '.' });
     sfx = 'draw';
   }
 
@@ -243,7 +246,9 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
         killed.push(cardLabel(card.id) + (dest === 'mana zone' ? ' (to mana)' : ''));
       }
     }
-    extraLog.push(cardLabel(cardId) + ': destroyed ' + (killed.length ? killed.join(', ') : 'nothing') + '.');
+    extraLog.push('played ' + cardLabel(cardId) + ', destroying ' + (killed.length ? killed.join(', ') : 'nothing') + '.');
+    notices.push({ self: cardLabel(cardId) + ' \u2014 every non-Darkness creature destroyed.',
+                   other: "%p's " + cardLabel(cardId) + ' destroyed every non-Darkness creature.' });
     sfx = 'ballom';
   }
 
@@ -259,7 +264,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     }
   }
 
-  return { defer, sfx, extraLog };
+  return { defer, sfx, extraLog, notices };
 }
 
 // Cards with Shield Trigger — when returned to hand FROM the shield zone specifically
@@ -314,8 +319,31 @@ function nameFor(room, idx) {
 function playerLabel(room, idx) {
   return nameFor(room, idx) || ('Player ' + (idx + 1));
 }
+// Log lines are written per-viewer so the acting player reads "You drew a card."
+// while their opponent reads "jobster drew a card." — text passed in is a verb phrase.
 function logMsg(room, idx, text) {
-  broadcastRaw(room, { type: 'log', fromIdx: idx, text: playerLabel(room, idx) + ': ' + text });
+  for (let i = 0; i < 2; i++) {
+    const ws = room.sockets[i];
+    if (!ws) continue;
+    const isSelf = (i === idx);
+    // log strings are written in third person ("shuffled their deck"), so swap the
+    // possessive when showing it to the player who actually did it
+    const body = isSelf ? text.replace(/\btheir\b/g, 'your') : text;
+    const who = isSelf ? 'You' : playerLabel(room, idx);
+    send(ws, { type: 'log', fromIdx: idx, text: who + ' ' + body });
+  }
+}
+
+// An on-screen toast for things the engine did automatically, so an effect
+// resolving isn't something you only find out by reading the log.
+// '%p' in otherText is replaced with the acting player's name.
+function noticeMsg(room, idx, selfText, otherText) {
+  for (let i = 0; i < 2; i++) {
+    const ws = room.sockets[i];
+    if (!ws) continue;
+    const text = (i === idx) ? selfText : otherText.replace(/%p/g, playerLabel(room, idx));
+    send(ws, { type: 'notice', text });
+  }
 }
 
 function viewFor(room, viewerIdx) {
@@ -564,6 +592,7 @@ wss.on('connection', (ws) => {
 
     let logText = null; // set by a case below to emit a log line after the switch
     const extraLogs = []; // additional log lines from automatic card effects
+    const pendingNotices = []; // on-screen toasts for automatic effects: {self, other}
     const searchAlreadyOpen = !!me.pendingSearch; // so an auto-search only opens once
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
     let attackOfferKey = null, attackOfferPrompt = null; // set when an attack-trigger creature is tapped by its owner
@@ -639,10 +668,11 @@ wss.on('connection', (ws) => {
           const res = applyOnSummonTriggers(me, opp, c.id, c.key);
           if (res.sfx) sfxToPlay = res.sfx;
           res.extraLog.forEach(t => extraLogs.push(t));
+          (res.notices || []).forEach(n => pendingNotices.push(n));
           // a spell has done its job once nothing is waiting on it
           if (isSpellCard(c.id) && !res.defer) {
             const spent = removeBattleCard(me, c.key);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
           }
         }
         break;
@@ -659,9 +689,10 @@ wss.on('connection', (ws) => {
         {
           const res = applyOnSummonTriggers(me, opp, c.id, c.key);
           res.extraLog.forEach(t => extraLogs.push(t));
+          (res.notices || []).forEach(n => pendingNotices.push(n));
           if (isSpellCard(c.id) && !res.defer) {
             const spent = removeBattleCard(me, c.key);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
           }
         }
         break;
@@ -841,7 +872,7 @@ wss.on('connection', (ws) => {
           me.pendingSearch = null;
           if (spellKey) {
             const spent = removeBattleCard(me, spellKey);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
           }
         }
         break;
@@ -855,7 +886,7 @@ wss.on('connection', (ws) => {
           me.pendingSearch = null;
           if (spellKey) {
             const spent = removeBattleCard(me, spellKey);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
           }
         }
         break;
@@ -942,7 +973,7 @@ wss.on('connection', (ws) => {
         me.pendingTargets.splice(i, 1);
         if (eff.spellKey) {
           const spent = removeBattleCard(me, eff.spellKey);
-          if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+          if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
         }
         break;
       }
@@ -954,7 +985,7 @@ wss.on('connection', (ws) => {
         me.pendingTargets.splice(i, 1);
         if (eff.spellKey) {
           const spent = removeBattleCard(me, eff.spellKey);
-          if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+          if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
         }
         break;
       }
@@ -1063,6 +1094,7 @@ wss.on('connection', (ws) => {
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
     extraLogs.forEach(t => logMsg(room, idx, t));
+    pendingNotices.forEach(n => noticeMsg(room, idx, n.self, n.other));
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
     if (attackOfferKey) send(ws, { type: 'attackTriggerOffer', key: attackOfferKey, prompt: attackOfferPrompt });
     if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.slice() });
