@@ -5,6 +5,11 @@
   /* battlezone cards render permanently at the old hover size */
   --bz-card-w: calc(var(--card-w) * 1.35);
   --bz-card-h: calc(var(--card-h) * 1.35);
+  /* hand cards are the ones you actually read, so they're scaled up hardest.
+     Tune --hand-scale alone to make the whole hand bigger or smaller. */
+  --hand-scale: 2.5;
+  --hand-card-w: calc(var(--card-w) * var(--hand-scale));
+  --hand-card-h: calc(var(--card-h) * var(--hand-scale));
 }
 body {
   margin: 0;
@@ -143,7 +148,8 @@ input {
 .zone-label { font-size: 0.68em; color: #bcd; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
 .center-label { text-align: center; }
 .zone { background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.hand-zone { min-height: calc(var(--card-h) + 40px); position: relative; align-items: flex-end; padding-top: 34px; }
+/* Hand sits over toward the right, clear of the deck/graveyard column above it. */
+.hand-zone { min-height: calc(var(--hand-card-h) + 30px); position: relative; align-items: flex-end; padding-top: 26px; justify-content: flex-end; padding-right: calc(var(--card-w) * 2.6); }
 .opp-hand { min-height: calc(var(--card-h) * 0.55); align-items: center; padding-top: 8px; }
 .mana-zone { min-height: calc(var(--card-h) * 1.25 + 16px); }
 .shield-zone { min-height: calc(var(--card-h) + 16px); }
@@ -207,7 +213,7 @@ input {
 .mana-zone { position: relative; overflow: hidden; }
 
 /* fanned hand */
-.hand-zone .card { margin-left: calc(var(--card-w) * -0.42); transform-origin: bottom center; }
+.hand-zone .card { width: var(--hand-card-w); height: var(--hand-card-h); margin-left: calc(var(--hand-card-w) * -0.5); transform-origin: bottom center; }
 .hand-zone .card:first-child { margin-left: 0; }
 .hand-zone .card.hand-hover { z-index: 200 !important; box-shadow: 0 12px 30px rgba(0,0,0,0.65); outline: 2px solid #6a9fff; }
 
@@ -302,7 +308,11 @@ input {
 .context-menu-divider { height: 1px; background: #3a3f4a; margin: 4px 2px; }
 
 .gy-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 900; }
-.gy-modal-inner { background: #1a1e25; border-radius: 10px; padding: 16px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
+.gy-modal-inner { background: #1a1e25; border-radius: 10px; padding: 16px; max-width: min(94vw, 1300px); max-height: 88vh; overflow-y: auto; }
+/* card thumbnails inside modals scale with the screen rather than sitting at a fixed
+   small size — same reasoning as the discard grid */
+.gy-modal-inner .card-thumb { width: clamp(104px, 12vw, 180px); }
+.gy-modal-inner .card-thumb img, .gy-modal-inner .card-thumb .placeholder { width: 100%; height: auto; aspect-ratio: 5 / 7; }
 
 .magnify-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1100; cursor: pointer; padding: 12px; }
 /* size from the image itself, never a fixed container width — a fixed width plus a
@@ -317,42 +327,50 @@ input {
 .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1200; padding: 12px; }
 /* must always be escapable: cap the height and let it scroll rather than letting
    content push the buttons off-screen */
-.modal-box { background: #1a1e25; border: 1px solid #3a3f4a; border-radius: 10px; padding: 20px; text-align: center; min-width: 260px; max-width: 96vw; max-height: 92vh; overflow-y: auto; }
+.modal-box { background: #1a1e25; border: 1px solid #3a3f4a; border-radius: 10px; padding: 20px; text-align: center; min-width: 260px; max-width: min(96vw, 1080px); max-height: 92vh; overflow-y: auto; }
 .modal-box h3 { margin-bottom: 14px; }
 .modal-box button { min-width: 130px; }
 .shield-trigger-preview { display: flex; justify-content: center; margin-bottom: 12px; }
 .shield-trigger-preview .card { position: static; width: auto; height: auto; }
-.shield-trigger-preview img { width: auto; height: auto; max-width: 60vw; max-height: 40vh; border-radius: 8px; display: block; }
+.shield-trigger-preview img { width: auto; height: auto; max-width: min(70vw, 340px); max-height: 46vh; border-radius: 8px; display: block; }
 
 .effect-banner { background: #4a2a5a; border-color: #7a4a9a; }
 .effect-banner.owing { background: #6a2020; border-color: #d04040; font-weight: bold; }
 .discard-grid {
-  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
-  max-height: 50vh; overflow-y: auto; margin: 12px 0; padding: 6px;
+  display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;
+  max-height: 58vh; overflow-y: auto; margin: 14px 0; padding: 10px;
   background: #10131a; border-radius: 8px;
 }
+/* cards scale with the viewport: readable on a monitor, contained on a phone */
 .discard-grid .pick { position: relative; cursor: pointer; border-radius: 6px; }
-.discard-grid .pick img { width: 84px; border-radius: 6px; display: block; border: 3px solid transparent; }
+.discard-grid .pick img { width: clamp(104px, 13vw, 196px); height: auto; border-radius: 6px; display: block; border: 3px solid transparent; }
 .discard-grid .pick.chosen img { border-color: #e04b4b; }
 .discard-grid .pick.chosen::after {
   content: '\2713'; position: absolute; top: 4px; right: 4px;
-  background: #e04b4b; color: #fff; width: 22px; height: 22px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center; font-size: 0.8em; font-weight: bold;
+  background: #e04b4b; color: #fff; width: 26px; height: 26px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 0.9em; font-weight: bold;
 }
+.discard-grid .pick .zoom-btn {
+  position: absolute; bottom: 6px; right: 6px; background: rgba(0,0,0,0.7);
+  border-radius: 5px; width: 28px; height: 28px; display: flex; align-items: center;
+  justify-content: center; font-size: 1em; cursor: zoom-in;
+}
+.discard-grid .pick .zoom-btn:hover { background: rgba(58,91,160,0.95); }
 
 .orientation-hint { display: none; }
 
 @media (max-width: 1080px), (max-height: 500px) and (orientation: landscape) {
   .table-screen { flex-direction: column; }
   #right-column { width: 100%; }
-  :root { --card-w: 78px; --card-h: 109px; }
+  :root { --card-w: 78px; --card-h: 109px; --hand-scale: 1.7; }
   .chat-messages { max-height: 180px; min-height: 100px; }
+  .hand-zone { padding-right: calc(var(--card-w) * 1.4); }
 }
 
 /* Portrait is now playable rather than blocked — cards shrink so a full row of
    six shields still fits across the narrow side. */
 @media (max-width: 760px) and (orientation: portrait) {
-  :root { --card-w: 52px; --card-h: 73px; }
+  :root { --card-w: 52px; --card-h: 73px; --hand-scale: 1.9; }
   .screen { padding: 8px; }
   #table { padding: 8px; }
   .zone { padding: 5px; gap: 5px; }
@@ -367,5 +385,5 @@ input {
   .battle-half { min-height: calc(var(--bz-card-h) * 1.02 + 8px); padding: 2px; }
   .shield-zone { min-height: calc(var(--card-h) + 10px); }
   .mana-zone { min-height: calc(var(--card-h) * 1.15 + 10px); }
-  .hand-zone { min-height: calc(var(--card-h) + 30px); padding-top: 26px; }
+  .hand-zone { min-height: calc(var(--hand-card-h) + 22px); padding-top: 18px; padding-right: calc(var(--card-w) * 0.6); }
 }

@@ -1002,7 +1002,9 @@ function openDiscardModal(eff, hand) {
   hand.forEach(c => {
     const d = document.createElement('div');
     d.className = 'pick';
-    d.innerHTML = cardImgHtml(c.id);
+    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>';
+    // preview works in every mode, including the ones where clicking does nothing
+    d.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(c.id); });
     if (eff.kind === 'choose') {
       d.addEventListener('click', () => {
         if (discardChosen.has(c.key)) discardChosen.delete(c.key);
@@ -1011,7 +1013,7 @@ function openDiscardModal(eff, hand) {
           discardChosen.add(c.key);
         }
         d.classList.toggle('chosen', discardChosen.has(c.key));
-        updateDiscardButton();
+        updateDiscardButton(hand.length);
       });
     }
     grid.appendChild(d);
@@ -1147,7 +1149,9 @@ function renderState(state) {
     const arcLift = -(Math.abs(mid - Math.abs(i - mid)) * 2.5);
     const restTransform = `rotate(${angle}deg) translateY(${arcLift}px)`;
     el.style.transform = restTransform;
-    const enlargeHand = () => { el.classList.add('hand-hover'); el.style.transform = 'rotate(0deg) translateY(-46px) scale(1.7)'; };
+    // base hand cards are already large, so the hover lift is a modest nudge —
+    // it's there to pull a card clear of its neighbours, not to enlarge it much
+    const enlargeHand = () => { el.classList.add('hand-hover'); el.style.transform = 'rotate(0deg) translateY(-22px) scale(1.12)'; };
     const restoreHand = () => { el.classList.remove('hand-hover'); el.style.transform = restTransform; };
     el.addEventListener('mouseenter', enlargeHand);
     el.addEventListener('mouseleave', () => { if (menuAnchorEl === el) return; restoreHand(); });
