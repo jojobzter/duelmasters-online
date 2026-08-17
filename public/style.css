@@ -298,19 +298,25 @@ input {
 .gy-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 900; }
 .gy-modal-inner { background: #1a1e25; border-radius: 10px; padding: 16px; max-width: 90vw; max-height: 80vh; overflow-y: auto; }
 
-.magnify-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1100; cursor: pointer; }
-.magnify-card { width: min(70vw, 440px); cursor: default; animation: magnify-pop 0.12s ease-out; }
-.magnify-card img { width: 100%; height: auto; max-height: 85vh; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); display: block; }
-.magnify-card .placeholder-label { width: min(70vw, 440px); height: 300px; background: #2a2f3a; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.1em; text-align: center; padding: 20px; }
+.magnify-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1100; cursor: pointer; padding: 12px; }
+/* size from the image itself, never a fixed container width — a fixed width plus a
+   height cap is what was squashing cards on short landscape phone screens */
+.magnify-card { width: auto; max-width: 100%; cursor: default; animation: magnify-pop 0.12s ease-out; }
+.magnify-card img { width: auto; height: auto; max-width: min(92vw, 460px); max-height: 88vh; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); display: block; }
+.magnify-card .placeholder-label { width: min(80vw, 380px); height: 300px; background: #2a2f3a; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.1em; text-align: center; padding: 20px; }
 @keyframes magnify-pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
 .selection-box { position: fixed; border: 2px solid #4be0e0; background: rgba(75,224,224,0.15); z-index: 700; pointer-events: none; }
 
-.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1200; }
-.modal-box { background: #1a1e25; border: 1px solid #3a3f4a; border-radius: 10px; padding: 24px; text-align: center; min-width: 280px; }
-.modal-box h3 { margin-bottom: 16px; }
+.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1200; padding: 12px; }
+/* must always be escapable: cap the height and let it scroll rather than letting
+   content push the buttons off-screen */
+.modal-box { background: #1a1e25; border: 1px solid #3a3f4a; border-radius: 10px; padding: 20px; text-align: center; min-width: 260px; max-width: 96vw; max-height: 92vh; overflow-y: auto; }
+.modal-box h3 { margin-bottom: 14px; }
+.modal-box button { min-width: 130px; }
 .shield-trigger-preview { display: flex; justify-content: center; margin-bottom: 12px; }
-.shield-trigger-preview .card { position: static; width: 140px; height: 196px; }
+.shield-trigger-preview .card { position: static; width: auto; height: auto; }
+.shield-trigger-preview img { width: auto; height: auto; max-width: 60vw; max-height: 40vh; border-radius: 8px; display: block; }
 
 .orientation-hint { display: none; }
 
@@ -321,10 +327,16 @@ input {
   .chat-messages { max-height: 180px; min-height: 100px; }
 }
 
+/* Portrait is now playable rather than blocked — cards shrink so a full row of
+   six shields still fits across the narrow side. */
 @media (max-width: 760px) and (orientation: portrait) {
-  .orientation-hint {
-    display: flex; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: #14171c; color: #eee; align-items: center; justify-content: center;
-    text-align: center; font-size: 1.3em; padding: 40px; z-index: 2000;
-  }
+  :root { --card-w: 52px; --card-h: 73px; }
+  .screen { padding: 8px; }
+  #table { padding: 8px; }
+  .zone { padding: 5px; gap: 5px; }
+  .zone-label { font-size: 0.62em; margin-top: 3px; }
+  .deck-gy-pair { gap: 5px; }
+  .chat-messages { max-height: 130px; min-height: 90px; }
+  .log { max-height: 110px; }
+  .table-screen { font-size: 1em; }
 }

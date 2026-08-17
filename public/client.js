@@ -952,6 +952,21 @@ document.getElementById('btn-shield-trigger-no').addEventListener('click', () =>
   document.getElementById('shield-trigger-modal').style.display = 'none';
   processNextShieldTrigger();
 });
+// Safety escape: tapping the dark backdrop or pressing Escape declines the trigger
+// (the card just stays in hand) so it's never possible to get stuck behind this modal.
+document.getElementById('shield-trigger-modal').addEventListener('click', (e) => {
+  if (e.target.id !== 'shield-trigger-modal') return;
+  document.getElementById('shield-trigger-modal').style.display = 'none';
+  processNextShieldTrigger();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const m = document.getElementById('shield-trigger-modal');
+  if (m.style.display === 'flex') {
+    m.style.display = 'none';
+    processNextShieldTrigger();
+  }
+});
 
 // ====================== Table rendering ======================
 function renderState(state) {
