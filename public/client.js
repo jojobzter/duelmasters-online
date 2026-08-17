@@ -662,8 +662,44 @@ const SFX_FILES = {
   draw: 'sounds/draw-card.mp3',
   turn: 'sounds/turn-change.mp3'
 };
+// Mobile browsers refuse to play audio that wasn't started by a user gesture, and a
+// sound triggered by an incoming network message doesn't count as one. So every clip
+// is primed (loaded and unlocked) on the player's first tap, then replayed from cache.
+const audioCache = {};
+let audioUnlocked = false;
+
+function allSoundPaths() { return CHAT_TONE_FILES.concat(Object.values(SFX_FILES)); }
+
+function unlockAudio() {
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  for (const path of allSoundPaths()) {
+    try {
+      const a = new Audio(path);
+      a.preload = 'auto';
+      a.volume = 0;
+      const p = a.play();
+      if (p && p.then) {
+        p.then(() => { a.pause(); a.currentTime = 0; a.volume = 0.55; audioCache[path] = a; })
+         .catch(() => { a.volume = 0.55; audioCache[path] = a; });
+      } else { a.volume = 0.55; audioCache[path] = a; }
+    } catch (e) { /* ignore */ }
+  }
+}
+['touchstart', 'pointerdown', 'click', 'keydown'].forEach(ev =>
+  document.addEventListener(ev, unlockAudio, { once: true, passive: true })
+);
+
 function playSound(path) {
   try {
+    const primed = audioCache[path];
+    if (primed) {
+      // clone so overlapping sounds don't cut each other off
+      const a = primed.cloneNode();
+      a.volume = 0.55;
+      a.play().catch(() => {});
+      return;
+    }
     const audio = new Audio(path);
     audio.volume = 0.55;
     audio.play().catch(() => {});
@@ -936,6 +972,76 @@ function openShieldTriggerModal(key, id) {
   shieldTriggerQueue.push({ key, id });
   if (!shieldTriggerPendingKey) processNextShieldTrigger();
 }
+// ====================== Forced discard prompts (Ghost Touch, Cranium Clamp, Lost Soul, Ice Vapor) ======================
+let discardEffectId = null, discardChosen = new Set(), discardNeeded = 0;
+
+function openDiscardModal(eff, hand) {
+  discardEffectId = eff.id;
+  discardChosen = new Set();
+  discardNeeded = eff.kind === 'choose' ? eff.count : 0;
+  const titleEl = document.getElementById('discard-modal-title');
+  const subEl = document.getElementById('discard-modal-sub');
+  const grid = document.getElementById('discard-modal-grid');
+  titleEl.textContent = eff.source;
+  grid.innerHTML = '';
+
+  if (eff.kind === 'random') {
+    subEl.textContent = 'Discard a random card from your hand?';
+  } else if (eff.kind === 'all') {
+    subEl.textContent = 'Discard your entire hand (' + hand.length + ' card' + (hand.length === 1 ? '' : 's') + ')?';
+  } else {
+    subEl.textContent = 'Choose ' + eff.count + ' card' + (eff.count === 1 ? '' : 's') + ' to discard.';
+  }
+
+  hand.forEach(c => {
+    const d = document.createElement('div');
+    d.className = 'pick';
+    d.innerHTML = cardImgHtml(c.id);
+    if (eff.kind === 'choose') {
+      d.addEventListener('click', () => {
+        if (discardChosen.has(c.key)) discardChosen.delete(c.key);
+        else {
+          if (discardChosen.size >= discardNeeded) return;   // don't exceed the required count
+          discardChosen.add(c.key);
+        }
+        d.classList.toggle('chosen', discardChosen.has(c.key));
+        updateDiscardButton();
+      });
+    }
+    grid.appendChild(d);
+  });
+  updateDiscardButton(hand.length);
+  document.getElementById('discard-modal').style.display = 'flex';
+}
+
+function updateDiscardButton(handLen) {
+  const btn = document.getElementById('btn-discard-confirm');
+  if (discardNeeded > 0) {
+    const short = Math.min(discardNeeded, handLen === undefined ? discardNeeded : handLen);
+    btn.textContent = 'Discard (' + discardChosen.size + '/' + short + ')';
+    btn.disabled = discardChosen.size < short;
+  } else {
+    btn.textContent = 'OK';
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-discard-confirm').addEventListener('click', () => {
+  if (!discardEffectId) return;
+  sendMsg({ type: 'effectDiscardResolve', effectId: discardEffectId, keys: [...discardChosen] });
+  discardEffectId = null; discardChosen = new Set();
+  document.getElementById('discard-modal').style.display = 'none';
+});
+
+document.getElementById('btn-skip-effect').addEventListener('click', () => {
+  const st = seats[activeSeat] && seats[activeSeat].state;
+  if (!st) return;
+  const mine = st.players[st.you];
+  if (mine.pendingTargets && mine.pendingTargets.length) {
+    sendMsg({ type: 'effectTargetSkip', effectId: mine.pendingTargets[0].id });
+  }
+});
+
 function processNextShieldTrigger() {
   if (!shieldTriggerQueue.length) { shieldTriggerPendingKey = null; return; }
   const next = shieldTriggerQueue.shift();
@@ -1049,13 +1155,13 @@ function renderState(state) {
     oppHand.appendChild(el);
   });
 
-  renderManaZone('my-mana', me.mana, true, meIdx);
+  renderManaZone('my-mana', me.mana, true, meIdx, me.pendingManaDiscards || 0);
   renderManaZone('opp-mana', opp.mana, false, oppIdx);
   renderShieldZone('my-shields', me.shields, true, meIdx);
   renderShieldZone('opp-shields', opp.shields, false, oppIdx);
   const pendingCorileUses = me.pendingCorileUses || 0;
-  renderBattleHalf('my-battle', me.battlezone, true, meIdx, pendingCorileUses);
-  renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx, pendingCorileUses);
+  renderBattleHalf('my-battle', me.battlezone, true, meIdx, pendingCorileUses, me.pendingTargets || []);
+  renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx, pendingCorileUses, me.pendingTargets || []);
   const canSearch = me.battlezone.some(c => cardBaseName(c.id).toLowerCase() === 'crystal memory');
   renderDeckZone('my-deck', me.deckCount, true, canSearch, me.pendingSkyswordMana || 0, me.pendingSkyswordShield || 0, me.pendingBronzeArm || 0);
   renderDeckZone('opp-deck', opp.deckCount, false, false, 0, 0, 0);
@@ -1070,6 +1176,42 @@ function renderState(state) {
     corileBanner.style.display = 'flex';
   } else {
     corileBanner.style.display = 'none';
+  }
+
+  // ---- targeting effects (Spiral Gate, Aqua Surfer, Terror Pit, Death Smoke) ----
+  const effBanner = document.getElementById('effect-banner');
+  const myTargets = me.pendingTargets || [];
+  const manaDiscards = me.pendingManaDiscards || 0;
+  if (myTargets.length) {
+    const t = myTargets[0];
+    const verb = t.kind === 'returnToHand' ? "return it to your opponent's hand"
+               : t.kind === 'destroyUntapped' ? 'destroy it (untapped creatures only)'
+               : 'destroy it';
+    document.getElementById('effect-banner-text').textContent =
+      t.source + ' — right-click a creature in your opponent\'s battlezone to ' + verb + '.' +
+      (myTargets.length > 1 ? ' (' + myTargets.length + ' pending)' : '');
+    document.getElementById('btn-skip-effect').style.display = 'inline-block';
+    effBanner.className = 'showing-hand-banner effect-banner';
+    effBanner.style.display = 'flex';
+  } else if (manaDiscards > 0) {
+    document.getElementById('effect-banner-text').textContent =
+      'Ice Vapor — you must send a card from your mana zone to the graveyard before you can play on.' +
+      (manaDiscards > 1 ? ' (' + manaDiscards + ' owed)' : '');
+    document.getElementById('btn-skip-effect').style.display = 'none';
+    effBanner.className = 'showing-hand-banner effect-banner owing';
+    effBanner.style.display = 'flex';
+  } else {
+    effBanner.style.display = 'none';
+  }
+
+  // ---- forced discards: open automatically, one at a time ----
+  const myDiscards = me.pendingDiscards || [];
+  if (myDiscards.length && !discardEffectId) {
+    openDiscardModal(myDiscards[0], me.hand);
+  } else if (!myDiscards.length && discardEffectId) {
+    // resolved (or cleared by a rematch) — make sure the modal doesn't linger
+    discardEffectId = null;
+    document.getElementById('discard-modal').style.display = 'none';
   }
 
   const ti = document.getElementById('turn-indicator');
@@ -1112,7 +1254,7 @@ function renderState(state) {
   window.__lastMe = me; window.__lastOpp = opp;
 }
 
-function renderManaZone(elId, mana, isMine, ownerIdx) {
+function renderManaZone(elId, mana, isMine, ownerIdx, pendingManaDiscards) {
   const container = document.getElementById(elId);
   container.innerHTML = '';
   mana.forEach(c => {
@@ -1152,7 +1294,9 @@ function renderManaZone(elId, mana, isMine, ownerIdx) {
           ['Return to Hand', () => sendMsg({ type: 'manaReturnToHand', key: c.key })],
           ['Destroy', () => sendMsg({ type: 'manaDestroy', key: c.key })],
           ['Put Back in Deck & Shuffle', () => sendMsg({ type: 'manaToDeckShuffle', key: c.key })]
-        ], div);
+        ].concat(pendingManaDiscards > 0
+          ? [['Send to Graveyard (Ice Vapor)', () => sendMsg({ type: 'effectDiscardMana', key: c.key })]]
+          : []), div);
       }
     });
 
@@ -1238,7 +1382,7 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
   });
 }
 
-function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
+function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pendingTargets) {
   const container = document.getElementById(elId);
   container.innerHTML = '';
 
@@ -1284,8 +1428,14 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses) {
       if (isMine) {
         items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
         items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
-      } else if (pendingCorileUses > 0) {
-        items.push(["Put on Top of Opponent's Deck (Corile)", () => sendMsg({ type: 'corilePutOnDeck', key: c.key })]);
+      } else {
+        if (pendingCorileUses > 0) {
+          items.push(["Put on Top of Opponent's Deck (Corile)", () => sendMsg({ type: 'corilePutOnDeck', key: c.key })]);
+        }
+        for (const t of (pendingTargets || [])) {
+          const label = t.kind === 'returnToHand' ? 'Return to Hand (' + t.source + ')' : 'Destroy (' + t.source + ')';
+          items.push([label, () => sendMsg({ type: 'effectTarget', effectId: t.id, key: c.key })]);
+        }
       }
       showContextMenu(e.clientX, e.clientY, items, div);
     });

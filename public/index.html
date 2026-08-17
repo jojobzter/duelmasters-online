@@ -200,6 +200,11 @@
     <button id="btn-skip-corile">Skip</button>
   </div>
 
+  <div id="effect-banner" class="showing-hand-banner effect-banner" style="display:none">
+    <span id="effect-banner-text"></span>
+    <button id="btn-skip-effect">Skip</button>
+  </div>
+
   <div id="selection-box" class="selection-box" style="display:none"></div>
 </div>
 
@@ -246,6 +251,15 @@
     <p class="hint">Cast it for free right now, or just keep it in hand?</p>
     <button id="btn-shield-trigger-yes">Cast for Free</button>
     <button id="btn-shield-trigger-no">Keep in Hand</button>
+  </div>
+</div>
+
+<div id="discard-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="discard-modal-title">Discard</h3>
+    <p id="discard-modal-sub" class="hint"></p>
+    <div id="discard-modal-grid" class="discard-grid"></div>
+    <button id="btn-discard-confirm">OK</button>
   </div>
 </div>
 
