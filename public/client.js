@@ -664,7 +664,8 @@ const CHAT_TONE_FILES = ['sounds/chat-tone-1.mp3', 'sounds/chat-tone-2.mp3'];
 const SFX_FILES = {
   shieldTrigger: 'sounds/shield-trigger.mp3',
   draw: 'sounds/draw-card.mp3',
-  turn: 'sounds/turn-change.mp3'
+  turn: 'sounds/turn-change.mp3',
+  ballom: 'sounds/ballom.mp3'
 };
 // Mobile browsers refuse to play audio that wasn't started by a user gesture, and a
 // sound triggered by an incoming network message doesn't count as one. So every clip
@@ -1050,6 +1051,43 @@ document.getElementById('btn-skip-effect').addEventListener('click', () => {
   }
 });
 
+// ---- target picker popup (Solar Ray: choose one of the opponent's untapped creatures) ----
+let targetPickEffectId = null;
+function openTargetPickModal(eff, oppBattlezone) {
+  const valid = oppBattlezone.filter(c => eff.pick === 'untapped' ? !c.tapped : true);
+  if (!valid.length) {
+    // nothing legal to hit — clear it out rather than leaving a prompt that can't resolve
+    sendMsg({ type: 'effectTargetSkip', effectId: eff.id });
+    return;
+  }
+  targetPickEffectId = eff.id;
+  document.getElementById('target-pick-title').textContent = eff.source;
+  document.getElementById('target-pick-sub').textContent =
+    eff.kind === 'tap' ? "Choose one of your opponent's untapped creatures to tap."
+    : eff.kind === 'returnToHand' ? "Choose a creature to return to your opponent's hand."
+    : 'Choose a creature to destroy.';
+  const grid = document.getElementById('target-pick-grid');
+  grid.innerHTML = '';
+  valid.forEach(c => {
+    const d = document.createElement('div');
+    d.className = 'pick';
+    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>';
+    d.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(c.id); });
+    d.addEventListener('click', () => {
+      sendMsg({ type: 'effectTarget', effectId: eff.id, key: c.key });
+      targetPickEffectId = null;
+      document.getElementById('target-pick-modal').style.display = 'none';
+    });
+    grid.appendChild(d);
+  });
+  document.getElementById('target-pick-modal').style.display = 'flex';
+}
+document.getElementById('btn-target-pick-skip').addEventListener('click', () => {
+  if (targetPickEffectId) sendMsg({ type: 'effectTargetSkip', effectId: targetPickEffectId });
+  targetPickEffectId = null;
+  document.getElementById('target-pick-modal').style.display = 'none';
+});
+
 // ---- attack triggers (Horrid Worm) ----
 let attackOfferKeyClient = null;
 function openAttackTriggerModal(key, prompt) {
@@ -1263,6 +1301,15 @@ function renderState(state) {
     effBanner.style.display = 'none';
   }
 
+  // ---- Solar Ray style effects open a picker automatically ----
+  const pickEff = myTargets.find(t => t.kind === 'tap');
+  if (pickEff && targetPickEffectId !== pickEff.id) {
+    openTargetPickModal(pickEff, opp.battlezone);
+  } else if (!pickEff && targetPickEffectId) {
+    targetPickEffectId = null;
+    document.getElementById('target-pick-modal').style.display = 'none';
+  }
+
   // ---- forced discards: open automatically, one at a time ----
   const myDiscards = me.pendingDiscards || [];
   if (myDiscards.length && !discardEffectId) {
@@ -1324,7 +1371,9 @@ function renderManaZone(elId, mana, isMine, ownerIdx, pendingManaDiscards) {
     makeMagnifiable(div, c.id);
 
     const xPct0 = (c.x != null) ? c.x : 3;
-    const yPct0 = (c.y != null) ? c.y : 4;
+    // clamped: the zone is only a little taller than a card, so a large y would
+    // push the card body out through the bottom edge
+    const yPct0 = Math.max(0, Math.min(11, (c.y != null) ? c.y : 5));
     div.style.left = xPct0 + '%';
     div.style.top = yPct0 + '%';
 
@@ -1376,7 +1425,7 @@ function renderManaZone(elId, mana, isMine, ownerIdx, pendingManaDiscards) {
           if (moved) {
             div.classList.add('dragging');
             finalXPct = Math.max(0, Math.min(92, origXPct + (dx / cr.width) * 100));
-            finalYPct = Math.max(0, Math.min(15, origYPct + (dy / cr.height) * 100));
+            finalYPct = Math.max(0, Math.min(11, origYPct + (dy / cr.height) * 100));
             div.style.left = finalXPct + '%';
             div.style.top = finalYPct + '%';
           }
@@ -1464,7 +1513,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
 
     div.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      if (selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
+      if (isMine && selectedKeys.size > 1 && selectedContainerId === elId && selectedKeys.has(c.key)) {
         const targetTapped = !c.tapped;
         const tapLabel = targetTapped ? 'Tap Selected' : 'Untap Selected';
         const batch = [[tapLabel, () => {
@@ -1474,7 +1523,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
           });
           clearSelection();
         }]];
-        if (isMine) {
+        {
           batch.push(['Destroy Selected', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleDestroy', key: k })); clearSelection(); }]);
           batch.push(['Return Selected to Hand', () => { selectedKeys.forEach(k => sendMsg({ type: 'battleReturn', key: k })); clearSelection(); }]);
         }
@@ -1482,9 +1531,11 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
         return;
       }
       clearSelection();
-      // tap/untap is allowed on any creature — some cards let you tap an opponent's creature
-      const items = [[c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]];
+      // tap/untap is your own creatures only — effects like Solar Ray handle tapping
+      // an opponent's creature through the targeting system instead
+      const items = [];
       if (isMine) {
+        items.push([c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]);
         items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
         items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
       } else {
@@ -1492,10 +1543,13 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
           items.push(["Put on Top of Opponent's Deck (Corile)", () => sendMsg({ type: 'corilePutOnDeck', key: c.key })]);
         }
         for (const t of (pendingTargets || [])) {
-          const label = t.kind === 'returnToHand' ? 'Return to Hand (' + t.source + ')' : 'Destroy (' + t.source + ')';
+          const label = t.kind === 'returnToHand' ? 'Return to Hand (' + t.source + ')'
+                      : t.kind === 'tap' ? 'Tap it (' + t.source + ')'
+                      : 'Destroy (' + t.source + ')';
           items.push([label, () => sendMsg({ type: 'effectTarget', effectId: t.id, key: c.key })]);
         }
       }
+      if (!items.length) return;   // nothing you're allowed to do to that creature
       showContextMenu(e.clientX, e.clientY, items, div);
     });
 

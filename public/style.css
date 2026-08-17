@@ -157,7 +157,7 @@ input {
 .zone.opp-hand { min-height: calc(var(--card-h) + 12px); align-items: center; padding-top: 8px; justify-content: flex-start; padding-right: 8px; }
 .zone.opp-hand .card { width: var(--card-w); height: var(--card-h); margin-left: calc(var(--card-w) * -0.42); }
 .zone.opp-hand .card:first-child { margin-left: 0; }
-.mana-zone { min-height: calc(var(--card-h) * 1.25 + 16px); }
+.mana-zone { min-height: calc(var(--card-h) + 26px); }
 .shield-zone { min-height: calc(var(--card-h) + 16px); }
 .shield-track { position: relative; height: var(--card-h); flex-shrink: 0; }
 .shield-track .card { position: absolute; top: 0; }
@@ -340,6 +340,8 @@ input {
 .modal-box { background: #1a1e25; border: 1px solid #3a3f4a; border-radius: 10px; padding: 20px; text-align: center; min-width: 260px; max-width: min(96vw, 1080px); max-height: 92vh; overflow-y: auto; }
 .modal-box h3 { margin-bottom: 14px; }
 .modal-box button { min-width: 130px; }
+.modal-box button.ghost { background: #2a2f3a; }
+.modal-box button.ghost:hover { background: #353b48; }
 .shield-trigger-preview { display: flex; justify-content: center; margin-bottom: 12px; }
 .shield-trigger-preview .card { position: static; width: auto; height: auto; }
 .shield-trigger-preview img { width: auto; height: auto; max-width: min(70vw, 340px); max-height: 46vh; border-radius: 8px; display: block; }
@@ -394,6 +396,6 @@ input {
   .battle-zone { min-height: calc(var(--bz-card-h) * 2.15 + 24px); padding: 4px; }
   .battle-half { min-height: calc(var(--bz-card-h) * 1.02 + 8px); padding: 2px; }
   .shield-zone { min-height: calc(var(--card-h) + 10px); }
-  .mana-zone { min-height: calc(var(--card-h) * 1.15 + 10px); }
+  .mana-zone { min-height: calc(var(--card-h) + 16px); }
   .hand-zone { min-height: calc(var(--hand-card-h) + 22px); padding-top: 18px; padding-right: calc(var(--card-w) * 0.6); }
 }
