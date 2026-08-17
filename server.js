@@ -133,8 +133,45 @@ const TARGET_EFFECTS = {
   'spiral gate':  { kind: 'returnToHand' },
   'aqua surfer':  { kind: 'returnToHand' },
   'terror pit':   { kind: 'destroy' },
-  'death smoke':  { kind: 'destroyUntapped' }   // untapped creatures only
+  'death smoke':  { kind: 'destroyUntapped' },  // untapped creatures only
+  'solar ray':    { kind: 'tap', pick: 'untapped' }
 };
+
+// Draws that happen the moment the card lands, with no prompt.
+const AUTO_DRAW_ON_SUMMON = { 'aqua hulcus': 1, 'energy stream': 2 };
+
+// Opens the deck search view automatically on cast.
+const AUTO_SEARCH_ON_SUMMON = new Set(['crystal memory']);
+
+// Wipes every creature that isn't a Darkness creature, on both sides.
+const MASS_DESTROY_CARDS = new Set(['ballom, master of death', 'ballom emperor, lord of demons']);
+
+// Goes back to the mana zone instead of the graveyard, but only from the battlezone.
+const COILING_VINES_NAME = 'coiling vines';
+
+function isSpellCard(id) {
+  const m = cardMeta(id);
+  return !!(m && m.type && /spell/i.test(m.type));
+}
+function civsOf(id) {
+  const m = cardMeta(id);
+  return (m && m.civs) ? m.civs : [];
+}
+function removeBattleCard(owner, key) {
+  const i = owner.battlezone.findIndex(c => c.key === key);
+  return i === -1 ? null : owner.battlezone.splice(i, 1)[0];
+}
+// Single funnel for battlezone -> graveyard so the Coiling Vines redirect can't be
+// missed by one of the several paths that destroy a creature.
+function battleCardToGrave(owner, card) {
+  if (cardLabel(card.id).toLowerCase() === COILING_VINES_NAME) {
+    const slot = manaSlot(owner);
+    owner.mana.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y });
+    return 'mana zone';
+  }
+  owner.graveyard.push({ id: card.id, key: card.key });
+  return 'graveyard';
+}
 
 // "The opponent discards from hand."
 const OPPONENT_DISCARD_EFFECTS = {
@@ -151,24 +188,69 @@ const ATTACK_TRIGGERS = {
 };
 
 // Shared by summonCard and castFreeFromHand — both are "a card entered the battlezone" events.
-function applyOnSummonTriggers(me, opp, cardId) {
+// Returns { defer, sfx, extraLog }: defer means a prompt now owns this card, so a
+// spell must NOT be swept to the graveyard until that prompt resolves.
+function applyOnSummonTriggers(me, opp, cardId, cardKey) {
   const name = cardLabel(cardId).toLowerCase();
+  let defer = false, sfx = null;
+  const extraLog = [];
+
   if (name === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
   if (name === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
   if (name === BRONZE_ARM_NAME) me.pendingBronzeArm = (me.pendingBronzeArm || 0) + 1;
 
   const targetEff = TARGET_EFFECTS[name];
-  if (targetEff) me.pendingTargets.push({ id: newKey(), kind: targetEff.kind, source: cardLabel(cardId) });
+  if (targetEff) {
+    me.pendingTargets.push({
+      id: newKey(), kind: targetEff.kind, pick: targetEff.pick || 'any',
+      source: cardLabel(cardId), spellKey: cardKey
+    });
+    defer = true;
+  }
 
   const discardEff = OPPONENT_DISCARD_EFFECTS[name];
   if (discardEff) opp.pendingDiscards.push({ id: newKey(), kind: discardEff.kind, count: discardEff.count || 0, source: cardLabel(cardId) });
 
+  // automatic draws — no prompt, resolves immediately
+  const drawCount = AUTO_DRAW_ON_SUMMON[name];
+  if (drawCount) {
+    let drawn = 0;
+    for (let i = 0; i < drawCount; i++) {
+      const c = me.deck.shift();
+      if (!c) break;
+      me.hand.push({ id: c, key: newKey() });
+      drawn++;
+    }
+    extraLog.push(cardLabel(cardId) + ': drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + '.');
+    sfx = 'draw';
+  }
+
+  // automatic deck search (Crystal Memory)
+  if (AUTO_SEARCH_ON_SUMMON.has(name)) {
+    me.pendingSearch = { id: newKey(), source: cardLabel(cardId), spellKey: cardKey };
+    defer = true;
+  }
+
+  // Ballom: wipe every non-Darkness creature on both sides
+  if (MASS_DESTROY_CARDS.has(name)) {
+    const killed = [];
+    for (const owner of [me, opp]) {
+      for (const card of owner.battlezone.slice()) {
+        if (card.key === cardKey) continue;                       // Ballom itself survives
+        if (civsOf(card.id).includes('Darkness')) continue;        // Darkness creatures survive
+        removeBattleCard(owner, card.key);
+        const dest = battleCardToGrave(owner, card);
+        killed.push(cardLabel(card.id) + (dest === 'mana zone' ? ' (to mana)' : ''));
+      }
+    }
+    extraLog.push(cardLabel(cardId) + ': destroyed ' + (killed.length ? killed.join(', ') : 'nothing') + '.');
+    sfx = 'ballom';
+  }
+
   // Ice Vapor is a passive on the OPPONENT's board: casting a spell into it costs
   // the caster a card from hand and one from mana. Each half is only queued if the
   // caster actually has cards there — otherwise it would sit pending forever.
-  const meta = cardMeta(cardId);
-  const isSpell = meta && meta.type && /spell/i.test(meta.type);
-  if (isSpell && opp.battlezone.some(c => cardLabel(c.id).toLowerCase() === ICE_VAPOR_NAME)) {
+  if (isSpellCard(cardId) && opp.battlezone.some(c => cardLabel(c.id).toLowerCase() === ICE_VAPOR_NAME)) {
     if (me.hand.length) {
       me.pendingDiscards.push({ id: newKey(), kind: 'choose', count: 1, source: 'Ice Vapor, Shadow of Anguish' });
     }
@@ -176,6 +258,8 @@ function applyOnSummonTriggers(me, opp, cardId) {
       me.pendingManaDiscards = (me.pendingManaDiscards || 0) + 1;
     }
   }
+
+  return { defer, sfx, extraLog };
 }
 
 // Cards with Shield Trigger — when returned to hand FROM the shield zone specifically
@@ -205,7 +289,7 @@ function emptyPlayerState() {
   return {
     hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [],
     showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0, pendingBronzeArm: 0,
-    pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0
+    pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null
   };
 }
 
@@ -250,7 +334,8 @@ function viewFor(room, viewerIdx) {
     pendingBronzeArm: isSelf ? (p.pendingBronzeArm || 0) : undefined,
     pendingTargets: isSelf ? p.pendingTargets : undefined,
     pendingDiscards: isSelf ? p.pendingDiscards : undefined,
-    pendingManaDiscards: isSelf ? (p.pendingManaDiscards || 0) : undefined
+    pendingManaDiscards: isSelf ? (p.pendingManaDiscards || 0) : undefined,
+    pendingSearch: isSelf ? p.pendingSearch : undefined
   });
   return {
     dealt: [!!room.decks[0], !!room.decks[1]],
@@ -290,7 +375,10 @@ function manaSlot(me) {
   const slot = me.mana.length;
   const cols = 14;
   const col = slot % cols;
-  return { x: 2 + col * 7, y: 0 };
+  // y is a small inset, not 0: absolutely positioned cards measure from the zone's
+  // border, so y=0 makes the card sit flush against the edge and look like it's
+  // spilling out of the zone.
+  return { x: 2 + col * 7, y: 5 };
 }
 
 // Shields keep a fixed slot so breaking one leaves a visible gap instead of the
@@ -475,6 +563,8 @@ wss.on('connection', (ws) => {
     }
 
     let logText = null; // set by a case below to emit a log line after the switch
+    const extraLogs = []; // additional log lines from automatic card effects
+    const searchAlreadyOpen = !!me.pendingSearch; // so an auto-search only opens once
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
     let attackOfferKey = null, attackOfferPrompt = null; // set when an attack-trigger creature is tapped by its owner
     let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
@@ -499,7 +589,7 @@ wss.on('connection', (ws) => {
         // untap step: the player whose turn is starting untaps their mana and creatures
         let untapped = 0;
         for (const m of opp.mana) { if (m.tapped) { m.tapped = false; untapped++; } }
-        for (const c of opp.battlezone) { if (c.tapped) { c.tapped = false; untapped++; } }
+        for (const c of opp.battlezone) { if (c.tapped) { c.tapped = false; untapped++; } c.atkResolved = false; }
         logText = 'ended their turn.' + (untapped ? " (Opponent's cards untapped.)" : '');
         sfxToPlay = 'turn';
         break;
@@ -545,7 +635,16 @@ wss.on('connection', (ws) => {
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'summoned ' + cardLabel(c.id) + '.';
-        applyOnSummonTriggers(me, opp, c.id);
+        {
+          const res = applyOnSummonTriggers(me, opp, c.id, c.key);
+          if (res.sfx) sfxToPlay = res.sfx;
+          res.extraLog.forEach(t => extraLogs.push(t));
+          // a spell has done its job once nothing is waiting on it
+          if (isSpellCard(c.id) && !res.defer) {
+            const spent = removeBattleCard(me, c.key);
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+          }
+        }
         break;
       }
       case 'castFreeFromHand': {
@@ -557,7 +656,14 @@ wss.on('connection', (ws) => {
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
         sfxToPlay = 'shieldTrigger';
-        applyOnSummonTriggers(me, opp, c.id);
+        {
+          const res = applyOnSummonTriggers(me, opp, c.id, c.key);
+          res.extraLog.forEach(t => extraLogs.push(t));
+          if (isSpellCard(c.id) && !res.defer) {
+            const spent = removeBattleCard(me, c.key);
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+          }
+        }
         break;
       }
       case 'discardFromHand': {
@@ -643,19 +749,16 @@ wss.on('connection', (ws) => {
       }
 
       case 'battleTap': {
-        // deliberately not owner-restricted: some cards let you tap an opponent's creature
-        for (const owner of [me, opp]) {
-          const c = owner.battlezone.find(c => c.key === msg.key);
-          if (!c) continue;
-          c.tapped = !c.tapped;
-          logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.';
-          if (!c.tapped) c.atkResolved = false;   // ready to attack again next time
-          // Offer the attack trigger only to the creature's OWNER, and only once per tap.
-          const trig = ATTACK_TRIGGERS[cardLabel(c.id).toLowerCase()];
-          if (trig && c.tapped && !c.atkResolved && owner === me) {
-            attackOfferKey = c.key; attackOfferPrompt = trig.prompt;
-          }
-          break;
+        // own creatures only — cards that tap an opponent's creature (Solar Ray etc.)
+        // go through the targeting effects instead
+        const c = me.battlezone.find(c => c.key === msg.key);
+        if (!c) return;
+        c.tapped = !c.tapped;
+        logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.';
+        if (!c.tapped) c.atkResolved = false;   // ready to attack again next time
+        const trig = ATTACK_TRIGGERS[cardLabel(c.id).toLowerCase()];
+        if (trig && c.tapped && !c.atkResolved) {
+          attackOfferKey = c.key; attackOfferPrompt = trig.prompt;
         }
         break;
       }
@@ -685,8 +788,8 @@ wss.on('connection', (ws) => {
         const i = me.battlezone.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const [c] = me.battlezone.splice(i, 1);
-        me.graveyard.push({ id: c.id, key: c.key });
-        logText = 'destroyed ' + cardLabel(c.id) + '.';
+        const dest = battleCardToGrave(me, c);
+        logText = 'destroyed ' + cardLabel(c.id) + ' (to ' + dest + ').';
         break;
       }
       case 'battleReturn': {
@@ -726,19 +829,35 @@ wss.on('connection', (ws) => {
       }
 
       case 'searchDeckPick': {
-        if (!canSearchDeck(me)) return;
+        if (!canSearchDeck(me) && !me.pendingSearch) return;
         const i = msg.index;
         if (typeof i !== 'number' || i < 0 || i >= me.deck.length) return;
         const [cardId] = me.deck.splice(i, 1);
         me.hand.push({ id: cardId, key: newKey() });
         me.deck = shuffle(me.deck);
         logText = 'searched their deck and shuffled.'; // card taken is intentionally not named, per privacy
+        if (me.pendingSearch) {
+          const spellKey = me.pendingSearch.spellKey;
+          me.pendingSearch = null;
+          if (spellKey) {
+            const spent = removeBattleCard(me, spellKey);
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+          }
+        }
         break;
       }
       case 'searchDeckCancel': {
-        if (!canSearchDeck(me)) return;
+        if (!canSearchDeck(me) && !me.pendingSearch) return;
         me.deck = shuffle(me.deck);
         logText = 'searched their deck and shuffled.';
+        if (me.pendingSearch) {
+          const spellKey = me.pendingSearch.spellKey;
+          me.pendingSearch = null;
+          if (spellKey) {
+            const spent = removeBattleCard(me, spellKey);
+            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+          }
+        }
         break;
       }
       case 'corilePutOnDeck': {
@@ -804,22 +923,39 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only destroy an UNTAPPED creature. That one is tapped.' });
           return;
         }
-        opp.battlezone.splice(ci, 1);
-        if (eff.kind === 'returnToHand') {
+        if (eff.kind === 'tap') {
+          if (card.tapped) {
+            send(ws, { type: 'summonRejected', reason: eff.source + ' can only tap an UNTAPPED creature. That one is already tapped.' });
+            return;
+          }
+          card.tapped = true;
+          logText = 'used ' + eff.source + ' to tap ' + cardLabel(card.id) + '.';
+        } else if (eff.kind === 'returnToHand') {
+          opp.battlezone.splice(ci, 1);
           opp.hand.push({ id: card.id, key: card.key });
           logText = 'used ' + eff.source + ' to return ' + cardLabel(card.id) + " to their opponent's hand.";
         } else {
-          opp.graveyard.push({ id: card.id, key: card.key });
-          logText = 'used ' + eff.source + ' to destroy ' + cardLabel(card.id) + '.';
+          opp.battlezone.splice(ci, 1);
+          const dest = battleCardToGrave(opp, card);
+          logText = 'used ' + eff.source + ' to destroy ' + cardLabel(card.id) + ' (to ' + dest + ').';
         }
         me.pendingTargets.splice(i, 1);
+        if (eff.spellKey) {
+          const spent = removeBattleCard(me, eff.spellKey);
+          if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+        }
         break;
       }
       case 'effectTargetSkip': {
         const i = me.pendingTargets.findIndex(t => t.id === msg.effectId);
         if (i === -1) return;
-        logText = "didn't use " + me.pendingTargets[i].source + '.';
+        const eff = me.pendingTargets[i];
+        logText = "didn't use " + eff.source + '.';
         me.pendingTargets.splice(i, 1);
+        if (eff.spellKey) {
+          const spent = removeBattleCard(me, eff.spellKey);
+          if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push(cardLabel(spent.id) + ' went to the graveyard.'); }
+        }
         break;
       }
       case 'effectDiscardResolve': {
@@ -926,8 +1062,10 @@ wss.on('connection', (ws) => {
     }
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
+    extraLogs.forEach(t => logMsg(room, idx, t));
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
     if (attackOfferKey) send(ws, { type: 'attackTriggerOffer', key: attackOfferKey, prompt: attackOfferPrompt });
+    if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.slice() });
     if (sfxToPlay) broadcastRaw(room, { type: 'sfx', name: sfxToPlay });
   });
 
