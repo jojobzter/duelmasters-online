@@ -21,6 +21,8 @@ function displayName(id) {
   return c ? c.name : cardBaseName(id);
 }
 const CARD_BACK_FOLDER = /^card ?back$/i;
+const DECK_TXT = /\.txt$/i;
+let deckFilesFound = [];   // {name, text} decklists discovered during the folder scan
 
 function idbGet(key) {
   return new Promise((resolve) => {
@@ -66,10 +68,20 @@ async function scanDirHandle(dirHandle) {
   progressStart(true);
   statusEl.textContent = 'Scanning folders...';
   const jobs = [];
+  deckFilesFound = [];
   for await (const [setName, setHandle] of dirHandle.entries()) {
     if (setHandle.kind !== 'directory') continue;
     for await (const [fileName, fileHandle] of setHandle.entries()) {
-      if (fileHandle.kind !== 'file' || !IMG_EXT.test(fileName)) continue;
+      if (fileHandle.kind !== 'file') continue;
+      // a "my decks" folder of .txt decklists is picked up in the same pass
+      if (DECK_TXT.test(fileName)) {
+        try {
+          const f = await fileHandle.getFile();
+          deckFilesFound.push({ name: fileName.replace(DECK_TXT, ''), text: await f.text() });
+        } catch (e) { /* ignore unreadable file */ }
+        continue;
+      }
+      if (!IMG_EXT.test(fileName)) continue;
       jobs.push({ setName, fileName, fileHandle });
       await maybeYield();
     }
@@ -98,6 +110,12 @@ async function scanDirHandle(dirHandle) {
 async function scanFileList(files) {
   cardDB.clear(); cardBackUrl = null;
   const statusEl = document.getElementById('load-status');
+  deckFilesFound = [];
+  for (const f of files) {
+    if (!DECK_TXT.test(f.name)) continue;
+    try { deckFilesFound.push({ name: f.name.replace(DECK_TXT, ''), text: await f.text() }); }
+    catch (e) { /* ignore */ }
+  }
   const imgFiles = [...files].filter(f => IMG_EXT.test(f.name));
   const total = imgFiles.length;
   progressStart(false);
@@ -131,7 +149,10 @@ async function loadFolder() {
       const handle = await window.showDirectoryPicker();
       await scanDirHandle(handle);
       idbSet('cardsFolder', handle);
-      statusEl.textContent = cardDB.size + ' cards loaded from "' + handle.name + '".' + (cardBackUrl ? ' Card back found.' : '');
+      const n = importFoundDecklists();
+      statusEl.textContent = cardDB.size + ' cards loaded from "' + handle.name + '".' +
+        (cardBackUrl ? ' Card back found.' : '') +
+        (n ? '  ' + n + ' deck' + (n === 1 ? '' : 's') + ' loaded from your decks folder.' : '');
       refreshCardGrid();
     } catch (e) {
       if (e.name !== 'AbortError') statusEl.textContent = 'Could not read folder: ' + e.message;
@@ -142,7 +163,10 @@ async function loadFolder() {
 }
 document.getElementById('fallback-input').addEventListener('change', async (e) => {
   await scanFileList(e.target.files);
-  document.getElementById('load-status').textContent = cardDB.size + ' cards loaded.' + (cardBackUrl ? ' Card back found.' : '');
+  const nDecks = importFoundDecklists();
+  document.getElementById('load-status').textContent = cardDB.size + ' cards loaded.' +
+    (cardBackUrl ? ' Card back found.' : '') +
+    (nDecks ? '  ' + nDecks + ' deck' + (nDecks === 1 ? '' : 's') + ' loaded from your decks folder.' : '');
   refreshCardGrid();
 });
 document.getElementById('btn-load-folder').addEventListener('click', loadFolder);
@@ -158,7 +182,9 @@ async function reloadRememberedFolder() {
     const perm = await rememberedFolderHandle.requestPermission({ mode: 'read' });
     if (perm !== 'granted') { statusEl.textContent = 'Permission denied — use "Choose cards folder" instead.'; return; }
     await scanDirHandle(rememberedFolderHandle);
-    statusEl.textContent = cardDB.size + ' cards loaded from "' + rememberedFolderHandle.name + '".' + (cardBackUrl ? ' Card back found.' : '');
+    const nr = importFoundDecklists();
+    statusEl.textContent = cardDB.size + ' cards loaded from "' + rememberedFolderHandle.name + '".' +
+      (cardBackUrl ? ' Card back found.' : '') + (nr ? '  ' + nr + ' deck(s) loaded.' : '');
     document.getElementById('btn-reload-folder').style.display = 'none';
     refreshCardGrid();
   } catch (e) {
@@ -175,7 +201,9 @@ document.getElementById('btn-reload-folder').addEventListener('click', reloadRem
   const perm = await handle.queryPermission({ mode: 'read' });
   if (perm === 'granted') {
     await scanDirHandle(handle);
-    document.getElementById('load-status').textContent = cardDB.size + ' cards loaded from "' + handle.name + '" (remembered).';
+    const nd = importFoundDecklists();
+    document.getElementById('load-status').textContent = cardDB.size + ' cards loaded from "' + handle.name + '" (remembered).' +
+      (nd ? '  ' + nd + ' deck' + (nd === 1 ? '' : 's') + ' loaded.' : '');
     refreshCardGrid();
   } else {
     const btn = document.getElementById('btn-reload-folder');
@@ -473,7 +501,8 @@ document.getElementById('btn-import-deck').addEventListener('click', () => {
   if (!raw.trim()) return;
   try {
     const { name, cards } = decodeDeckCode(raw);
-    currentDeck = cards.slice(0, 40);
+    const capped = enforceDeckRules(cards);
+    currentDeck = capped.deck;
     document.getElementById('deck-name').value = name;
     refreshDeckList(); refreshCardGrid();
     document.getElementById('import-code').value = '';
@@ -483,37 +512,100 @@ document.getElementById('btn-import-deck').addEventListener('click', () => {
   }
 });
 
-// ---- build a deck from pasted text like "4xAqua Surfer" ----
+// Deck rules in one place: at most 4 copies of a card NAME (not id — the same card
+// can appear in several sets), and no more than 40 cards.
+function enforceDeckRules(ids) {
+  const counts = new Map();
+  const out = [];
+  const trimmed = [];
+  for (const id of ids) {
+    if (out.length >= 40) break;
+    const nameKey = normKeyClient(displayName(id));
+    const n = counts.get(nameKey) || 0;
+    if (n >= 4) { if (!trimmed.includes(displayName(id))) trimmed.push(displayName(id)); continue; }
+    counts.set(nameKey, n + 1);
+    out.push(id);
+  }
+  return { deck: out, trimmed };
+}
+
+// A "my decks" file may hold either a share code or a plain decklist — work out which.
+function deckFromFileText(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  const looksLikeCode = !/\s/.test(t) && t.length > 24 && /^[A-Za-z0-9+/=]+$/.test(t);
+  if (looksLikeCode) {
+    try {
+      const { name, cards } = decodeDeckCode(t);
+      return { deck: enforceDeckRules(cards).deck, name };
+    } catch (e) { /* fall through to plain-text parsing */ }
+  }
+  const { deck } = parseDecklist(t);
+  return { deck, name: null };
+}
+
+// ---- decklists in plain text: "4xAqua Surfer", one per line ----
+// Used by both the paste box and any .txt files found in a "my decks" folder.
+function parseDecklist(raw) {
+  const byName = new Map();
+  for (const [id, c] of cardDB) {
+    const k = normKeyClient(c.name);
+    if (!byName.has(k)) byName.set(k, id);
+  }
+  const loose = t => normKeyClient(t).replace(/[^a-z0-9' ]/g, '').replace(/\s+/g, ' ').trim();
+  const looseMap = new Map();
+  for (const [k, id] of byName) looseMap.set(loose(k), id);
+
+  const deck = [], notFound = [], overLimit = [];
+  for (let line of (raw || '').split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+    const m = line.match(/^(\d+)\s*[xX*]?\s*(.+)$/);
+    let count = 1, name = line;
+    if (m) { count = parseInt(m[1], 10); name = m[2]; }
+    name = name.trim();
+    const id = byName.get(normKeyClient(name)) || looseMap.get(loose(name));
+    if (!id) { notFound.push(name); continue; }
+    if (count > 4) { overLimit.push(name); count = 4; }
+    for (let i = 0; i < count && deck.length < 40; i++) deck.push(id);
+  }
+  const capped = enforceDeckRules(deck);
+  capped.trimmed.forEach(n => { if (!overLimit.includes(n)) overLimit.push(n); });
+  return { deck: capped.deck, notFound, overLimit };
+}
+
+// Decklists found alongside the card images are saved automatically, so there's
+// nothing to paste or import by hand.
+function importFoundDecklists() {
+  if (!deckFilesFound.length || !cardDB.size) return 0;
+  const decks = getSavedDecks();
+  let added = 0;
+  for (const f of deckFilesFound) {
+    const parsed = deckFromFileText(f.text);
+    if (!parsed || !parsed.deck.length) continue;
+    // filename wins as the deck name; a share code's own name is the fallback
+    decks[f.name || parsed.name || 'Imported deck'] = parsed.deck;
+    added++;
+  }
+  if (added) { setSavedDecks(decks); refreshSavedDecks(); }
+  return added;
+}
+
 document.getElementById('btn-build-from-text').addEventListener('click', () => {
   const raw = document.getElementById('decklist-text').value || '';
   const status = document.getElementById('decklist-status');
   if (!raw.trim()) { status.textContent = 'Paste a list first.'; return; }
   if (!cardDB.size) { status.textContent = 'Load your cards folder first.'; return; }
-
-  // name -> id, matched loosely so punctuation and apostrophe style don't matter
-  const byName = new Map();
-  for (const [id, c] of cardDB) {
-    const k = c.name.toLowerCase().replace(/[\u2018\u2019\u02BC`]/g, "'").replace(/\s+/g, ' ').trim();
-    if (!byName.has(k)) byName.set(k, id);
+  // accept a share code pasted here too, so either format works
+  const asCode = deckFromFileText(raw);
+  if (asCode && asCode.name !== null && asCode.deck.length) {
+    currentDeck = asCode.deck;
+    if (asCode.name) document.getElementById('deck-name').value = asCode.name;
+    refreshDeckList(); refreshCardGrid();
+    status.textContent = asCode.deck.length + ' cards loaded from a share code.';
+    return;
   }
-  const loose = t => t.toLowerCase().replace(/[\u2018\u2019\u02BC`]/g, "'").replace(/[^a-z0-9' ]/g, '').replace(/\s+/g, ' ').trim();
-  const looseMap = new Map();
-  for (const [k, id] of byName) looseMap.set(loose(k), id);
-
-  const deck = [], notFound = [], overLimit = [];
-  for (let line of raw.split(/\r?\n/)) {
-    line = line.trim();
-    if (!line) continue;
-    const m = line.match(/^(\d+)\s*[xX*]?\s*(.+)$/);
-    let count = 1, name = line;
-    if (m) { count = parseInt(m[1], 10); name = m[2]; }
-    name = name.trim();
-    const id = byName.get(name.toLowerCase()) || looseMap.get(loose(name));
-    if (!id) { notFound.push(name); continue; }
-    if (count > 4) { overLimit.push(name); count = 4; }
-    for (let i = 0; i < count && deck.length < 40; i++) deck.push(id);
-  }
-
+  const { deck, notFound, overLimit } = parseDecklist(raw);
   currentDeck = deck;
   refreshDeckList(); refreshCardGrid();
   const bits = [deck.length + ' cards loaded into the editor'];
@@ -604,6 +696,27 @@ document.getElementById('btn-decline-join').addEventListener('click', () => resp
 document.getElementById('btn-table-accept-join').addEventListener('click', () => respondToJoin(true));
 document.getElementById('btn-table-decline-join').addEventListener('click', () => respondToJoin(false));
 
+// One-shot prompts are addressed to a specific seat. In practice mode both seats live
+// in this one browser, so a prompt for the seat you aren't currently viewing used to be
+// dropped on the floor — that's why a shield trigger on "the opponent" never appeared.
+// They're queued instead, and practice mode hops to that seat so you can answer.
+const seatPromptQueue = [[], []];
+function deliverPrompt(seatIndex, fn) {
+  if (seatIndex === activeSeat) { fn(); return; }
+  seatPromptQueue[seatIndex].push(fn);
+  if (isSolo) {
+    switchSeat(seatIndex);
+    flushSeatPrompts(seatIndex);
+  }
+}
+function flushSeatPrompts(seatIndex) {
+  const q = seatPromptQueue[seatIndex];
+  if (!q || !q.length) return;
+  const pending = q.splice(0, q.length);
+  // let the board repaint before a modal lands on top of it
+  setTimeout(() => pending.forEach(fn => { try { fn(); } catch (e) {} }), 120);
+}
+
 function handleSeatMessage(seatIndex, msg) {
   const seat = seats[seatIndex];
   if (msg.type === 'error') { alert(msg.message); return; }
@@ -669,31 +782,31 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'summonRejected') {
-    if (seatIndex === activeSeat) alert(msg.reason);
+    deliverPrompt(seatIndex, () => alert(msg.reason));
     return;
   }
   if (msg.type === 'searchDeckOffer') {
-    if (seatIndex === activeSeat) openSearchModal(msg.cards, msg.filter, msg.source);
+    deliverPrompt(seatIndex, () => openSearchModal(msg.cards, msg.filter, msg.source));
     return;
   }
   if (msg.type === 'revealCards') {
-    if (seatIndex === activeSeat) openRevealModal(msg.title, msg.cards);
+    deliverPrompt(seatIndex, () => openRevealModal(msg.title, msg.cards));
     return;
   }
   if (msg.type === 'manualBattle') {
-    if (seatIndex === activeSeat) openManualBattle(msg.battle);
+    deliverPrompt(seatIndex, () => openManualBattle(msg.battle));
     return;
   }
   if (msg.type === 'tapModeOffer') {
-    if (seatIndex === activeSeat) openTapModeModal(msg.key, msg.name);
+    deliverPrompt(seatIndex, () => openTapModeModal(msg.key, msg.name));
     return;
   }
   if (msg.type === 'endTurnPrompt') {
-    if (seatIndex === activeSeat) openEndTurnPrompt(msg.key, msg.name, msg.kind);
+    deliverPrompt(seatIndex, () => openEndTurnPrompt(msg.key, msg.name, msg.kind));
     return;
   }
   if (msg.type === 'shieldTriggerOffer') {
-    if (seatIndex === activeSeat) openShieldTriggerModal(msg.key, msg.id);
+    deliverPrompt(seatIndex, () => openShieldTriggerModal(msg.key, msg.id));
     return;
   }
   if (msg.type === 'state') {
@@ -715,6 +828,7 @@ function showSeatSwitcher() {
 function switchSeat(seatIndex) {
   activeSeat = seatIndex;
   clearSelection();
+  flushSeatPrompts(seatIndex);
   lastActiveTurn = null; // avoid a spurious "it's your turn" pulse just from switching view
   if (seats[seatIndex].state) renderState(seats[seatIndex].state);
 }
@@ -1738,8 +1852,18 @@ function renderState(state) {
     (state.surrenderBy !== null && state.surrenderBy !== meIdx) ? 'flex' : 'none';
   if (state.gameOver) {
     const g = state.gameOver;
-    document.getElementById('game-over-title').textContent =
-      g.reason === 'surrender' ? (g.by === meIdx ? 'You surrendered.' : 'Opponent surrendered — you win!') : 'Game ended by agreement.';
+    const oppName = (state.names && state.names[oppIdx]) ? state.names[oppIdx] : 'Your opponent';
+    let title;
+    if (g.reason === 'shields') {
+      title = g.by === meIdx
+        ? '\u{1F3C6} You win! Your final attack got through with no shields left to stop it.'
+        : oppName + ' wins — your shields were gone and the attack connected.';
+    } else if (g.reason === 'surrender') {
+      title = g.by === meIdx ? 'You surrendered.' : oppName + ' surrendered — you win!';
+    } else {
+      title = 'Game ended by agreement.';
+    }
+    document.getElementById('game-over-title').textContent = title;
     document.getElementById('rematch-status').textContent = state.rematch[oppIdx] ? 'Opponent wants a rematch — click Rematch to accept!' : '';
     document.getElementById('game-over-modal').style.display = 'flex';
   } else {
