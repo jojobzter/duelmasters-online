@@ -364,6 +364,34 @@ input {
 .shield-trigger-preview img { width: auto; height: auto; max-width: min(70vw, 340px); max-height: 46vh; border-radius: 8px; display: block; }
 
 .effect-banner { background: #4a2a5a; border-color: #7a4a9a; }
+.select-bar {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  background: rgba(20,32,48,0.96); border: 1px solid #4a7fb0; border-radius: 10px;
+  padding: 10px 16px; z-index: 1050; display: flex; align-items: center; gap: 12px;
+  font-size: 0.95em; font-weight: 600; color: #dceaf7; max-width: 92vw;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.6);
+}
+.select-bar button { margin: 0; padding: 6px 12px; font-size: 0.9em; }
+.select-bar .go-btn { background: #2a7a4a; }
+
+/* a card you may click right now */
+.card.selectable-target {
+  outline: 3px solid #4be0e0; outline-offset: 2px; cursor: pointer;
+  animation: selectable-pulse 1.15s ease-in-out infinite;
+}
+@keyframes selectable-pulse {
+  0%,100% { box-shadow: 0 0 4px rgba(75,224,224,.45); }
+  50%     { box-shadow: 0 0 20px rgba(75,224,224,.95); }
+}
+.card.chosen-target { outline: 4px solid #e04b4b; outline-offset: 2px; box-shadow: 0 0 18px rgba(224,75,75,.9); cursor: pointer; }
+
+/* a card the engine just moved — brief red flash so fast effects are readable */
+.card.just-moved, .card-thumb.just-moved { animation: just-moved-flash 0.5s ease-in-out 3; }
+@keyframes just-moved-flash {
+  0%,100% { outline: 3px solid rgba(255,70,70,0); box-shadow: none; }
+  50%     { outline: 3px solid #ff4646; box-shadow: 0 0 18px rgba(255,70,70,.85); }
+}
+
 .card.breakable { outline: 3px solid #ff6b3d; outline-offset: 2px; cursor: crosshair; animation: breakable-pulse 1s ease-in-out infinite; }
 @keyframes breakable-pulse { 0%,100% { box-shadow: 0 0 0 rgba(255,107,61,0); } 50% { box-shadow: 0 0 18px rgba(255,107,61,.8); } }
 .effect-banner.breaking { background: #6a3a1a; border-color: #d07a30; font-weight: bold; }

@@ -4,6 +4,22 @@ let cardBackUrl = null;      // from a "card back" folder, if present
 const IMG_EXT = /\.(png|jpg|jpeg|webp|gif)$/i;
 function stripExt(id) { return typeof id === 'string' ? id.replace(IMG_EXT, '') : id; }
 function cardBaseName(id) { return id ? (id.split('/').pop() || id) : ''; }
+// Filenames often can't hold an apostrophe, so it arrives as '_'. Normalising it here
+// keeps both the display name and the ability lookup working.
+function normKeyClient(name) {
+  return (name || '').toLowerCase()
+    .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
+    .replace(/_/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// The card sheet holds the correct spelling; the filename is only a fallback.
+function displayName(id) {
+  const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
+  if (meta && meta.name) return meta.name;
+  const c = cardDB.get(id);
+  return c ? c.name : cardBaseName(id);
+}
 const CARD_BACK_FOLDER = /^card ?back$/i;
 
 function idbGet(key) {
@@ -193,7 +209,7 @@ async function loadCardMetaDB() {
     cardMetaDB = new Map();
     const civSet = new Set(), typeSet = new Set();
     arr.forEach(c => {
-      cardMetaDB.set(c.name.toLowerCase(), c);
+      cardMetaDB.set(normKeyClient(c.name), c);
       (c.civs || []).forEach(v => civSet.add(v));
       if (c.type) typeSet.add(c.type);
     });
@@ -290,10 +306,9 @@ function refreshDeckList() {
   const counts = new Map();
   for (const id of currentDeck) counts.set(id, (counts.get(id) || 0) + 1);
   for (const [id, n] of [...counts.entries()].sort()) {
-    const c = cardDB.get(id) || { name: id };
     const row = document.createElement('div');
     row.className = 'deck-list-item';
-    row.innerHTML = `<span>${n}x ${c.name}</span>`;
+    row.innerHTML = `<span>${n}x ${displayName(id)}</span>`;
     const btn = document.createElement('button');
     btn.textContent = '-';
     btn.addEventListener('click', () => {
@@ -350,7 +365,7 @@ function openDeckViewModal(name, cards) {
     div.className = 'card-thumb';
     const c = cardDB.get(id);
     div.innerHTML = cardImgHtml(id) + (n > 1 ? `<div class="count-badge">${n}</div>` : '') +
-      `<div class="name">${c ? c.name : id}</div>`;
+      `<div class="name">${displayName(id)}</div>`;
     makeMagnifiable(div, id);
     grid.appendChild(div);
   });
@@ -1005,7 +1020,7 @@ function openSearchModal(entries, filter, source) {
     const c = cardDB.get(id);
     div.innerHTML = cardImgHtml(id) +
       '<div class="zoom-btn" title="Preview">\u{1F50D}</div>' +
-      '<div class="name">' + (c ? c.name : cardBaseName(id)) + '</div>' +
+      '<div class="name">' + displayName(id) + '</div>' +
       (allowed ? '<button class="take-btn">Take</button>' : '<div class="hint" style="font-size:.7em">not eligible</div>');
     div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
     const takeBtn = div.querySelector('.take-btn');
@@ -1022,17 +1037,17 @@ function openSearchModal(entries, filter, source) {
 }
 
 function powerById(id) {
-  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   return (meta && meta.power != null) ? meta.power : null;
 }
 function isBlockerById(id) {
-  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   return !!(meta && meta.blocker);
 }
 
 // card type comes from the shared card database loaded at startup
 function isSpellById(id) {
-  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   return !!(meta && meta.type && /spell/i.test(meta.type));
 }
 
@@ -1246,8 +1261,7 @@ function openTargetPickModal(eff, me, opp) {
     d.addEventListener('click', () => {
       if (eff.maxPower != null && powerById(c.id) == null) {
         // power isn't in the spreadsheet yet, so the player has to vouch for it
-        if (!confirm('Is ' + (cardDB.get(c.id) ? cardDB.get(c.id).name : cardBaseName(c.id)) +
-                     ' a creature with power ' + eff.maxPower + ' or less?')) return;
+        if (!confirm('Is ' + displayName(c.id) + ' a creature with power ' + eff.maxPower + ' or less?')) return;
       }
       sendMsg({ type: 'effectTarget', effectId: eff.id, key: c.key });
       targetPickEffectId = null;
@@ -1267,7 +1281,7 @@ document.getElementById('btn-target-pick-skip').addEventListener('click', () => 
 let attackChoiceKey = null;      // creature we're declaring an attack with
 let manualBattleData = null;
 
-function cardMetaFor(id) { return cardMetaDB.get(cardBaseName(id).toLowerCase()) || {}; }
+function cardMetaFor(id) { return cardMetaDB.get(normKeyClient(cardBaseName(id))) || {}; }
 function isSummoningSick(state, card) {
   if (!state) return false;
   if (cardMetaFor(card.id).speedAttacker) return false;
@@ -1287,7 +1301,7 @@ function blockerOnlyC(id) { return restrictionFor(id).includes('blocker only'); 
 function openAttackTargetModal(card, state) {
   attackChoiceKey = card.key;
   const me = state.players[state.you], opp = state.players[state.you === 0 ? 1 : 0];
-  const name = (cardDB.get(card.id) || {}).name || cardBaseName(card.id);
+  const name = displayName(card.id);
   document.getElementById('attack-target-title').textContent = 'Attack with ' + name;
   const legal = opp.battlezone.filter(c => {
     if (!c.tapped && !canAttackUntappedC(card.id)) return false;
@@ -1333,7 +1347,7 @@ function openBlockModal(state) {
   const cb = state.combat;
   const me = state.players[state.you], opp = state.players[state.you === 0 ? 1 : 0];
   const atk = opp.battlezone.find(c => c.key === cb.attackerKey);
-  const atkName = atk ? ((cardDB.get(atk.id) || {}).name || cardBaseName(atk.id)) : 'A creature';
+  const atkName = atk ? displayName(atk.id) : 'A creature';
   const lightStealth = atk && cardMetaFor(atk.id).lightStealth && me.mana.some(m => (cardMetaFor(m.id).civs || []).includes('Light'));
   const targetTxt = cb.target.type === 'shield' ? 'your shields' : 'one of your creatures';
   document.getElementById('block-sub').textContent =
@@ -1493,6 +1507,184 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ---- on-table selection: valid cards glow and are clicked directly, so choosing a
+// target never covers the board with a dialog ----
+let attackMode = null;         // {key} while choosing what a creature attacks
+let multiTableChosen = new Set();
+
+function selectableKeysFor(state, me, opp) {
+  // returns { keys:Set, onClick(key), banner:string, showConfirm:bool, showSkip:bool }
+  if (attackMode) {
+    const card = me.battlezone.find(c => c.key === attackMode.key);
+    if (!card) { attackMode = null; return null; }
+    const keys = new Set();
+    opp.battlezone.forEach(c => {
+      if (!c.tapped && !canAttackUntappedC(card.id)) return;
+      if (blockerOnlyC(card.id) && !isBlockerById(c.id)) return;
+      keys.add(c.key);
+    });
+    const dcActive = !!me.diamondCutterActive;
+    const canShields = (canAttackShieldsC(card.id) || dcActive) && opp.shields.length;
+    if (canShields) opp.shields.forEach(sh => keys.add(sh.key));
+    return {
+      keys,
+      onClick: key => {
+        const isShield = opp.shields.some(sh => sh.key === key);
+        sendMsg({ type: 'declareAttack', key: attackMode.key,
+                  target: isShield ? { type: 'shield' } : { type: 'creature', key } });
+        attackMode = null;
+      },
+      banner: 'Attacking with ' + displayName(card.id) + ' — click an enemy creature' + (canShields ? ' or shield' : '') + ' to attack.',
+      showSkip: true, skipLabel: 'Cancel attack', onSkip: () => { attackMode = null; renderState(state); }
+    };
+  }
+
+  const cb = state.combat;
+  if (cb && cb.phase === 'blocking' && cb.attackerIdx !== state.you) {
+    const atk = opp.battlezone.find(c => c.key === cb.attackerKey);
+    const keys = new Set(me.battlezone.filter(c => !c.tapped && isBlockerById(c.id)).map(c => c.key));
+    return {
+      keys,
+      onClick: key => sendMsg({ type: 'declareBlock', blockerKey: key }),
+      banner: (atk ? displayName(atk.id) : 'A creature') + ' is attacking — click one of your blockers, or let it through.',
+      showSkip: true, skipLabel: "Don't block", onSkip: () => sendMsg({ type: 'declareBlock' })
+    };
+  }
+
+  if (cb && cb.phase === 'breaking' && cb.attackerIdx === state.you) {
+    return {
+      keys: new Set(opp.shields.map(sh => sh.key)),
+      onClick: key => sendMsg({ type: 'breakShield', key }),
+      banner: 'Break ' + cb.shieldsToBreak + ' shield' + (cb.shieldsToBreak === 1 ? '' : 's') + " — click your opponent's shields.",
+      showSkip: true, skipLabel: 'Stop breaking', onSkip: () => sendMsg({ type: 'cancelCombat' })
+    };
+  }
+
+  const eff = (me.pendingTargets || [])[0];
+  if (eff && eff.zone !== 'ownGrave') {
+    const pool = {
+      oppBattle: opp.battlezone, ownBattle: me.battlezone, ownHand: me.hand,
+      ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields,
+      anyBattle: me.battlezone.concat(opp.battlezone)
+    }[eff.zone] || [];
+    let list = pool.filter(c => c.key !== eff.sourceKey);
+    if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
+    if (eff.filter === 'spell') list = list.filter(c => isSpellById(c.id));
+    if (eff.filter === 'creature') list = list.filter(c => !isSpellById(c.id));
+    if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test(cardMetaFor(c.id).type || ''));
+    if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
+    if (eff.maxPower != null) list = list.filter(c => { const p = powerById(c.id); return p == null || p <= eff.maxPower; });
+    // Petrova can't be chosen by the opponent's effects
+    list = list.filter(c => !(opp.battlezone.includes(c) && normKeyClient(cardBaseName(c.id)) === 'petrova, channeler of suns'));
+    return {
+      keys: new Set(list.map(c => c.key)),
+      onClick: key => {
+        if (eff.maxPower != null && powerById((list.find(c => c.key === key) || {}).id) == null) {
+          if (!confirm('Is this a creature with power ' + eff.maxPower + ' or less?')) return;
+        }
+        sendMsg({ type: 'effectTarget', effectId: eff.id, key });
+      },
+      banner: eff.source + ' — ' + zonePrompt(eff),
+      showSkip: true, skipLabel: 'Skip', onSkip: () => sendMsg({ type: 'effectTargetSkip', effectId: eff.id })
+    };
+  }
+
+  const pm = me.pendingMulti;
+  if (pm && pm.zone !== 'ownGrave') {
+    return {
+      keys: new Set(pm.keys),
+      multi: true,
+      onClick: key => {
+        if (multiTableChosen.has(key)) multiTableChosen.delete(key);
+        else { if (pm.max && multiTableChosen.size >= pm.max) return; multiTableChosen.add(key); }
+        renderState(state);
+      },
+      banner: pm.source + ' — ' + (pm.prompt || 'Choose cards') +
+              '  (' + multiTableChosen.size + (pm.max && pm.max < 90 ? '/' + pm.max : '') + ' chosen)',
+      showConfirm: true,
+      onConfirm: () => {
+        sendMsg({ type: 'effectMultiResolve', effectId: pm.id, keys: [...multiTableChosen] });
+        multiTableChosen = new Set();
+      }
+    };
+  }
+  return null;
+}
+
+let activeSelection = null;
+function applySelectableHighlights(state, me, opp) {
+  activeSelection = selectableKeysFor(state, me, opp);
+  document.querySelectorAll('.card.selectable-target, .card.chosen-target')
+    .forEach(el => el.classList.remove('selectable-target', 'chosen-target'));
+  const bar = document.getElementById('select-bar');
+  if (!activeSelection || !activeSelection.keys.size) {
+    if (!activeSelection) bar.style.display = 'none';
+    else { // prompt exists but nothing valid to click
+      document.getElementById('select-bar-text').textContent = activeSelection.banner + ' (nothing valid)';
+      bar.style.display = 'flex';
+    }
+    if (activeSelection) wireSelectBarButtons();
+    return;
+  }
+  activeSelection.keys.forEach(key => {
+    document.querySelectorAll('.card[data-key="' + key + '"]').forEach(el => {
+      el.classList.add(multiTableChosen.has(key) ? 'chosen-target' : 'selectable-target');
+      el.onclick = (e) => {
+        if (e.ctrlKey || e.metaKey) return;    // ctrl+click still means "point at this"
+        e.stopPropagation();
+        activeSelection.onClick(key);
+      };
+    });
+  });
+  document.getElementById('select-bar-text').textContent = activeSelection.banner;
+  bar.style.display = 'flex';
+  wireSelectBarButtons();
+}
+function wireSelectBarButtons() {
+  const sk = document.getElementById('btn-select-skip');
+  const cf = document.getElementById('btn-select-confirm');
+  sk.style.display = (activeSelection && activeSelection.showSkip) ? 'inline-block' : 'none';
+  cf.style.display = (activeSelection && activeSelection.showConfirm) ? 'inline-block' : 'none';
+  if (activeSelection) {
+    sk.textContent = activeSelection.skipLabel || 'Skip';
+    sk.onclick = () => { if (activeSelection.onSkip) activeSelection.onSkip(); };
+    cf.onclick = () => { if (activeSelection.onConfirm) activeSelection.onConfirm(); };
+  }
+}
+
+// ---- highlight cards the engine just moved ----
+// Zone membership is diffed between state updates, so any card the engine relocated
+// (drawn, discarded, sent to mana, broken from a shield) flashes without the server
+// needing to announce each move.
+let prevZoneByKey = null;
+function zoneMapOf(state) {
+  const map = {};
+  const add = (list, zone) => (list || []).forEach(c => { if (c && c.key) map[c.key] = zone; });
+  state.players.forEach((p, i) => {
+    add(p.hand, 'hand' + i); add(p.mana, 'mana' + i); add(p.battlezone, 'bz' + i);
+    add(p.shields, 'sh' + i); add(p.graveyard, 'gy' + i);
+  });
+  return map;
+}
+function flashMovedCards(state) {
+  const now = zoneMapOf(state);
+  if (prevZoneByKey) {
+    const moved = [];
+    for (const key of Object.keys(now)) {
+      if (prevZoneByKey[key] !== now[key]) moved.push(key);   // new card, or changed zone
+    }
+    for (const key of moved) {
+      document.querySelectorAll('[data-key="' + key + '"]').forEach(el => {
+        el.classList.remove('just-moved');
+        void el.offsetWidth;                                   // restart the animation
+        el.classList.add('just-moved');
+        setTimeout(() => el.classList.remove('just-moved'), 1600);
+      });
+    }
+  }
+  prevZoneByKey = now;
+}
+
 // ====================== Table rendering ======================
 function renderState(state) {
   const meIdx = state.you;
@@ -1632,7 +1824,7 @@ function renderState(state) {
   const effBanner = document.getElementById('effect-banner');
   const myTargets = me.pendingTargets || [];
   const manaDiscards = me.pendingManaDiscards || 0;
-  if (myTargets.length) {
+  if (myTargets.length && myTargets[0].zone === 'ownGrave') {
     const t = myTargets[0];
     const verb = t.action === 'returnToHand' ? "return it to its owner's hand"
                : t.action === 'tap' ? 'tap it'
@@ -1659,10 +1851,13 @@ function renderState(state) {
   }
 
   // ---- Solar Ray style effects open a picker automatically ----
+  // Cards sitting on the table are chosen by clicking them; only the graveyard pile
+  // (which isn't laid out on the table) still needs a picker window.
   const pickEff = myTargets[0];
-  if (pickEff && targetPickEffectId !== pickEff.id) {
+  const needsModal = pickEff && pickEff.zone === 'ownGrave';
+  if (needsModal && targetPickEffectId !== pickEff.id) {
     openTargetPickModal(pickEff, me, opp);
-  } else if (!pickEff && targetPickEffectId) {
+  } else if (!needsModal && targetPickEffectId) {
     targetPickEffectId = null;
     document.getElementById('target-pick-modal').style.display = 'none';
   }
@@ -1670,21 +1865,8 @@ function renderState(state) {
   // ---- combat: defender's block window, attacker's shield breaking ----
   const cb = state.combat;
   const blockModal = document.getElementById('block-modal');
-  if (cb && cb.phase === 'blocking' && cb.attackerIdx !== meIdx) {
-    if (blockShownFor !== cb.attackerKey) { blockShownFor = cb.attackerKey; openBlockModal(state); }
-  } else {
-    blockShownFor = null;
-    blockModal.style.display = 'none';
-  }
-  const breaking = !!(cb && cb.phase === 'breaking' && cb.attackerIdx === meIdx);
-  document.getElementById('effect-banner').classList.toggle('breaking', breaking);
-  if (breaking) {
-    const eb = document.getElementById('effect-banner');
-    document.getElementById('effect-banner-text').textContent =
-      'Choose ' + cb.shieldsToBreak + ' shield' + (cb.shieldsToBreak === 1 ? '' : 's') + " to break — click your opponent's shields.";
-    document.getElementById('btn-skip-effect').style.display = 'inline-block';
-    eb.style.display = 'flex';
-  }
+  blockModal.style.display = 'none';   // blocking is chosen on the table now
+  // shield breaking is handled by the select bar
 
   // ---- Miraculous Truce: name a civilization ----
   if (me.pendingTruce && !truceAsked) {
@@ -1698,9 +1880,10 @@ function renderState(state) {
   }
 
   // ---- mass effects needing manual confirmation (Searing Wave) ----
-  if (me.pendingMulti && multiPickId !== me.pendingMulti.id) {
+  const pmNeedsModal = me.pendingMulti && me.pendingMulti.zone === 'ownGrave';
+  if (pmNeedsModal && multiPickId !== me.pendingMulti.id) {
     openMultiPickModal(me.pendingMulti, me, opp);
-  } else if (!me.pendingMulti && multiPickId) {
+  } else if (!pmNeedsModal && multiPickId) {
     multiPickId = null;
     document.getElementById('multi-pick-modal').style.display = 'none';
   }
@@ -1752,6 +1935,8 @@ function renderState(state) {
   ti.className = 'turn-indicator' + (state.dealt[oppIdx] ? ' my-turn' : '');
 
   applySelectionClasses();
+  applySelectableHighlights(state, me, opp);
+  flashMovedCards(state);
   window.__lastMe = me; window.__lastOpp = opp;
 }
 
@@ -1953,7 +2138,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
         else if (st && st.combat) attackBlockedBy = 'An attack is already being resolved.';
         else if (isSummoningSick(st, c) && !dcActive) attackBlockedBy = 'Summoning sickness — it can\'t attack the turn it arrived.';
         if (!c.tapped) {
-          items.push(['\u2694 Attack', () => openAttackTargetModal(c, st), attackBlockedBy]);
+          items.push(['\u2694 Attack', () => { attackMode = { key: c.key }; renderState(st); }, attackBlockedBy]);
           if (meta.tapAbility) items.push(['Use tap ability', () => sendMsg({ type: 'battleTap', key: c.key, mode: 'ability' })]);
         }
         items.push([c.tapped ? 'Untap' : 'Tap (no attack)', () => sendMsg({ type: 'battleTap', key: c.key })]);
