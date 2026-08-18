@@ -93,6 +93,7 @@ function loadCardDatabase(filePath) {
 function normalizeCardKey(name) {
   return name.toLowerCase()
     .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
+    .replace(/_/g, "'")
     .replace(/[\u2013\u2014]/g, '-')
     .replace(/\s+/g, ' ')
     .trim();
@@ -473,6 +474,10 @@ function resolveSpellCard(me, eff, logs) {
   if (me.pendingTargets.some(t => t.spellKey === eff.spellKey)) return;
   const spent = removeBattleCard(me, eff.spellKey);
   if (!spent) return;
+  if (!isSpellCard(spent.id)) {           // a creature stays on the battlefield
+    me.battlezone.push(spent);
+    return;
+  }
   if (SPELL_RESOLVES_TO_MANA.has(cardLabel(spent.id).toLowerCase())) {
     const slot = manaSlot(me);
     me.mana.push({ id: spent.id, key: spent.key, tapped: false, x: slot.x, y: slot.y });
@@ -519,7 +524,10 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     const base = {
       id: newKey(), zone: targetEff.zone, action: targetEff.action,
       filter: targetEff.filter || null, maxPower: targetEff.maxPower || null,
-      requireBlocker: !!targetEff.requireBlocker, source: cardLabel(cardId), spellKey: cardKey
+      requireBlocker: !!targetEff.requireBlocker, source: cardLabel(cardId),
+      // only a SPELL leaves the battlezone once its effect resolves
+      spellKey: isSpellCard(cardId) ? cardKey : null,
+      sourceKey: cardKey            // never a legal target for its own effect
     };
     if (targetEff.byOpponent) {
       // Comet Missile makes the OPPONENT destroy one of their own creatures. The
@@ -533,7 +541,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     if (targetEff.thenShieldToGrave && me.shields.length) {
       me.pendingTargets.push({
         id: newKey(), zone: 'ownShield', action: 'toGrave', filter: null,
-        source: cardLabel(cardId) + ' (shield)', spellKey: cardKey
+        source: cardLabel(cardId) + ' (shield)', spellKey: isSpellCard(cardId) ? cardKey : null
       });
       defer = true;
     }
@@ -584,7 +592,8 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     }
     if (keys.length) {
       me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: multiEff.zone, action: multiEff.action,
-                          max: multiEff.max, keys, prompt: multiEff.prompt, spellKey: cardKey };
+                          max: multiEff.max, keys: keys.filter(k => k !== cardKey),
+                          prompt: multiEff.prompt, spellKey: isSpellCard(cardId) ? cardKey : null };
       defer = true;
     }
   }
@@ -655,7 +664,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
 
   // Miraculous Truce: name a civilization that can't attack you until your next turn
   if (name === 'miraculous truce') {
-    me.pendingTruce = { id: newKey(), source: cardLabel(cardId), spellKey: cardKey };
+    me.pendingTruce = { id: newKey(), source: cardLabel(cardId), spellKey: isSpellCard(cardId) ? cardKey : null };
     defer = true;
   }
 
@@ -695,11 +704,11 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     const darks  = me.battlezone.filter(c => c.key !== cardKey && civsOf(c.id).includes('Darkness')).length;
     for (let n = 0; n < lights; n++) {
       me.pendingTargets.push({ id: newKey(), zone: 'oppMana', action: 'returnToHand', filter: null,
-                               source: cardLabel(cardId) + ' (Light)', spellKey: cardKey });
+                               source: cardLabel(cardId) + ' (Light)', spellKey: isSpellCard(cardId) ? cardKey : null, sourceKey: cardKey });
     }
     for (let n = 0; n < darks; n++) {
       me.pendingTargets.push({ id: newKey(), zone: 'oppBattle', action: 'returnToHand', filter: null,
-                               source: cardLabel(cardId) + ' (Darkness)', spellKey: cardKey });
+                               source: cardLabel(cardId) + ' (Darkness)', spellKey: isSpellCard(cardId) ? cardKey : null, sourceKey: cardKey });
     }
     if (lights || darks) defer = true;
     extraLog.push('cast ' + cardLabel(cardId) + ' with ' + lights + ' light and ' + darks + ' darkness creature' + ((lights + darks) === 1 ? '' : 's') + ' in the battle zone.');
@@ -1621,6 +1630,10 @@ wss.on('connection', (ws) => {
           const z = zones[eff.zone];
           if (!z) return;
           owner = z.owner; list = z.list;
+        }
+        if (eff.sourceKey && msg.key === eff.sourceKey) {
+          send(ws, { type: 'summonRejected', reason: eff.source + " can't choose itself." });
+          return;
         }
         const ci = list.findIndex(c => c.key === msg.key);
         if (ci === -1) return;
