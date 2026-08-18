@@ -45,25 +45,40 @@ function loadCardDatabase(filePath) {
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet);
     const db = new Map();
+    const yes = v => /^y(es)?$/i.test((v === undefined || v === null ? '' : v).toString().trim());
+    const txt = v => (v === undefined || v === null) ? null : (v.toString().trim() || null);
+    const num = v => {
+      const n = parseInt((v === undefined || v === null ? '' : v).toString().replace(/[^0-9-]/g, ''), 10);
+      return Number.isFinite(n) ? n : null;
+    };
     for (const row of rows) {
       const name = (row['Name'] || '').toString().trim();
       if (!name) continue;
-      const key = name.toLowerCase();
-      if (db.has(key)) continue; // first occurrence wins if the sheet has conflicting duplicate rows
-      const costRaw = row['Mana Cost'];
-      const costNum = Number(costRaw);
-      const cost = (costRaw === undefined || costRaw === null || costRaw === '' || !Number.isFinite(costNum)) ? null : costNum;
-      const type = (row['Type'] || '').toString().trim() || null;
+      const key = normalizeCardKey(name);
       const civRaw = (row['Civilization'] || '').toString().trim();
-      const civs = civRaw ? civRaw.split('/').map(s => s.trim()).filter(Boolean) : [];
-      // Power may carry a trailing '+' (e.g. "1000+"); null means "not filled in yet",
-      // which the effects treat as unknown rather than assuming a value.
-      const powRaw = (row['Power'] === undefined || row['Power'] === null) ? '' : row['Power'].toString().trim();
-      const powNum = parseInt(powRaw.replace(/[^0-9]/g, ''), 10);
-      const power = Number.isFinite(powNum) ? powNum : null;
-      const blocker = /^y(es)?$/i.test((row['Blocker (Yes/No)'] || '').toString().trim());
-      const race = (row['Race'] || '').toString().trim() || null;
-      db.set(key, { name, cost, type, civs, power, blocker, race });
+      const entry = {
+        name,
+        cost: num(row['Mana Cost']),
+        type: txt(row['Type']),
+        civs: civRaw ? civRaw.split('/').map(x => x.trim()).filter(Boolean) : [],
+        power: num(row['Power']),
+        race: txt(row['Race']),
+        blocker: yes(row['Blocker (Yes/No)']),
+        shieldTrigger: yes(row['Shield Trigger (Yes/No)']),
+        speedAttacker: yes(row['Speed Attacker (yes/No)']),
+        powerAttacker: num(row['Power attacker']),
+        slayer: yes(row['Slayer']),
+        tapAbility: yes(row['Tap Ability']),
+        turboRush: yes(row['Turbo Rush']),
+        doubleBreaker: yes(row['Double Breaker']),
+        tripleBreaker: yes(row['Triple Breaker']),
+        attackRestriction: (txt(row['Attack restriction']) || 'none').toLowerCase(),
+        lightStealth: yes(row['Light Stealth'])
+      };
+      // Duplicate rows (reprints) are merged field by field, keeping whichever row
+      // actually has data — a blank reprint row must never blank out a filled one.
+      const existing = db.get(key);
+      db.set(key, existing ? mergeCardEntries(existing, entry) : entry);
     }
     CARD_DB = db;
     console.log('Card database (re)loaded from', filePath, '-', CARD_DB.size, 'unique card names.');
@@ -71,6 +86,28 @@ function loadCardDatabase(filePath) {
     console.warn('Card database not loaded (' + filePath + '):', e.message);
     CARD_DB = new Map();
   }
+}
+
+// Card names are matched on this form, so curly vs straight apostrophes and stray
+// spacing can never stop a card's abilities from firing.
+function normalizeCardKey(name) {
+  return name.toLowerCase()
+    .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mergeCardEntries(a, b) {
+  const out = Object.assign({}, a);
+  for (const k of Object.keys(b)) {
+    const av = a[k], bv = b[k];
+    if (bv === null || bv === undefined || bv === false) continue;      // b adds nothing
+    if (av === null || av === undefined || av === false) { out[k] = bv; continue; }
+    if (Array.isArray(av) && Array.isArray(bv)) { out[k] = av.length >= bv.length ? av : bv; continue; }
+    if (k === 'attackRestriction' && av === 'none' && bv !== 'none') { out[k] = bv; continue; }
+  }
+  return out;
 }
 
 function ensureCardDatabaseFresh() {
@@ -233,6 +270,132 @@ function battleCardToGrave(owner, card) {
   }
   owner.graveyard.push({ id: card.id, key: card.key });
   return 'graveyard';
+}
+
+// ---------- power & combat helpers ----------
+function metaOf(id) { return cardMeta(id) || {}; }
+function raceOf(id) { return (metaOf(id).race || '').toLowerCase(); }
+function hasNamed(player, normName) {
+  return player.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === normName);
+}
+function namedCard(player, normName) {
+  return player.battlezone.find(c => normalizeCardKey(cardLabel(c.id)) === normName) || null;
+}
+
+// Effective power, including every static buff currently applying to this creature.
+// `attacking` adds bonuses that only count while it is the one attacking.
+function effectivePower(state, ownerIdx, card, attacking) {
+  const owner = state.players[ownerIdx];
+  const m = metaOf(card.id);
+  if (m.power == null) return null;              // unknown — caller must ask the players
+  let p = m.power;
+  const selfKey = normalizeCardKey(cardLabel(card.id));
+
+  if (attacking && m.powerAttacker) p += m.powerAttacker;
+
+  // Barkwhip, the Smasher: while TAPPED, your other Beast Folk get +2000
+  const bark = namedCard(owner, 'barkwhip, the smasher');
+  if (bark && bark.tapped && bark.key !== card.key && raceOf(card.id).includes('beast folk')) p += 2000;
+
+  // Pala Olesis: during the OPPONENT's turn, your other creatures get +2000
+  const pala = namedCard(owner, 'pala olesis, morning guardian');
+  if (pala && pala.key !== card.key && state.activeTurn != null && state.activeTurn !== ownerIdx) p += 2000;
+
+  // Quixotic Hero Swine Snout: +3000 per creature that entered play this turn
+  if (selfKey === 'quixotic hero swine snout') p += 3000 * (state.creaturesEnteredThisTurn || 0);
+
+  // Super Necrodragon Abzo Dolba: +2000 per creature in your graveyard
+  if (selfKey === 'super necrodragon abzo dolba') {
+    p += 2000 * owner.graveyard.filter(g => !isSpellCard(g.id)).length;
+  }
+
+  // Bolshack Dragon: while ATTACKING, +1000 per fire card in your graveyard
+  if (attacking && selfKey === 'bolshack dragon') {
+    p += 1000 * owner.graveyard.filter(g => civsOf(g.id).includes('Fire')).length;
+  }
+
+  // Magmadragon Ogrist Vhal: +3000 per card in your hand
+  if (selfKey === 'magmadragon ogrist vhal') p += 3000 * owner.hand.length;
+
+  // Rikabu Flipper: +2000 per spell you cast this turn
+  if (selfKey === 'rikabu flipper, explosive artisan') p += 2000 * (owner.spellsCastThisTurn || 0);
+
+  return p;
+}
+
+// How many shields this creature may break, recalculated live because Ogrist Vhal's
+// breaker count depends on its current power rather than a fixed flag.
+function breakerCount(state, ownerIdx, card) {
+  const m = metaOf(card.id);
+  if (normalizeCardKey(cardLabel(card.id)) === 'magmadragon ogrist vhal') {
+    const p = effectivePower(state, ownerIdx, card, true) || 0;
+    if (p >= 15000) return 3;
+    if (p >= 6000) return 2;
+    return 1;
+  }
+  if (m.tripleBreaker) return 3;
+  if (m.doubleBreaker) return 2;
+  return 1;
+}
+
+function restrictionOf(id) { return (metaOf(id).attackRestriction || 'none').toLowerCase(); }
+function canAttackAtAll(id) { return !restrictionOf(id).includes('cannot attack'); }
+function canAttackShields(id) {
+  const r = restrictionOf(id);
+  return !r.includes('cannot attack') && !r.includes('not players') && !r.includes('blocker only');
+}
+function canAttackUntapped(id) { return restrictionOf(id).includes('untapped ok'); }
+function mustAttackIfAble(id) { return restrictionOf(id).includes('if able'); }
+function blockerOnly(id) { return restrictionOf(id).includes('blocker only'); }
+
+// Summoning sickness, unless the creature has Speed Attacker or Turbo Rush is active.
+function hasSummoningSickness(state, ownerIdx, card) {
+  const owner = state.players[ownerIdx];
+  if (metaOf(card.id).speedAttacker) return false;
+  if (owner.turboRushActive) return false;
+  return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
+}
+
+// Resolves a battle between two creatures. Returns {needsManual} when a power value
+// is missing from the sheet, in which case the players decide the winner themselves.
+function resolveBattle(state, aIdx, aCard, dIdx, dCard, logs) {
+  const A = state.players[aIdx], D = state.players[dIdx];
+  const ap = effectivePower(state, aIdx, aCard, true);    // attacker keeps Power Attacker
+  const dp = effectivePower(state, dIdx, dCard, false);   // defender never gets it
+  const aName = cardLabel(aCard.id), dName = cardLabel(dCard.id);
+
+  if (ap == null || dp == null) {
+    logs.push('battle between ' + aName + ' and ' + dName + ' needs a manual result (power not in the card sheet).');
+    return { needsManual: { aIdx, aKey: aCard.key, aName, dIdx, dKey: dCard.key, dName } };
+  }
+
+  const aSlayer = !!metaOf(aCard.id).slayer, dSlayer = !!metaOf(dCard.id).slayer;
+  const losers = [];
+  if (ap > dp) losers.push([D, dCard, dIdx]);
+  else if (dp > ap) losers.push([A, aCard, aIdx]);
+  else { losers.push([A, aCard, aIdx]); losers.push([D, dCard, dIdx]); }   // tie destroys both
+
+  // Slayer drags the other creature down with it whatever the numbers said
+  if (aSlayer && !losers.some(l => l[1].key === dCard.key)) losers.push([D, dCard, dIdx]);
+  if (dSlayer && !losers.some(l => l[1].key === aCard.key)) losers.push([A, aCard, aIdx]);
+
+  // "when this creature wins a battle, destroy it" (Bloody Squito, Bone Spider)
+  const SELF_DESTRUCT_ON_WIN = new Set(['bloody squito', 'bone spider']);
+  const winner = losers.some(l => l[1].key === aCard.key) ? null : aCard;
+  const loserD = losers.some(l => l[1].key === dCard.key);
+  if (winner && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(aName)) && loserD) losers.push([A, aCard, aIdx]);
+  if (!losers.some(l => l[1].key === dCard.key) && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(dName))) losers.push([D, dCard, dIdx]);
+
+  logs.push('battle: ' + aName + ' (' + ap + ') vs ' + dName + ' (' + dp + ').');
+  for (const [owner, card, ownerIdx] of losers) {
+    if (!owner.battlezone.some(c => c.key === card.key)) continue;
+    removeBattleCard(owner, card.key);
+    const dest = battleCardToGrave(owner, card);
+    creatureDestroyed(owner, state.players[ownerIdx === 0 ? 1 : 0], card, logs, dest === 'graveyard');
+    logs.push(cardLabel(card.id) + ' was destroyed (to ' + dest + ').');
+  }
+  if (!losers.length) logs.push('neither creature was destroyed.');
+  return {};
 }
 
 function opponentOf(room, player) {
@@ -494,7 +657,10 @@ const SHIELD_TRIGGER_CARDS = new Set([
   'natural snare', 'dimension gate', 'mana crisis', 'mystic inscription', 'torcon', 'dome shell',
   'mighty shouter'
 ]);
-function hasShieldTrigger(id) { return SHIELD_TRIGGER_CARDS.has(cardLabel(id).toLowerCase()); }
+function hasShieldTrigger(id) {
+  if (SHIELD_TRIGGER_CARDS.has(normalizeCardKey(cardLabel(id)))) return true;
+  return !!metaOf(id).shieldTrigger;
+}
 
 function shuffle(arr) {
   const a = arr.slice();
@@ -509,7 +675,8 @@ function emptyPlayerState() {
   return {
     hand: [], deck: [], mana: [], battlezone: [], shields: [], graveyard: [],
     showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0, pendingBronzeArm: 0,
-    pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null
+    pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
+    spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false
   };
 }
 
@@ -590,6 +757,8 @@ function viewFor(room, viewerIdx) {
     rematch: s.rematch,
     soundMap: s.soundMap,
     activeTurn: s.activeTurn,
+    turnNumber: s.turnNumber,
+    combat: s.combat,
     players: [mask(s.players[0], viewerIdx === 0), mask(s.players[1], viewerIdx === 1)],
     you: viewerIdx
   };
@@ -634,7 +803,7 @@ function nextShieldSlot(me) {
   return i;
 }
 
-function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(cardLabel(id).toLowerCase()) || null; }
+function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(normalizeCardKey(cardLabel(id))) || null; }
 
 // Figures out which untapped mana cards would pay for a card, respecting both
 // the total cost and needing at least one untapped mana of each required
@@ -697,6 +866,9 @@ function freshMatchState() {
     // Purely advisory — nothing is actually locked to turns, this just tracks
     // whose turn the players have agreed it is. null until someone ends a turn.
     activeTurn: null,
+    turnNumber: 0,
+    creaturesEnteredThisTurn: 0,
+    combat: null,          // the in-progress attack, if any
     players: [emptyPlayerState(), emptyPlayerState()]
   };
 }
@@ -811,6 +983,8 @@ wss.on('connection', (ws) => {
     const pendingNotices = []; // on-screen toasts for automatic effects: {self, other}
     const endTurnPrompts = []; // end-of-turn questions only the player can answer
     let revealPayload = null; // a hand shown to the caster (Rain of Arrows)
+    let manualBattle = null;    // set when a battle can't be judged from the sheet
+    let shieldTriggerFor = null; // a broken shield that may fire its trigger
     const searchAlreadyOpen = !!me.pendingSearch; // so an auto-search only opens once
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
     let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
@@ -830,23 +1004,36 @@ wss.on('connection', (ws) => {
       }
       case 'shuffleDeck': { me.deck = shuffle(me.deck); logText = 'shuffled their deck.'; break; }
       case 'endTurn': {
-        // advisory only — passes the turn marker, doesn't restrict what either player can do
+        if (s.combat) { send(ws, { type: 'summonRejected', reason: 'Finish resolving the current attack first.' }); return; }
+        // end of MY turn: bounce cards that go home, and ask about shield-break returns
+        for (const c of me.battlezone.slice()) {
+          const nm = normalizeCardKey(cardLabel(c.id));
+          if (END_TURN_RETURN_TO_HAND.has(nm) || nm === 'bazagazeal dragon') {
+            removeBattleCard(me, c.key);
+            me.hand.push({ id: c.id, key: c.key });
+            extraLogs.push('returned ' + cardLabel(c.id) + ' to their hand at end of turn.');
+          } else if (nm === 'ruby grass' && c.tapped) {
+            endTurnPrompts.push({ key: c.key, name: cardLabel(c.id), kind: 'untap' });
+          } else if (END_TURN_SHIELD_PROMPT.has(nm) && c.tapped && c.brokeShieldThisTurn) {
+            // Polligon only goes home if it actually broke a shield, which the engine now knows
+            removeBattleCard(me, c.key);
+            me.hand.push({ id: c.id, key: c.key });
+            extraLogs.push('returned ' + cardLabel(c.id) + ' to their hand (it broke a shield this turn).');
+          }
+        }
+        // per-turn counters reset as the turn passes
+        me.spellsCastThisTurn = 0; me.turboRushActive = false; me.brokeShieldThisTurn = false;
+        for (const c of me.battlezone) { c.brokeShieldThisTurn = false; c.attackedThisTurn = false; }
+        s.creaturesEnteredThisTurn = 0;
+
         s.activeTurn = oppIdx;
+        s.turnNumber = (s.turnNumber || 0) + 1;
         // untap step: the player whose turn is starting untaps their mana and creatures
         let untapped = 0;
         for (const m of opp.mana) { if (m.tapped) { m.tapped = false; untapped++; } }
         for (const c of opp.battlezone) { if (c.tapped) { c.tapped = false; untapped++; } c.atkResolved = false; }
-        // end of MY turn: bounce cards that go home, and ask about shield-break returns
-        for (const c of me.battlezone.slice()) {
-          const nm = cardLabel(c.id).toLowerCase();
-          if (END_TURN_RETURN_TO_HAND.has(nm)) {
-            removeBattleCard(me, c.key);
-            me.hand.push({ id: c.id, key: c.key });
-            extraLogs.push('returned ' + cardLabel(c.id) + ' to their hand at end of turn.');
-          } else if (END_TURN_SHIELD_PROMPT.has(nm) && c.tapped) {
-            endTurnPrompts.push({ key: c.key, name: cardLabel(c.id) });
-          }
-        }
+        // Miraculous Truce expires at the start of its caster's next turn
+        if (opp.truceUntilTurn != null && s.turnNumber >= opp.truceUntilTurn) { opp.truceCiv = null; opp.truceUntilTurn = null; }
         logText = 'ended their turn.' + (untapped ? " (Opponent's cards untapped.)" : '');
         sfxToPlay = 'turn';
         break;
@@ -899,7 +1086,15 @@ wss.on('connection', (ws) => {
         }
         const [c] = me.hand.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
-        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, brokeShieldThisTurn: false });
+        if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
+        else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
+        // Turbo Rush: if one of your creatures already broke a shield this turn, your
+        // creatures gain Speed Attacker for the rest of it
+        if (metaOf(c.id).turboRush && me.brokeShieldThisTurn) {
+          me.turboRushActive = true;
+          extraLogs.push('activated Turbo Rush — their creatures have Speed Attacker this turn.');
+        }
         logText = 'summoned ' + cardLabel(c.id) + '.';
         {
           const res = applyOnSummonTriggers(me, opp, c.id, c.key);
@@ -921,7 +1116,9 @@ wss.on('connection', (ws) => {
         if (!hasShieldTrigger(me.hand[i].id)) return; // only valid for actual Shield Trigger cards
         const [c] = me.hand.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
-        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, brokeShieldThisTurn: false });
+        if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
+        else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
         sfxToPlay = 'shieldTrigger';
         {
@@ -1417,6 +1614,150 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // ---------------- COMBAT ----------------
+      case 'declareAttack': {
+        if (s.combat) { send(ws, { type: 'summonRejected', reason: 'An attack is already being resolved.' }); return; }
+        const atk = me.battlezone.find(c => c.key === msg.key);
+        if (!atk || atk.tapped) return;
+        if (s.activeTurn !== idx) { send(ws, { type: 'summonRejected', reason: "You can only attack on your own turn." }); return; }
+        if (!canAttackAtAll(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack." }); return; }
+        if (hasSummoningSickness(s, idx, atk)) {
+          send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' has summoning sickness — it can\'t attack the turn it was summoned.' });
+          return;
+        }
+        if (normalizeCardKey(cardLabel(atk.id)) === BULLRAIZER_NAME && opp.battlezone.length > me.battlezone.length) {
+          send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack while your opponent has more creatures than you." });
+          return;
+        }
+
+        const target = msg.target || {};
+        if (target.type === 'shield') {
+          if (!canAttackShields(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack shields." }); return; }
+          if (!opp.shields.length) { send(ws, { type: 'summonRejected', reason: 'Your opponent has no shields left.' }); return; }
+        } else if (target.type === 'creature') {
+          const victim = opp.battlezone.find(c => c.key === target.key);
+          if (!victim) return;
+          if (!victim.tapped && !canAttackUntapped(atk.id)) {
+            send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' can only attack TAPPED creatures.' });
+            return;
+          }
+          if (blockerOnly(atk.id) && !metaOf(victim.id).blocker) {
+            send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' can only attack creatures that have Blocker.' });
+            return;
+          }
+          if (normalizeCardKey(cardLabel(victim.id)) === PETROVA_NAME) {
+            // Petrova can't be *chosen* by effects, but attacking it is allowed
+          }
+        } else return;
+
+        // Miraculous Truce: creatures of the named civilization can't attack that player
+        if (opp.truceCiv && civsOf(atk.id).includes(opp.truceCiv)) {
+          send(ws, { type: 'summonRejected', reason: 'Miraculous Truce prevents ' + opp.truceCiv + ' creatures from attacking this player.' });
+          return;
+        }
+
+        atk.tapped = true;
+        atk.attackedThisTurn = true;
+        s.combat = {
+          attackerIdx: idx, attackerKey: atk.key,
+          target, phase: 'blocking',
+          shieldsToBreak: target.type === 'shield' ? breakerCount(s, idx, atk) : 0
+        };
+        logText = 'attacked with ' + cardLabel(atk.id) +
+          (target.type === 'shield' ? ' \u2014 aiming at shields.' : ' \u2014 targeting ' + cardLabel((opp.battlezone.find(c => c.key === target.key) || {}).id) + '.');
+        break;
+      }
+
+      case 'declareBlock': {
+        const cb = s.combat;
+        if (!cb || cb.phase !== 'blocking' || cb.attackerIdx === idx) return;
+        const attacker = s.players[cb.attackerIdx];
+        const atk = attacker.battlezone.find(c => c.key === cb.attackerKey);
+        if (!atk) { s.combat = null; break; }
+
+        if (msg.blockerKey) {
+          const blk = me.battlezone.find(c => c.key === msg.blockerKey);
+          if (!blk || blk.tapped || !metaOf(blk.id).blocker) return;
+          // Light Stealth: can't be blocked if the blocking player has Light cards in mana
+          if (metaOf(atk.id).lightStealth && me.mana.some(m => civsOf(m.id).includes('Light'))) {
+            send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " has Light Stealth — you can't block it while you have Light cards in your mana zone." });
+            return;
+          }
+          if (atk.unblockableThisTurn) {
+            send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't be blocked this turn." });
+            return;
+          }
+          blk.tapped = true;
+          logText = 'blocked with ' + cardLabel(blk.id) + '.';
+          const res = resolveBattle(s, cb.attackerIdx, atk, idx, blk, extraLogs);
+          s.combat = null;
+          if (res.needsManual) manualBattle = res.needsManual;
+          break;
+        }
+
+        // no block: the attack lands
+        logText = 'chose not to block.';
+        if (cb.target.type === 'creature') {
+          const victim = me.battlezone.find(c => c.key === cb.target.key);
+          if (victim) {
+            const res = resolveBattle(s, cb.attackerIdx, atk, idx, victim, extraLogs);
+            if (res.needsManual) manualBattle = res.needsManual;
+          }
+          s.combat = null;
+        } else {
+          // shield attack: hand control to the attacker to pick which shields break
+          cb.phase = 'breaking';
+        }
+        break;
+      }
+
+      case 'breakShield': {
+        const cb = s.combat;
+        if (!cb || cb.phase !== 'breaking' || cb.attackerIdx !== idx) return;
+        const i = opp.shields.findIndex(sh => sh.key === msg.key);
+        if (i === -1) return;
+        const [sh] = opp.shields.splice(i, 1);
+        const attacker = me.battlezone.find(c => c.key === cb.attackerKey);
+        const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
+        me.brokeShieldThisTurn = true;
+        if (attacker) attacker.brokeShieldThisTurn = true;
+
+        if (atkName === 'bolmeteus steel dragon') {
+          // shield goes straight to the graveyard, so no Shield Trigger window
+          opp.graveyard.push({ id: sh.id, key: sh.key });
+          extraLogs.push('broke a shield with Bolmeteus Steel Dragon \u2014 it went straight to the graveyard.');
+        } else {
+          opp.hand.push({ id: sh.id, key: sh.key });
+          extraLogs.push('broke a shield.');
+          // Cryptic Totem shuts off the defender's shield triggers while it is tapped
+          const crypticOff = me.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'cryptic totem' && c.tapped);
+          if (!crypticOff && hasShieldTrigger(sh.id)) shieldTriggerFor = { idx: oppIdx, key: sh.key, id: sh.id };
+        }
+        cb.shieldsToBreak -= 1;
+        if (cb.shieldsToBreak <= 0 || !opp.shields.length) s.combat = null;
+        break;
+      }
+
+      case 'cancelCombat': {
+        if (!s.combat) return;
+        s.combat = null;
+        logText = 'ended the attack.';
+        break;
+      }
+
+      case 'manualBattleResult': {
+        // used when power data is missing for one of the creatures
+        if (!msg.loserOwner || !msg.loserKey) return;
+        const loserOwner = msg.loserOwner === 'me' ? me : opp;
+        const card = loserOwner.battlezone.find(c => c.key === msg.loserKey);
+        if (!card) return;
+        removeBattleCard(loserOwner, card.key);
+        const dest = battleCardToGrave(loserOwner, card);
+        creatureDestroyed(loserOwner, loserOwner === me ? opp : me, card, extraLogs, dest === 'graveyard');
+        logText = 'resolved the battle manually \u2014 ' + cardLabel(card.id) + ' was destroyed.';
+        break;
+      }
+
       case 'requestEndGame': {
         if (s.gameOver) return;
         // If no opponent is actually seated/dealt in, there's nobody to agree —
@@ -1478,6 +1819,11 @@ wss.on('connection', (ws) => {
     pendingNotices.forEach(n => noticeMsg(room, idx, n.self, n.other));
     endTurnPrompts.forEach(q => send(ws, { type: 'endTurnPrompt', key: q.key, name: q.name }));
     if (revealPayload) send(ws, { type: 'revealCards', title: revealPayload.title, cards: revealPayload.cards });
+    if (manualBattle) broadcastRaw(room, { type: 'manualBattle', battle: manualBattle });
+    if (shieldTriggerFor) {
+      const tws = room.sockets[shieldTriggerFor.idx];
+      if (tws) send(tws, { type: 'shieldTriggerOffer', key: shieldTriggerFor.key, id: shieldTriggerFor.id });
+    }
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
     if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, source: me.pendingSearch.source });
     if (sfxToPlay) broadcastRaw(room, { type: 'sfx', name: sfxToPlay });
