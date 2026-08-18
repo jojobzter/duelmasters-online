@@ -131,6 +131,14 @@ function ensureCardDatabaseFresh() {
 }
 ensureCardDatabaseFresh();
 
+app.get('/api/races', (req, res) => {
+  ensureCardDatabaseFresh();
+  const races = new Set();
+  for (const c of CARD_DB.values()) if (c.race) races.add(c.race);
+  res.set('Cache-Control', 'no-store');
+  res.json([...races].sort());
+});
+
 app.get('/api/carddata', (req, res) => {
   ensureCardDatabaseFresh();
   res.set('Cache-Control', 'no-store');
@@ -333,6 +341,11 @@ function effectivePower(state, ownerIdx, card, attacking) {
   const bark = namedCard(owner, 'barkwhip, the smasher');
   if (bark && bark.tapped && bark.key !== card.key && raceOf(card.id).includes('beast folk')) p += 2000;
 
+  // Petrova: +4000 to your OTHER creatures of the named race, while Petrova is out
+  const petrova = namedCard(owner, PETROVA_NAME);
+  if (petrova && owner.petrovaRace && petrova.key !== card.key &&
+      raceOf(card.id) === owner.petrovaRace.toLowerCase()) p += 4000;
+
   // Pala Olesis: during the OPPONENT's turn, your other creatures get +2000
   const pala = namedCard(owner, 'pala olesis, morning guardian');
   if (pala && pala.key !== card.key && state.activeTurn != null && state.activeTurn !== ownerIdx) p += 2000;
@@ -400,6 +413,71 @@ function hasLegalBlocker(state, defender, atkCard) {
   const m = metaOf(atkCard.id);
   if (m.lightStealth && defender.mana.some(x => civsOf(x.id).includes('Light'))) return false;
   return defender.battlezone.some(c => !c.tapped && metaOf(c.id).blocker);
+}
+
+// One shield breaking, shared by the "declare and break in one click" path and the
+// extra clicks a double/triple breaker makes. Calls back with a shield-trigger offer
+// if that shield can fire one.
+function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrigger) {
+  const me = state.players[atkIdx], opp = state.players[defIdx];
+  const i = opp.shields.findIndex(sh => sh.key === shieldKey);
+  if (i === -1) return false;
+  const [sh] = opp.shields.splice(i, 1);
+  me.brokeShieldThisTurn = true;
+  if (attacker) attacker.brokeShieldThisTurn = true;
+
+  const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
+  if (atkName === 'bolmeteus steel dragon') {
+    opp.graveyard.push({ id: sh.id, key: sh.key });
+    logs.push('broke a shield with Bolmeteus Steel Dragon — it went straight to the graveyard.');
+  } else {
+    opp.hand.push({ id: sh.id, key: sh.key });
+    logs.push('broke a shield.');
+    // Cryptic Totem switches the defender's shield triggers off while it is tapped
+    const crypticOff = me.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'cryptic totem' && c.tapped);
+    if (!crypticOff && hasShieldTrigger(sh.id) && onTrigger) {
+      onTrigger({ idx: defIdx, key: sh.key, id: sh.id });
+    }
+  }
+  const cb = state.combat;
+  if (cb) {
+    cb.shieldsToBreak -= 1;
+    if (cb.shieldsToBreak <= 0 || !opp.shields.length) state.combat = null;
+  }
+  return true;
+}
+
+// Attack abilities. Most fire the moment the attack is declared; a few (Trixo) only
+// pay off if the attack actually connects without being blocked.
+function fireAttackTriggers(state, meIdx, oppIdx, card, logs, when) {
+  const me = state.players[meIdx], opp = state.players[oppIdx];
+  const trig = ATTACK_TRIGGERS[normalizeCardKey(cardLabel(card.id))];
+  if (!trig) return;
+  const onHit = trig.effect === 'oppDestroysOwnCreature';   // needs an unblocked connection
+  if ((when === 'declare') === onHit) return;
+
+  if (trig.effect === 'oppDiscardRandom') {
+    if (opp.hand.length) {
+      opp.pendingDiscards.push({ id: newKey(), kind: 'random', count: 1, source: cardLabel(card.id) });
+      logs.push('attacked with ' + cardLabel(card.id) + ' — their opponent discards at random.');
+    }
+  } else if (trig.effect === 'destroyOwnCreature') {
+    if (me.battlezone.some(c => c.key !== card.key)) {
+      me.pendingTargets.push({ id: newKey(), zone: 'ownBattle', action: 'destroy', filter: null,
+                               source: cardLabel(card.id), spellKey: null, sourceKey: card.key });
+    }
+  } else if (trig.effect === 'ownManaToHand') {
+    if (me.mana.length) {
+      me.pendingTargets.push({ id: newKey(), zone: 'ownMana', action: 'toHand', filter: null,
+                               source: cardLabel(card.id), spellKey: null });
+    }
+  } else if (trig.effect === 'oppDestroysOwnCreature') {
+    if (opp.battlezone.length) {
+      opp.pendingTargets.push({ id: newKey(), zone: 'ownBattle', action: 'destroy', filter: null,
+                               source: cardLabel(card.id), spellKey: null });
+      logs.push(cardLabel(card.id) + " connected — their opponent must destroy one of their own creatures.");
+    }
+  }
 }
 
 // Resolves a battle between two creatures. Returns {needsManual} when a power value
@@ -515,7 +593,10 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
   const extraLog = [];
   const notices = [];
 
-  if (name === 'corile') me.pendingCorileUses = (me.pendingCorileUses || 0) + 1;
+  if (name === 'corile') {
+    me.pendingTargets.push({ id: newKey(), zone: 'oppBattle', action: 'toTopOfDeck', filter: null,
+                             source: cardLabel(cardId), spellKey: null, sourceKey: cardKey });
+  }
   if (name === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
   if (name === BRONZE_ARM_NAME) me.pendingBronzeArm = (me.pendingBronzeArm || 0) + 1;
 
@@ -660,6 +741,11 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
   // Galek also makes the opponent pitch a card at random
   if (name === 'galek, the shadow warrior' && opp.hand.length) {
     opp.pendingDiscards.push({ id: newKey(), kind: 'random', count: 1, source: cardLabel(cardId) });
+  }
+
+  // Petrova: name a race — your other creatures of that race get +4000 while it stays
+  if (name === PETROVA_NAME) {
+    me.pendingRaceChoice = { id: newKey(), source: cardLabel(cardId), cardKey };
   }
 
   // Miraculous Truce: name a civilization that can't attack you until your next turn
@@ -828,7 +914,8 @@ function emptyPlayerState() {
     showingHand: false, pendingCorileUses: 0, pendingSkyswordMana: 0, pendingSkyswordShield: 0, pendingBronzeArm: 0,
     pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
-    pendingTruce: null, truceCiv: null, truceUntilTurn: null
+    pendingTruce: null, truceCiv: null, truceUntilTurn: null,
+    pendingRaceChoice: null, petrovaRace: null
   };
 }
 
@@ -887,7 +974,11 @@ function viewFor(room, viewerIdx) {
     showingHand: isSelf ? p.showingHand : undefined,
     deckCount: p.deck.length,
     mana: p.mana,
-    battlezone: p.battlezone,
+    battlezone: p.battlezone.map(c => Object.assign({}, c, {
+      // live power including every buff, so the client can show it without recalculating
+      livePower: effectivePower(s, s.players.indexOf(p), c, false),
+      basePower: (cardMeta(c.id) || {}).power != null ? cardMeta(c.id).power : null
+    })),
     shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, slot: sh.slot, id: sh.faceUp ? sh.id : undefined })),
     graveyard: p.graveyard,
     pendingCorileUses: isSelf ? (p.pendingCorileUses || 0) : undefined,
@@ -902,6 +993,8 @@ function viewFor(room, viewerIdx) {
     turboRushActive: !!p.turboRushActive,
     diamondCutterActive: !!p.diamondCutterActive,
     pendingTruce: isSelf ? p.pendingTruce : undefined,
+    pendingRaceChoice: isSelf ? p.pendingRaceChoice : undefined,
+    petrovaRace: p.petrovaRace || null,
     truceCiv: p.truceCiv || null,
     brokeShieldThisTurn: !!p.brokeShieldThisTurn
   });
@@ -1142,6 +1235,7 @@ wss.on('connection', (ws) => {
     let revealPayload = null; // a hand shown to the caster (Rain of Arrows)
     let manualBattle = null;    // set when a battle can't be judged from the sheet
     let shieldTriggerFor = null; // a broken shield that may fire its trigger
+    let winCheck = false, winnerIdx = null;  // an unblocked attack landed on a shieldless opponent
     const searchAlreadyOpen = !!me.pendingSearch; // so an auto-search only opens once
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
     let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
@@ -1436,22 +1530,6 @@ wss.on('connection', (ws) => {
           break;
         }
 
-        // tapping a creature IS attacking, so attack abilities fire straight away
-        if (c.tapped) {
-          const trig = ATTACK_TRIGGERS[name];
-          if (trig) {
-            if (trig.effect === 'oppDiscardRandom' && opp.hand.length) {
-              opp.pendingDiscards.push({ id: newKey(), kind: 'random', count: 1, source: cardLabel(c.id) });
-              extraLogs.push('attacked with ' + cardLabel(c.id) + ' — opponent discards at random.');
-            } else if (trig.effect === 'destroyOwnCreature' && me.battlezone.length > 1) {
-              me.pendingTargets.push({ id: newKey(), zone: 'ownBattle', action: 'destroy', filter: null, source: cardLabel(c.id), spellKey: null });
-            } else if (trig.effect === 'ownManaToHand' && me.mana.length) {
-              me.pendingTargets.push({ id: newKey(), zone: 'ownMana', action: 'toHand', filter: null, source: cardLabel(c.id), spellKey: null });
-            } else if (trig.effect === 'oppDestroysOwnCreature' && opp.battlezone.length) {
-              opp.pendingTargets.push({ id: newKey(), zone: 'ownBattle', action: 'destroy', filter: null, source: cardLabel(c.id), spellKey: null });
-            }
-          }
-        }
         break;
       }
       case 'battleMove': {
@@ -1721,6 +1799,11 @@ wss.on('connection', (ws) => {
             owner.graveyard.push({ id: card.id, key: card.key });
             logText = 'used ' + eff.source + ' to put ' + label + ' into the graveyard.';
             break;
+          case 'toTopOfDeck':
+            list.splice(ci, 1);
+            owner.deck.unshift(card.id);
+            logText = 'used ' + eff.source + ' to put ' + label + " on top of its owner's deck.";
+            break;
           case 'toOwnerShield':
             list.splice(ci, 1);
             owner.shields.push({ id: card.id, key: card.key, faceUp: false, slot: nextShieldSlot(owner) });
@@ -1805,6 +1888,15 @@ wss.on('connection', (ws) => {
         const spellKey = pm.spellKey;
         me.pendingMulti = null;
         if (spellKey) resolveSpellCard(me, { spellKey }, extraLogs);
+        break;
+      }
+      case 'choosePetrovaRace': {
+        if (!me.pendingRaceChoice) return;
+        const race = (msg.race || '').toString().trim();
+        if (!race) return;
+        me.petrovaRace = race;
+        me.pendingRaceChoice = null;
+        logText = 'named ' + race + ' with Petrova — their other ' + race + ' creatures get +4000.';
         break;
       }
       case 'chooseTruceCiv': {
@@ -1915,7 +2007,7 @@ wss.on('connection', (ws) => {
         const target = msg.target || {};
         if (target.type === 'shield') {
           if (!dcShieldRun && !canAttackShields(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack shields." }); return; }
-          if (!opp.shields.length) { send(ws, { type: 'summonRejected', reason: 'Your opponent has no shields left.' }); return; }
+          // no shields left: this is the direct attack that wins the game if unblocked
         } else if (target.type === 'creature') {
           const victim = opp.battlezone.find(c => c.key === target.key);
           if (!victim) return;
@@ -1940,6 +2032,8 @@ wss.on('connection', (ws) => {
 
         atk.tapped = true;
         atk.attackedThisTurn = true;
+        fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'declare');
+
         const canBlock = hasLegalBlocker(s, opp, atk);
         s.combat = {
           attackerIdx: idx, attackerKey: atk.key,
@@ -1949,7 +2043,6 @@ wss.on('connection', (ws) => {
         logText = 'attacked with ' + cardLabel(atk.id) +
           (target.type === 'shield' ? ' \u2014 aiming at shields.' : ' \u2014 targeting ' + cardLabel((opp.battlezone.find(c => c.key === target.key) || {}).id) + '.');
         if (!canBlock) {
-          // nothing can block, so go straight to the outcome
           if (target.type === 'creature') {
             const victim = opp.battlezone.find(c => c.key === target.key);
             s.combat = null;
@@ -1958,7 +2051,15 @@ wss.on('connection', (ws) => {
               if (res.needsManual) manualBattle = res.needsManual;
             }
           } else {
-            extraLogs.push('had no blockers to stop it.');
+            if (!opp.shields.length) {
+              // nothing to break — the attack lands on the player and ends the game
+              s.combat = null;
+              winCheck = true;
+            } else if (target.key) {
+              // the attack connects: break the shield they clicked, in the same click
+              breakOneShield(s, idx, oppIdx, atk, target.key, extraLogs, out => { shieldTriggerFor = out; });
+            }
+            fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'hit');
           }
         }
         break;
@@ -2001,8 +2102,16 @@ wss.on('connection', (ws) => {
           }
           s.combat = null;
         } else {
-          // shield attack: hand control to the attacker to pick which shields break
-          cb.phase = 'breaking';
+          const attackerCard = attacker.battlezone.find(c => c.key === cb.attackerKey);
+          if (!me.shields.length) {
+            s.combat = null;
+            winCheck = true;
+            winnerIdx = cb.attackerIdx;
+          } else {
+            cb.phase = 'breaking';
+            if (cb.target.key) breakOneShield(s, cb.attackerIdx, idx, attackerCard, cb.target.key, extraLogs, out => { shieldTriggerFor = out; });
+          }
+          fireAttackTriggers(s, cb.attackerIdx, idx, attackerCard, extraLogs, 'hit');
         }
         break;
       }
@@ -2010,46 +2119,26 @@ wss.on('connection', (ws) => {
       case 'breakShield': {
         const cb = s.combat;
         if (!cb || cb.phase !== 'breaking' || cb.attackerIdx !== idx) return;
-        const i = opp.shields.findIndex(sh => sh.key === msg.key);
-        if (i === -1) return;
-        const [sh] = opp.shields.splice(i, 1);
         const attacker = me.battlezone.find(c => c.key === cb.attackerKey);
-        const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
-        me.brokeShieldThisTurn = true;
-        if (attacker) attacker.brokeShieldThisTurn = true;
-
-        if (atkName === 'bolmeteus steel dragon') {
-          // shield goes straight to the graveyard, so no Shield Trigger window
-          opp.graveyard.push({ id: sh.id, key: sh.key });
-          extraLogs.push('broke a shield with Bolmeteus Steel Dragon \u2014 it went straight to the graveyard.');
-        } else {
-          opp.hand.push({ id: sh.id, key: sh.key });
-          extraLogs.push('broke a shield.');
-          // Cryptic Totem shuts off the defender's shield triggers while it is tapped
-          const crypticOff = me.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'cryptic totem' && c.tapped);
-          if (!crypticOff && hasShieldTrigger(sh.id)) shieldTriggerFor = { idx: oppIdx, key: sh.key, id: sh.id };
-        }
-        cb.shieldsToBreak -= 1;
-        if (cb.shieldsToBreak <= 0 || !opp.shields.length) {
+        const ok = breakOneShield(s, idx, oppIdx, attacker, msg.key, extraLogs, out => { shieldTriggerFor = out; });
+        if (!ok) return;
+        if (!s.combat) {
           const atkNameNorm = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
-          // Aqua Master: an unblocked attack on the player turns one of their shields face up
           if (atkNameNorm === 'aqua master' && opp.shields.length) {
-            const target = opp.shields[Math.floor(Math.random() * opp.shields.length)];
-            target.faceUp = true;
+            const t = opp.shields[Math.floor(Math.random() * opp.shields.length)];
+            t.faceUp = true;
             extraLogs.push("turned one of their opponent's shields face up with Aqua Master.");
           }
-          // Marrow Ooze destroys itself after attacking a player
           if (atkNameNorm === 'marrow ooze, the twister' && attacker) {
             removeBattleCard(me, attacker.key);
             const dest = battleCardToGrave(me, attacker);
             creatureDestroyed(me, opp, attacker, extraLogs, dest === 'graveyard');
             extraLogs.push('Marrow Ooze, the Twister destroyed itself after attacking.');
           }
-          s.combat = null;
+          fireAttackTriggers(s, idx, oppIdx, attacker, extraLogs, 'hit');
         }
         break;
       }
-
       case 'cancelCombat': {
         if (!s.combat) return;
         s.combat = null;
@@ -2132,6 +2221,13 @@ wss.on('connection', (ws) => {
     endTurnPrompts.forEach(q => send(ws, { type: 'endTurnPrompt', key: q.key, name: q.name, kind: q.kind || 'return' }));
     if (revealPayload) send(ws, { type: 'revealCards', title: revealPayload.title, cards: revealPayload.cards });
     if (manualBattle) broadcastRaw(room, { type: 'manualBattle', battle: manualBattle });
+    // Win condition: an attack connects while the defender has no shields left.
+    if (winCheck && !s.gameOver) {
+      const w = (winnerIdx == null) ? idx : winnerIdx;
+      s.gameOver = { reason: 'shields', by: w };
+      broadcastState(room);
+      logMsg(room, w, 'won the game — the final attack connected with no shields left to defend.');
+    }
     if (shieldTriggerFor) {
       const tws = room.sockets[shieldTriggerFor.idx];
       if (tws) send(tws, { type: 'shieldTriggerOffer', key: shieldTriggerFor.key, id: shieldTriggerFor.id });
