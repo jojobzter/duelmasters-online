@@ -272,6 +272,10 @@ function refreshCardGrid() {
     div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
     div.addEventListener('click', () => {
       if (currentDeck.length >= 40) return;
+      if (currentDeck.filter(x => x === id).length >= 4) {
+        alert('You can only have 4 copies of "' + c.name + '" in a deck.');
+        return;
+      }
       currentDeck.push(id);
       refreshCardGrid(); refreshDeckList();
     });
@@ -464,6 +468,45 @@ document.getElementById('btn-import-deck').addEventListener('click', () => {
   }
 });
 
+// ---- build a deck from pasted text like "4xAqua Surfer" ----
+document.getElementById('btn-build-from-text').addEventListener('click', () => {
+  const raw = document.getElementById('decklist-text').value || '';
+  const status = document.getElementById('decklist-status');
+  if (!raw.trim()) { status.textContent = 'Paste a list first.'; return; }
+  if (!cardDB.size) { status.textContent = 'Load your cards folder first.'; return; }
+
+  // name -> id, matched loosely so punctuation and apostrophe style don't matter
+  const byName = new Map();
+  for (const [id, c] of cardDB) {
+    const k = c.name.toLowerCase().replace(/[\u2018\u2019\u02BC`]/g, "'").replace(/\s+/g, ' ').trim();
+    if (!byName.has(k)) byName.set(k, id);
+  }
+  const loose = t => t.toLowerCase().replace(/[\u2018\u2019\u02BC`]/g, "'").replace(/[^a-z0-9' ]/g, '').replace(/\s+/g, ' ').trim();
+  const looseMap = new Map();
+  for (const [k, id] of byName) looseMap.set(loose(k), id);
+
+  const deck = [], notFound = [], overLimit = [];
+  for (let line of raw.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line) continue;
+    const m = line.match(/^(\d+)\s*[xX*]?\s*(.+)$/);
+    let count = 1, name = line;
+    if (m) { count = parseInt(m[1], 10); name = m[2]; }
+    name = name.trim();
+    const id = byName.get(name.toLowerCase()) || looseMap.get(loose(name));
+    if (!id) { notFound.push(name); continue; }
+    if (count > 4) { overLimit.push(name); count = 4; }
+    for (let i = 0; i < count && deck.length < 40; i++) deck.push(id);
+  }
+
+  currentDeck = deck;
+  refreshDeckList(); refreshCardGrid();
+  const bits = [deck.length + ' cards loaded into the editor'];
+  if (overLimit.length) bits.push('capped at 4: ' + overLimit.join(', '));
+  if (notFound.length) bits.push('not found: ' + notFound.join(', '));
+  status.textContent = bits.join(' \u2014 ');
+});
+
 refreshSavedDecks();
 refreshDeckList();
 
@@ -620,6 +663,10 @@ function handleSeatMessage(seatIndex, msg) {
   }
   if (msg.type === 'revealCards') {
     if (seatIndex === activeSeat) openRevealModal(msg.title, msg.cards);
+    return;
+  }
+  if (msg.type === 'manualBattle') {
+    if (seatIndex === activeSeat) openManualBattle(msg.battle);
     return;
   }
   if (msg.type === 'tapModeOffer') {
@@ -1114,6 +1161,10 @@ document.getElementById('btn-discard-confirm').addEventListener('click', () => {
 document.getElementById('btn-skip-effect').addEventListener('click', () => {
   const st = seats[activeSeat] && seats[activeSeat].state;
   if (!st) return;
+  if (st.combat && st.combat.phase === 'breaking' && st.combat.attackerIdx === st.you) {
+    sendMsg({ type: 'cancelCombat' });   // stop breaking further shields
+    return;
+  }
   const mine = st.players[st.you];
   if (mine.pendingTargets && mine.pendingTargets.length) {
     sendMsg({ type: 'effectTargetSkip', effectId: mine.pendingTargets[0].id });
@@ -1197,6 +1248,118 @@ document.getElementById('btn-target-pick-skip').addEventListener('click', () => 
   targetPickEffectId = null;
   document.getElementById('target-pick-modal').style.display = 'none';
 });
+
+// ====================== COMBAT ======================
+let attackChoiceKey = null;      // creature we're declaring an attack with
+let manualBattleData = null;
+
+function cardMetaFor(id) { return cardMetaDB.get(cardBaseName(id).toLowerCase()) || {}; }
+function restrictionFor(id) { return (cardMetaFor(id).attackRestriction || 'none').toLowerCase(); }
+function canAttackShieldsC(id) {
+  const r = restrictionFor(id);
+  return !r.includes('cannot attack') && !r.includes('not players') && !r.includes('blocker only');
+}
+function canAttackUntappedC(id) { return restrictionFor(id).includes('untapped ok'); }
+function blockerOnlyC(id) { return restrictionFor(id).includes('blocker only'); }
+
+// Step 1 — pick what this creature is attacking.
+function openAttackTargetModal(card, state) {
+  attackChoiceKey = card.key;
+  const me = state.players[state.you], opp = state.players[state.you === 0 ? 1 : 0];
+  const name = (cardDB.get(card.id) || {}).name || cardBaseName(card.id);
+  document.getElementById('attack-target-title').textContent = 'Attack with ' + name;
+  const legal = opp.battlezone.filter(c => {
+    if (!c.tapped && !canAttackUntappedC(card.id)) return false;
+    if (blockerOnlyC(card.id) && !cardMetaFor(c.id).blocker) return false;
+    return true;
+  });
+  document.getElementById('attack-target-sub').textContent =
+    legal.length ? 'Choose a creature to attack, or attack their shields.'
+                 : 'No creatures you can attack — you can still attack their shields.';
+  const grid = document.getElementById('attack-target-grid');
+  grid.innerHTML = '';
+  legal.forEach(c => {
+    const d = document.createElement('div');
+    d.className = 'pick';
+    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn">\u{1F50D}</div>';
+    d.querySelector('.zoom-btn').addEventListener('click', e => { e.stopPropagation(); openMagnify(c.id); });
+    d.addEventListener('click', () => {
+      sendMsg({ type: 'declareAttack', key: card.key, target: { type: 'creature', key: c.key } });
+      closeAttackTargetModal();
+    });
+    grid.appendChild(d);
+  });
+  const shieldBtn = document.getElementById('btn-attack-shields');
+  shieldBtn.style.display = (canAttackShieldsC(card.id) && opp.shields.length) ? 'inline-block' : 'none';
+  document.getElementById('attack-target-modal').style.display = 'flex';
+}
+function closeAttackTargetModal() {
+  attackChoiceKey = null;
+  document.getElementById('attack-target-modal').style.display = 'none';
+}
+document.getElementById('btn-attack-shields').addEventListener('click', () => {
+  if (attackChoiceKey) sendMsg({ type: 'declareAttack', key: attackChoiceKey, target: { type: 'shield' } });
+  closeAttackTargetModal();
+});
+document.getElementById('btn-attack-cancel').addEventListener('click', closeAttackTargetModal);
+
+// Step 2 — the defender may block with an untapped Blocker.
+let blockShownFor = null;
+function openBlockModal(state) {
+  const cb = state.combat;
+  const me = state.players[state.you], opp = state.players[state.you === 0 ? 1 : 0];
+  const atk = opp.battlezone.find(c => c.key === cb.attackerKey);
+  const atkName = atk ? ((cardDB.get(atk.id) || {}).name || cardBaseName(atk.id)) : 'A creature';
+  const lightStealth = atk && cardMetaFor(atk.id).lightStealth && me.mana.some(m => (cardMetaFor(m.id).civs || []).includes('Light'));
+  const targetTxt = cb.target.type === 'shield' ? 'your shields' : 'one of your creatures';
+  document.getElementById('block-sub').textContent =
+    atkName + ' is attacking ' + targetTxt + '.' +
+    (lightStealth ? " It has Light Stealth — you can't block it while you have Light cards in your mana zone." : ' Block with a Blocker, or let it through.');
+  const grid = document.getElementById('block-grid');
+  grid.innerHTML = '';
+  const blockers = lightStealth ? [] : me.battlezone.filter(c => !c.tapped && cardMetaFor(c.id).blocker);
+  blockers.forEach(c => {
+    const d = document.createElement('div');
+    d.className = 'pick';
+    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn">\u{1F50D}</div>';
+    d.querySelector('.zoom-btn').addEventListener('click', e => { e.stopPropagation(); openMagnify(c.id); });
+    d.addEventListener('click', () => {
+      sendMsg({ type: 'declareBlock', blockerKey: c.key });
+      document.getElementById('block-modal').style.display = 'none';
+    });
+    grid.appendChild(d);
+  });
+  document.getElementById('block-modal').style.display = 'flex';
+}
+document.getElementById('btn-no-block').addEventListener('click', () => {
+  sendMsg({ type: 'declareBlock' });
+  document.getElementById('block-modal').style.display = 'none';
+});
+
+// Step 4 — manual result when the sheet has no power for one of the creatures.
+function openManualBattle(b) {
+  manualBattleData = b;
+  document.getElementById('manual-battle-sub').textContent =
+    b.aName + ' battled ' + b.dName + ", but the card sheet has no power for one of them. Decide the result between you.";
+  document.getElementById('manual-battle-modal').style.display = 'flex';
+}
+function sendManual(which) {
+  const b = manualBattleData;
+  if (!b) return;
+  const mine = seats[activeSeat].state.you;
+  if (which === 'a' || which === 'both') {
+    sendMsg({ type: 'manualBattleResult', loserOwner: b.aIdx === mine ? 'me' : 'opp', loserKey: b.aKey });
+  }
+  if (which === 'd' || which === 'both') {
+    sendMsg({ type: 'manualBattleResult', loserOwner: b.dIdx === mine ? 'me' : 'opp', loserKey: b.dKey });
+  }
+  manualBattleData = null;
+  document.getElementById('manual-battle-modal').style.display = 'none';
+}
+document.getElementById('btn-manual-a').addEventListener('click', () => sendManual('a'));
+document.getElementById('btn-manual-d').addEventListener('click', () => sendManual('d'));
+document.getElementById('btn-manual-both').addEventListener('click', () => sendManual('both'));
+document.getElementById('btn-manual-none').addEventListener('click', () => sendManual('none'));
 
 // ---- multi-select for mass effects whose power data is incomplete (Searing Wave) ----
 let multiPickId = null, multiPickChosen = new Set();
@@ -1460,6 +1623,25 @@ function renderState(state) {
     document.getElementById('target-pick-modal').style.display = 'none';
   }
 
+  // ---- combat: defender's block window, attacker's shield breaking ----
+  const cb = state.combat;
+  const blockModal = document.getElementById('block-modal');
+  if (cb && cb.phase === 'blocking' && cb.attackerIdx !== meIdx) {
+    if (blockShownFor !== cb.attackerKey) { blockShownFor = cb.attackerKey; openBlockModal(state); }
+  } else {
+    blockShownFor = null;
+    blockModal.style.display = 'none';
+  }
+  const breaking = !!(cb && cb.phase === 'breaking' && cb.attackerIdx === meIdx);
+  document.getElementById('effect-banner').classList.toggle('breaking', breaking);
+  if (breaking) {
+    const eb = document.getElementById('effect-banner');
+    document.getElementById('effect-banner-text').textContent =
+      'Choose ' + cb.shieldsToBreak + ' shield' + (cb.shieldsToBreak === 1 ? '' : 's') + " to break — click your opponent's shields.";
+    document.getElementById('btn-skip-effect').style.display = 'inline-block';
+    eb.style.display = 'flex';
+  }
+
   // ---- mass effects needing manual confirmation (Searing Wave) ----
   if (me.pendingMulti && multiPickId !== me.pendingMulti.id) {
     openMultiPickModal(me.pendingMulti, opp.battlezone);
@@ -1626,6 +1808,17 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
     div.innerHTML = faceUp ? cardImgHtml(s.id) : faceDownHtml();
     if (faceUp) makeMagnifiable(div, s.id);
     attachFlashClick(div, 'shield', ownerIdx, s.key);
+    // during a shield attack the attacker clicks the opponent's shields to break them
+    if (!isMine) {
+      const st = seats[activeSeat] && seats[activeSeat].state;
+      if (st && st.combat && st.combat.phase === 'breaking' && st.combat.attackerIdx === st.you) {
+        div.classList.add('breakable');
+        div.addEventListener('click', (e) => {
+          if (e.ctrlKey || e.metaKey) return;   // ctrl+click still means "indicate"
+          sendMsg({ type: 'breakShield', key: s.key });
+        });
+      }
+    }
     if (isMine) {
       div.addEventListener('contextmenu', (e) => {
         e.preventDefault();
@@ -1693,7 +1886,15 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
       // an opponent's creature through the targeting system instead
       const items = [];
       if (isMine) {
-        items.push([c.tapped ? 'Untap' : 'Tap', () => sendMsg({ type: 'battleTap', key: c.key })]);
+        const st = seats[activeSeat] && seats[activeSeat].state;
+        const myTurn = st && st.activeTurn === st.you;
+        const meta = cardMetaFor(c.id);
+        const canAtk = !restrictionFor(c.id).includes('cannot attack');
+        if (!c.tapped && myTurn && canAtk && !(st && st.combat)) {
+          items.push(['\u2694 Attack', () => openAttackTargetModal(c, st)]);
+          if (meta.tapAbility) items.push(['Use tap ability', () => sendMsg({ type: 'battleTap', key: c.key, mode: 'ability' })]);
+        }
+        items.push([c.tapped ? 'Untap' : 'Tap (no attack)', () => sendMsg({ type: 'battleTap', key: c.key })]);
         items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
         items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
       } else {

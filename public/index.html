@@ -54,6 +54,11 @@
           <input id="import-code" placeholder="Paste a friend's share code..." />
           <button id="btn-import-deck">Import</button>
         </div>
+        <div style="margin-top:10px">
+          <textarea id="decklist-text" class="share-code-box" placeholder="Or paste a decklist:&#10;4xAqua Surfer&#10;2xAlcadeias, Lord of Spirits&#10;1xApocalypse Vise"></textarea>
+          <button id="btn-build-from-text">Build from list</button>
+          <div id="decklist-status" class="hint"></div>
+        </div>
         <h3>Saved decks</h3>
         <p class="hint">Click a deck's name to preview its cards. "Select" chooses which deck you'll play with below.</p>
         <div id="saved-decks" class="saved-decks"></div>
@@ -261,6 +266,36 @@
     <p id="attack-trigger-text" class="hint"></p>
     <button id="btn-attack-yes">Attack</button>
     <button id="btn-attack-no">Use tap ability</button>
+  </div>
+</div>
+
+<div id="attack-target-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="attack-target-title">Attack with…</h3>
+    <p id="attack-target-sub" class="hint"></p>
+    <div id="attack-target-grid" class="discard-grid"></div>
+    <button id="btn-attack-shields">Attack Shields</button>
+    <button id="btn-attack-cancel" class="ghost">Cancel</button>
+  </div>
+</div>
+
+<div id="block-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3>You're being attacked!</h3>
+    <p id="block-sub" class="hint"></p>
+    <div id="block-grid" class="discard-grid"></div>
+    <button id="btn-no-block">Don't Block</button>
+  </div>
+</div>
+
+<div id="manual-battle-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3>Battle result</h3>
+    <p id="manual-battle-sub" class="hint"></p>
+    <button id="btn-manual-a">Attacker is destroyed</button>
+    <button id="btn-manual-d">Defender is destroyed</button>
+    <button id="btn-manual-both" class="ghost">Both destroyed</button>
+    <button id="btn-manual-none" class="ghost">Neither</button>
   </div>
 </div>
 
