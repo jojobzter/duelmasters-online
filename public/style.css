@@ -85,6 +85,7 @@ input {
 }
 .card-thumb .zoom-btn:hover { background: rgba(58,91,160,0.9); }
 .card-thumb .take-btn { width: 100%; margin: 4px 0 0; padding: 5px 0; font-size: 0.8em; background: #2a7a4a; }
+.card-thumb.dimmed { opacity: 0.42; }
 .card-thumb .take-btn:hover { background: #34925a; }
 .card-thumb .cost-badge {
   position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.75); color: #fff;
@@ -375,6 +376,10 @@ input {
   content: '\2713'; position: absolute; top: 4px; right: 4px;
   background: #e04b4b; color: #fff; width: 26px; height: 26px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center; font-size: 0.9em; font-weight: bold;
+}
+.discard-grid .pick .pw-badge {
+  position: absolute; top: 6px; left: 6px; background: rgba(0,0,0,0.78); color: #ffd88a;
+  border-radius: 5px; padding: 2px 7px; font-size: 0.8em; font-weight: bold; border: 1px solid #6a5a2a;
 }
 .discard-grid .pick .zoom-btn {
   position: absolute; bottom: 6px; right: 6px; background: rgba(0,0,0,0.7);

@@ -220,7 +220,7 @@
 
 <div id="search-modal" class="gy-modal" style="display:none">
   <div class="gy-modal-inner">
-    <h3>Search Your Deck — right-click a card to take it</h3>
+    <h3 id="search-modal-title">Search Your Deck</h3>
     <div id="search-modal-grid" class="card-grid"></div>
     <button id="search-modal-close">Close & Shuffle</button>
   </div>
@@ -257,10 +257,10 @@
 
 <div id="attack-trigger-modal" class="modal-overlay" style="display:none">
   <div class="modal-box">
-    <h3>Attack trigger</h3>
+    <h3>Tap for what?</h3>
     <p id="attack-trigger-text" class="hint"></p>
-    <button id="btn-attack-yes">Yes, it attacked</button>
-    <button id="btn-attack-no">No, just tapped</button>
+    <button id="btn-attack-yes">Attack</button>
+    <button id="btn-attack-no">Use tap ability</button>
   </div>
 </div>
 
@@ -270,6 +270,15 @@
     <p id="target-pick-sub" class="hint"></p>
     <div id="target-pick-grid" class="discard-grid"></div>
     <button id="btn-target-pick-skip" class="ghost">Skip</button>
+  </div>
+</div>
+
+<div id="multi-pick-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="multi-pick-title">Choose creatures</h3>
+    <p id="multi-pick-sub" class="hint"></p>
+    <div id="multi-pick-grid" class="discard-grid"></div>
+    <button id="btn-multi-pick-ok">Confirm</button>
   </div>
 </div>
 

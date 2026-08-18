@@ -615,11 +615,19 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'searchDeckOffer') {
-    if (seatIndex === activeSeat) openSearchModal(msg.cards);
+    if (seatIndex === activeSeat) openSearchModal(msg.cards, msg.filter, msg.source);
     return;
   }
-  if (msg.type === 'attackTriggerOffer') {
-    if (seatIndex === activeSeat) openAttackTriggerModal(msg.key, msg.prompt);
+  if (msg.type === 'revealCards') {
+    if (seatIndex === activeSeat) openRevealModal(msg.title, msg.cards);
+    return;
+  }
+  if (msg.type === 'tapModeOffer') {
+    if (seatIndex === activeSeat) openTapModeModal(msg.key, msg.name);
+    return;
+  }
+  if (msg.type === 'endTurnPrompt') {
+    if (seatIndex === activeSeat) openEndTurnPrompt(msg.key, msg.name);
     return;
   }
   if (msg.type === 'shieldTriggerOffer') {
@@ -924,29 +932,73 @@ function openGyModal(title, cards, ownerIdx, isMine) {
 }
 document.getElementById('gy-modal-close').addEventListener('click', () => { document.getElementById('gy-modal').style.display = 'none'; });
 
-function openSearchModal(cards) {
+function openSearchModal(entries, filter, source) {
   const grid = document.getElementById('search-modal-grid');
+  const title = document.getElementById('search-modal-title');
+  if (title) {
+    title.textContent = (source || 'Search Your Deck') +
+      (filter === 'spell' ? ' \u2014 take one SPELL' : ' \u2014 take one card');
+  }
   grid.innerHTML = '';
-  cards.forEach((id, index) => {
+  entries.forEach(entry => {
+    const id = entry.id;
+    // indices come from the server so a filtered view can't pick the wrong card
+    const index = entry.index;
+    const allowed = filter !== 'spell' || isSpellById(id);
     const div = document.createElement('div');
-    div.className = 'card-thumb';
+    div.className = 'card-thumb' + (allowed ? '' : ' dimmed');
     const c = cardDB.get(id);
-    // A dedicated Take button rather than right-click: right-click doesn't exist on
-    // a phone, so the old version made picking a card impossible there.
     div.innerHTML = cardImgHtml(id) +
       '<div class="zoom-btn" title="Preview">\u{1F50D}</div>' +
       '<div class="name">' + (c ? c.name : cardBaseName(id)) + '</div>' +
-      '<button class="take-btn">Take</button>';
+      (allowed ? '<button class="take-btn">Take</button>' : '<div class="hint" style="font-size:.7em">not a spell</div>');
     div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
-    div.querySelector('.take-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      sendMsg({ type: 'searchDeckPick', index });
-      document.getElementById('search-modal').style.display = 'none';
-    });
+    const takeBtn = div.querySelector('.take-btn');
+    if (takeBtn) {
+      takeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        sendMsg({ type: 'searchDeckPick', index });
+        document.getElementById('search-modal').style.display = 'none';
+      });
+    }
     grid.appendChild(div);
   });
   document.getElementById('search-modal').style.display = 'flex';
 }
+
+function powerById(id) {
+  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  return (meta && meta.power != null) ? meta.power : null;
+}
+function isBlockerById(id) {
+  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  return !!(meta && meta.blocker);
+}
+
+// card type comes from the shared card database loaded at startup
+function isSpellById(id) {
+  const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
+  return !!(meta && meta.type && /spell/i.test(meta.type));
+}
+
+// ---- read-only reveal (Rain of Arrows shows the opponent's hand) ----
+function openRevealModal(title, ids) {
+  document.getElementById('gy-modal-title').textContent = title;
+  const grid = document.getElementById('gy-modal-grid');
+  grid.innerHTML = '';
+  if (!ids.length) {
+    grid.innerHTML = '<div class="hint" style="padding:20px">No cards.</div>';
+  }
+  ids.forEach(id => {
+    const div = document.createElement('div');
+    div.className = 'card-thumb';
+    div.innerHTML = cardImgHtml(id);
+    makeMagnifiable(div, id);
+    grid.appendChild(div);
+  });
+  document.getElementById('gy-modal').style.display = 'flex';
+}
+
 document.getElementById('search-modal-close').addEventListener('click', () => {
   document.getElementById('search-modal').style.display = 'none';
   sendMsg({ type: 'searchDeckCancel' });
@@ -1068,29 +1120,70 @@ document.getElementById('btn-skip-effect').addEventListener('click', () => {
   }
 });
 
-// ---- target picker popup (Solar Ray: choose one of the opponent's untapped creatures) ----
+// ---- generic choice picker: works for any zone the effect names ----
 let targetPickEffectId = null;
-function openTargetPickModal(eff, oppBattlezone) {
-  const valid = oppBattlezone.filter(c => eff.pick === 'untapped' ? !c.tapped : true);
+function candidatesFor(eff, me, opp) {
+  const zones = {
+    oppBattle: opp.battlezone,
+    ownBattle: me.battlezone,
+    ownHand:   me.hand,
+    ownMana:   me.mana,
+    oppMana:   opp.mana,
+    ownGrave:  me.graveyard,
+    anyBattle: me.battlezone.concat(opp.battlezone)
+  };
+  let list = zones[eff.zone] || [];
+  if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
+  if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
+  if (eff.maxPower != null) {
+    // keep creatures with no recorded power — the player confirms those by hand
+    list = list.filter(c => { const p = powerById(c.id); return p == null || p <= eff.maxPower; });
+  }
+  // Petrova can't be chosen by the opponent's effects
+  if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle') {
+    list = list.filter(c => !(opp.battlezone.includes(c) && cardBaseName(c.id).toLowerCase() === 'petrova, channeler of suns'));
+  }
+  return list;
+}
+function zonePrompt(eff) {
+  switch (eff.action) {
+    case 'tap': return "Choose one of your opponent's untapped creatures to tap.";
+    case 'returnToHand':
+      return eff.zone === 'oppMana'
+        ? "Choose a card in your opponent's mana zone to return to their hand."
+        : "Choose a creature to return to its owner's hand.";
+    case 'toHand': return 'Choose a card to take back into your hand.';
+    case 'destroy': return eff.zone === 'ownBattle' ? 'Choose one of YOUR OWN creatures to destroy.' : 'Choose a creature to destroy.';
+    case 'toOwnerMana': return "Choose a creature to send to its owner's mana zone.";
+    case 'toOwnMana': return 'Choose a card from your hand to put into your mana zone.';
+    case 'toOwnerShield': return "Choose a non-evolution creature to put into its owner's shield zone.";
+    default: return 'Choose a card.';
+  }
+}
+function openTargetPickModal(eff, me, opp) {
+  const valid = candidatesFor(eff, me, opp);
   if (!valid.length) {
-    // nothing legal to hit — clear it out rather than leaving a prompt that can't resolve
-    sendMsg({ type: 'effectTargetSkip', effectId: eff.id });
+    sendMsg({ type: 'effectTargetSkip', effectId: eff.id });   // nothing legal to pick
     return;
   }
   targetPickEffectId = eff.id;
   document.getElementById('target-pick-title').textContent = eff.source;
-  document.getElementById('target-pick-sub').textContent =
-    eff.kind === 'tap' ? "Choose one of your opponent's untapped creatures to tap."
-    : eff.kind === 'returnToHand' ? "Choose a creature to return to your opponent's hand."
-    : 'Choose a creature to destroy.';
+  document.getElementById('target-pick-sub').textContent = zonePrompt(eff);
   const grid = document.getElementById('target-pick-grid');
   grid.innerHTML = '';
   valid.forEach(c => {
     const d = document.createElement('div');
     d.className = 'pick';
-    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>';
+    const pw = powerById(c.id);
+    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>' +
+      (eff.maxPower != null ? '<div class="pw-badge">' + (pw == null ? '?' : pw) + '</div>' : '');
     d.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(c.id); });
     d.addEventListener('click', () => {
+      if (eff.maxPower != null && powerById(c.id) == null) {
+        // power isn't in the spreadsheet yet, so the player has to vouch for it
+        if (!confirm('Is ' + (cardDB.get(c.id) ? cardDB.get(c.id).name : cardBaseName(c.id)) +
+                     ' a creature with power ' + eff.maxPower + ' or less?')) return;
+      }
       sendMsg({ type: 'effectTarget', effectId: eff.id, key: c.key });
       targetPickEffectId = null;
       document.getElementById('target-pick-modal').style.display = 'none';
@@ -1105,25 +1198,61 @@ document.getElementById('btn-target-pick-skip').addEventListener('click', () => 
   document.getElementById('target-pick-modal').style.display = 'none';
 });
 
-// ---- attack triggers (Horrid Worm) ----
-let attackOfferKeyClient = null;
-function openAttackTriggerModal(key, prompt) {
-  attackOfferKeyClient = key;
-  document.getElementById('attack-trigger-text').textContent = prompt;
+// ---- multi-select for mass effects whose power data is incomplete (Searing Wave) ----
+let multiPickId = null, multiPickChosen = new Set();
+function openMultiPickModal(pm, oppBattlezone) {
+  multiPickId = pm.id;
+  multiPickChosen = new Set();
+  document.getElementById('multi-pick-title').textContent = pm.source;
+  document.getElementById('multi-pick-sub').textContent = pm.prompt;
+  const grid = document.getElementById('multi-pick-grid');
+  grid.innerHTML = '';
+  pm.keys.forEach(k => {
+    const c = oppBattlezone.find(x => x.key === k);
+    if (!c) return;
+    const d = document.createElement('div');
+    d.className = 'pick';
+    d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>';
+    d.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(c.id); });
+    d.addEventListener('click', () => {
+      if (multiPickChosen.has(k)) multiPickChosen.delete(k); else multiPickChosen.add(k);
+      d.classList.toggle('chosen', multiPickChosen.has(k));
+    });
+    grid.appendChild(d);
+  });
+  document.getElementById('multi-pick-modal').style.display = 'flex';
+}
+document.getElementById('btn-multi-pick-ok').addEventListener('click', () => {
+  if (multiPickId) sendMsg({ type: 'effectMultiResolve', effectId: multiPickId, keys: [...multiPickChosen] });
+  multiPickId = null; multiPickChosen = new Set();
+  document.getElementById('multi-pick-modal').style.display = 'none';
+});
+
+// ---- Gigazald: tapping a Darkness creature can mean attack OR use its tap ability ----
+let tapModeKey = null;
+function openTapModeModal(key, name) {
+  tapModeKey = key;
+  document.getElementById('attack-trigger-text').textContent =
+    name + ' — attack with it, or use its tap ability (Gigazald: opponent discards at random)?';
   document.getElementById('attack-trigger-modal').style.display = 'flex';
 }
-function closeAttackTriggerModal() {
-  attackOfferKeyClient = null;
-  document.getElementById('attack-trigger-modal').style.display = 'none';
-}
 document.getElementById('btn-attack-yes').addEventListener('click', () => {
-  if (attackOfferKeyClient) sendMsg({ type: 'attackTriggerConfirm', key: attackOfferKeyClient });
-  closeAttackTriggerModal();
+  if (tapModeKey) sendMsg({ type: 'battleTap', key: tapModeKey, mode: 'attack' });
+  tapModeKey = null;
+  document.getElementById('attack-trigger-modal').style.display = 'none';
 });
 document.getElementById('btn-attack-no').addEventListener('click', () => {
-  if (attackOfferKeyClient) sendMsg({ type: 'attackTriggerDecline', key: attackOfferKeyClient });
-  closeAttackTriggerModal();
+  if (tapModeKey) sendMsg({ type: 'battleTap', key: tapModeKey, mode: 'ability' });
+  tapModeKey = null;
+  document.getElementById('attack-trigger-modal').style.display = 'none';
 });
+
+// ---- end-of-turn question (Hearty Cap'n Polligon) ----
+function openEndTurnPrompt(key, name) {
+  if (confirm(name + ' — did it attack and break a shield this turn?\n\nOK returns it to your hand.')) {
+    sendMsg({ type: 'endTurnReturnConfirm', key });
+  }
+}
 
 function processNextShieldTrigger() {
   if (!shieldTriggerQueue.length) { shieldTriggerPendingKey = null; return; }
@@ -1298,8 +1427,12 @@ function renderState(state) {
   const manaDiscards = me.pendingManaDiscards || 0;
   if (myTargets.length) {
     const t = myTargets[0];
-    const verb = t.kind === 'returnToHand' ? "return it to your opponent's hand"
-               : t.kind === 'destroyUntapped' ? 'destroy it (untapped creatures only)'
+    const verb = t.action === 'returnToHand' ? "return it to its owner's hand"
+               : t.action === 'tap' ? 'tap it'
+               : t.action === 'toOwnerMana' ? "send it to its owner's mana zone"
+               : t.action === 'toHand' ? 'take it back to your hand'
+               : t.action === 'toOwnMana' ? 'put it into your mana zone'
+               : t.action === 'toOwnerShield' ? "put it into its owner's shield zone"
                : 'destroy it';
     document.getElementById('effect-banner-text').textContent =
       t.source + ' — right-click a creature in your opponent\'s battlezone to ' + verb + '.' +
@@ -1319,12 +1452,20 @@ function renderState(state) {
   }
 
   // ---- Solar Ray style effects open a picker automatically ----
-  const pickEff = myTargets.find(t => t.kind === 'tap');
+  const pickEff = myTargets[0];
   if (pickEff && targetPickEffectId !== pickEff.id) {
-    openTargetPickModal(pickEff, opp.battlezone);
+    openTargetPickModal(pickEff, me, opp);
   } else if (!pickEff && targetPickEffectId) {
     targetPickEffectId = null;
     document.getElementById('target-pick-modal').style.display = 'none';
+  }
+
+  // ---- mass effects needing manual confirmation (Searing Wave) ----
+  if (me.pendingMulti && multiPickId !== me.pendingMulti.id) {
+    openMultiPickModal(me.pendingMulti, opp.battlezone);
+  } else if (!me.pendingMulti && multiPickId) {
+    multiPickId = null;
+    document.getElementById('multi-pick-modal').style.display = 'none';
   }
 
   // ---- forced discards: open automatically, one at a time ----
@@ -1559,9 +1700,10 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
         if (pendingCorileUses > 0) {
           items.push(["Put on Top of Opponent's Deck (Corile)", () => sendMsg({ type: 'corilePutOnDeck', key: c.key })]);
         }
-        for (const t of (pendingTargets || [])) {
-          const label = t.kind === 'returnToHand' ? 'Return to Hand (' + t.source + ')'
-                      : t.kind === 'tap' ? 'Tap it (' + t.source + ')'
+        for (const t of (pendingTargets || []).filter(t => t.zone === 'oppBattle' || t.zone === 'anyBattle')) {
+          const label = t.action === 'returnToHand' ? 'Return to Hand (' + t.source + ')'
+                      : t.action === 'tap' ? 'Tap it (' + t.source + ')'
+                      : t.action === 'toOwnerMana' ? 'Send to Mana (' + t.source + ')'
                       : 'Destroy (' + t.source + ')';
           items.push([label, () => sendMsg({ type: 'effectTarget', effectId: t.id, key: c.key })]);
         }
