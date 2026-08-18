@@ -674,7 +674,7 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'endTurnPrompt') {
-    if (seatIndex === activeSeat) openEndTurnPrompt(msg.key, msg.name);
+    if (seatIndex === activeSeat) openEndTurnPrompt(msg.key, msg.name, msg.kind);
     return;
   }
   if (msg.type === 'shieldTriggerOffer') {
@@ -908,11 +908,16 @@ function showContextMenu(x, y, items, anchorEl, revertFn) {
   menu.innerHTML = '';
   items.forEach(item => {
     if (item === '--') { const d = document.createElement('div'); d.className = 'context-menu-divider'; menu.appendChild(d); return; }
-    const [label, fn] = item;
+    const [label, fn, disabledReason] = item;
     const div = document.createElement('div');
-    div.className = 'context-menu-item';
+    div.className = 'context-menu-item' + (disabledReason ? ' disabled' : '');
     div.textContent = label;
-    div.addEventListener('click', () => { fn(); hideContextMenu(); });
+    if (disabledReason) {
+      div.title = disabledReason;
+      div.addEventListener('click', (e) => e.stopPropagation());   // greyed out: does nothing
+    } else {
+      div.addEventListener('click', () => { fn(); hideContextMenu(); });
+    }
     menu.appendChild(div);
   });
   menu.style.left = Math.min(x, window.innerWidth - 220) + 'px';
@@ -984,21 +989,24 @@ function openSearchModal(entries, filter, source) {
   const title = document.getElementById('search-modal-title');
   if (title) {
     title.textContent = (source || 'Search Your Deck') +
-      (filter === 'spell' ? ' \u2014 take one SPELL' : ' \u2014 take one card');
+      (filter ? ' \u2014 take one ' + filter.toUpperCase() : ' \u2014 take one card');
   }
   grid.innerHTML = '';
   entries.forEach(entry => {
     const id = entry.id;
     // indices come from the server so a filtered view can't pick the wrong card
     const index = entry.index;
-    const allowed = filter !== 'spell' || isSpellById(id);
+    let allowed = true;
+    if (filter === 'spell') allowed = isSpellById(id);
+    else if (filter === 'creature') allowed = !isSpellById(id);
+    else if (filter === 'nature creature') allowed = !isSpellById(id) && (cardMetaFor(id).civs || []).includes('Nature');
     const div = document.createElement('div');
     div.className = 'card-thumb' + (allowed ? '' : ' dimmed');
     const c = cardDB.get(id);
     div.innerHTML = cardImgHtml(id) +
       '<div class="zoom-btn" title="Preview">\u{1F50D}</div>' +
       '<div class="name">' + (c ? c.name : cardBaseName(id)) + '</div>' +
-      (allowed ? '<button class="take-btn">Take</button>' : '<div class="hint" style="font-size:.7em">not a spell</div>');
+      (allowed ? '<button class="take-btn">Take</button>' : '<div class="hint" style="font-size:.7em">not eligible</div>');
     div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
     const takeBtn = div.querySelector('.take-btn');
     if (takeBtn) {
@@ -1181,11 +1189,14 @@ function candidatesFor(eff, me, opp) {
     ownMana:   me.mana,
     oppMana:   opp.mana,
     ownGrave:  me.graveyard,
+    ownShield: me.shields,
     anyBattle: me.battlezone.concat(opp.battlezone)
   };
   let list = zones[eff.zone] || [];
   if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
   if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
+  if (eff.filter === 'spell') list = list.filter(c => isSpellById(c.id));
+  if (eff.filter === 'creature') list = list.filter(c => !isSpellById(c.id));
   if (eff.maxPower != null) {
     // keep creatures with no recorded power — the player confirms those by hand
     list = list.filter(c => { const p = powerById(c.id); return p == null || p <= eff.maxPower; });
@@ -1208,6 +1219,9 @@ function zonePrompt(eff) {
     case 'toOwnerMana': return "Choose a creature to send to its owner's mana zone.";
     case 'toOwnMana': return 'Choose a card from your hand to put into your mana zone.';
     case 'toOwnerShield': return "Choose a non-evolution creature to put into its owner's shield zone.";
+    case 'toGrave': return eff.zone === 'ownShield'
+      ? 'Choose one of your shields to put into your graveyard.'
+      : 'Choose a card to put into your graveyard.';
     default: return 'Choose a card.';
   }
 }
@@ -1254,6 +1268,13 @@ let attackChoiceKey = null;      // creature we're declaring an attack with
 let manualBattleData = null;
 
 function cardMetaFor(id) { return cardMetaDB.get(cardBaseName(id).toLowerCase()) || {}; }
+function isSummoningSick(state, card) {
+  if (!state) return false;
+  if (cardMetaFor(card.id).speedAttacker) return false;
+  const mine = state.players[state.you];
+  if (mine && mine.turboRushActive) return false;
+  return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
+}
 function restrictionFor(id) { return (cardMetaFor(id).attackRestriction || 'none').toLowerCase(); }
 function canAttackShieldsC(id) {
   const r = restrictionFor(id);
@@ -1289,8 +1310,11 @@ function openAttackTargetModal(card, state) {
     });
     grid.appendChild(d);
   });
+  const dcActive = !!(me && me.diamondCutterActive);
   const shieldBtn = document.getElementById('btn-attack-shields');
-  shieldBtn.style.display = (canAttackShieldsC(card.id) && opp.shields.length) ? 'inline-block' : 'none';
+  shieldBtn.style.display = ((canAttackShieldsC(card.id) || dcActive) && opp.shields.length) ? 'inline-block' : 'none';
+  if (dcActive && !canAttackShieldsC(card.id)) shieldBtn.textContent = 'Attack Shields (Diamond Cutter)';
+  else shieldBtn.textContent = 'Attack Shields';
   document.getElementById('attack-target-modal').style.display = 'flex';
 }
 function closeAttackTargetModal() {
@@ -1363,26 +1387,42 @@ document.getElementById('btn-manual-none').addEventListener('click', () => sendM
 
 // ---- multi-select for mass effects whose power data is incomplete (Searing Wave) ----
 let multiPickId = null, multiPickChosen = new Set();
-function openMultiPickModal(pm, oppBattlezone) {
+let truceAsked = false;
+function openMultiPickModal(pm, me, opp) {
   multiPickId = pm.id;
   multiPickChosen = new Set();
+  const zones = {
+    oppBattle: opp.battlezone, ownBattle: me.battlezone,
+    anyBattle: me.battlezone.concat(opp.battlezone),
+    ownGrave: me.graveyard, ownMana: me.mana, oppMana: opp.mana, ownHand: me.hand
+  };
+  const pool = zones[pm.zone] || opp.battlezone;
   document.getElementById('multi-pick-title').textContent = pm.source;
-  document.getElementById('multi-pick-sub').textContent = pm.prompt;
+  document.getElementById('multi-pick-sub').textContent = pm.prompt || 'Choose cards.';
   const grid = document.getElementById('multi-pick-grid');
   grid.innerHTML = '';
   pm.keys.forEach(k => {
-    const c = oppBattlezone.find(x => x.key === k);
+    const c = pool.find(x => x.key === k);
     if (!c) return;
     const d = document.createElement('div');
     d.className = 'pick';
     d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>';
     d.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(c.id); });
     d.addEventListener('click', () => {
-      if (multiPickChosen.has(k)) multiPickChosen.delete(k); else multiPickChosen.add(k);
+      if (multiPickChosen.has(k)) multiPickChosen.delete(k);
+      else {
+        if (pm.max && multiPickChosen.size >= pm.max) return;   // respect "up to N"
+        multiPickChosen.add(k);
+      }
       d.classList.toggle('chosen', multiPickChosen.has(k));
+      const btn = document.getElementById('btn-multi-pick-ok');
+      btn.textContent = pm.max && pm.max < 90
+        ? 'Confirm (' + multiPickChosen.size + '/' + pm.max + ')'
+        : 'Confirm (' + multiPickChosen.size + ')';
     });
     grid.appendChild(d);
   });
+  document.getElementById('btn-multi-pick-ok').textContent = 'Confirm (0)';
   document.getElementById('multi-pick-modal').style.display = 'flex';
 }
 document.getElementById('btn-multi-pick-ok').addEventListener('click', () => {
@@ -1411,7 +1451,11 @@ document.getElementById('btn-attack-no').addEventListener('click', () => {
 });
 
 // ---- end-of-turn question (Hearty Cap'n Polligon) ----
-function openEndTurnPrompt(key, name) {
+function openEndTurnPrompt(key, name, kind) {
+  if (kind === 'untap') {
+    if (confirm(name + ' — untap it at the end of your turn?')) sendMsg({ type: 'endTurnUntap', key });
+    return;
+  }
   if (confirm(name + ' — did it attack and break a shield this turn?\n\nOK returns it to your hand.')) {
     sendMsg({ type: 'endTurnReturnConfirm', key });
   }
@@ -1642,9 +1686,20 @@ function renderState(state) {
     eb.style.display = 'flex';
   }
 
+  // ---- Miraculous Truce: name a civilization ----
+  if (me.pendingTruce && !truceAsked) {
+    truceAsked = true;
+    setTimeout(() => {
+      const civ = prompt('Miraculous Truce — name a civilization that can\'t attack you until your next turn:\n\nLight, Water, Darkness, Fire or Nature');
+      const match = ['Light','Water','Darkness','Fire','Nature'].find(c => c.toLowerCase() === (civ || '').trim().toLowerCase());
+      if (match) sendMsg({ type: 'chooseTruceCiv', civ: match });
+      truceAsked = false;
+    }, 50);
+  }
+
   // ---- mass effects needing manual confirmation (Searing Wave) ----
   if (me.pendingMulti && multiPickId !== me.pendingMulti.id) {
-    openMultiPickModal(me.pendingMulti, opp.battlezone);
+    openMultiPickModal(me.pendingMulti, me, opp);
   } else if (!me.pendingMulti && multiPickId) {
     multiPickId = null;
     document.getElementById('multi-pick-modal').style.display = 'none';
@@ -1889,9 +1944,16 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
         const st = seats[activeSeat] && seats[activeSeat].state;
         const myTurn = st && st.activeTurn === st.you;
         const meta = cardMetaFor(c.id);
-        const canAtk = !restrictionFor(c.id).includes('cannot attack');
-        if (!c.tapped && myTurn && canAtk && !(st && st.combat)) {
-          items.push(['\u2694 Attack', () => openAttackTargetModal(c, st)]);
+        const restr = restrictionFor(c.id);
+        // Diamond Cutter lets anything swing at shields this turn, so the option stays live
+        const dcActive = !!(st && st.players[st.you] && st.players[st.you].diamondCutterActive);
+        let attackBlockedBy = null;
+        if (restr.includes('cannot attack') && !dcActive) attackBlockedBy = "This creature can't attack.";
+        else if (!myTurn) attackBlockedBy = 'You can only attack on your own turn.';
+        else if (st && st.combat) attackBlockedBy = 'An attack is already being resolved.';
+        else if (isSummoningSick(st, c) && !dcActive) attackBlockedBy = 'Summoning sickness — it can\'t attack the turn it arrived.';
+        if (!c.tapped) {
+          items.push(['\u2694 Attack', () => openAttackTargetModal(c, st), attackBlockedBy]);
           if (meta.tapAbility) items.push(['Use tap ability', () => sendMsg({ type: 'battleTap', key: c.key, mode: 'ability' })]);
         }
         items.push([c.tapped ? 'Untap' : 'Tap (no attack)', () => sendMsg({ type: 'battleTap', key: c.key })]);

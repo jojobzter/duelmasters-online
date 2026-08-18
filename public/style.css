@@ -316,6 +316,8 @@ input {
 .context-menu { position: fixed; background: #22262f; border: 1px solid #3a3f4a; border-radius: 6px; padding: 4px; z-index: 1000; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
 .context-menu-item { padding: 8px 16px; cursor: pointer; font-size: 0.95em; white-space: nowrap; border-radius: 4px; }
 .context-menu-item:hover { background: #3a5ba0; }
+.context-menu-item.disabled { color: #5f6672; cursor: not-allowed; }
+.context-menu-item.disabled:hover { background: transparent; }
 .context-menu-divider { height: 1px; background: #3a3f4a; margin: 4px 2px; }
 
 .gy-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 900; }
