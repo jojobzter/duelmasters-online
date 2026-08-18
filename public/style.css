@@ -364,6 +364,20 @@ input {
 .shield-trigger-preview img { width: auto; height: auto; max-width: min(70vw, 340px); max-height: 46vh; border-radius: 8px; display: block; }
 
 .effect-banner { background: #4a2a5a; border-color: #7a4a9a; }
+.power-overlay {
+  position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.78); color: #59ff9d; border: 1px solid #59ff9d;
+  border-radius: 6px; padding: 1px 8px; font-weight: bold; font-size: 0.95em;
+  text-shadow: 0 0 6px rgba(89,255,157,.9); pointer-events: none; z-index: 30;
+}
+.race-grid { display: flex; flex-wrap: wrap; gap: 6px; max-height: 46vh; overflow-y: auto; justify-content: center; }
+.race-chip { background: #2a2f3a; padding: 6px 12px; font-size: .85em; margin: 0; min-width: auto; }
+.race-chip:hover { background: #3a5ba0; }
+.whose-side {
+  text-align: right; font-size: 1.6em; font-weight: 800; letter-spacing: .08em;
+  color: rgba(255,255,255,.10); margin: 2px 8px -6px 0; user-select: none; pointer-events: none;
+}
+
 .select-bar {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
   background: rgba(20,32,48,0.96); border: 1px solid #4a7fb0; border-radius: 10px;

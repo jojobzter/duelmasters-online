@@ -1109,7 +1109,11 @@ document.getElementById('btn-quit').addEventListener('click', () => {
 });
 document.getElementById('btn-stop-showing').addEventListener('click', () => sendMsg({ type: 'setShowingHand', show: false }));
 document.getElementById('btn-skip-corile').addEventListener('click', () => sendMsg({ type: 'corileSkip' }));
-document.getElementById('btn-end-turn').addEventListener('click', () => sendMsg({ type: 'endTurn' }));
+document.getElementById('btn-end-turn').addEventListener('click', () => {
+  sendMsg({ type: 'endTurn' });
+  // practice mode: hop to the other player so you're always looking at whoever is up
+  if (isSolo) setTimeout(() => switchSeat(activeSeat === 0 ? 1 : 0), 260);
+});
 
 // ====================== Shield Trigger prompt ======================
 let shieldTriggerQueue = [];
@@ -1233,6 +1237,7 @@ function zonePrompt(eff) {
     case 'destroy': return eff.zone === 'ownBattle' ? 'Choose one of YOUR OWN creatures to destroy.' : 'Choose a creature to destroy.';
     case 'toOwnerMana': return "Choose a creature to send to its owner's mana zone.";
     case 'toOwnMana': return 'Choose a card from your hand to put into your mana zone.';
+    case 'toTopOfDeck': return "Choose a creature to put on top of its owner's deck.";
     case 'toOwnerShield': return "Choose a non-evolution creature to put into its owner's shield zone.";
     case 'toGrave': return eff.zone === 'ownShield'
       ? 'Choose one of your shields to put into your graveyard.'
@@ -1402,6 +1407,34 @@ document.getElementById('btn-manual-none').addEventListener('click', () => sendM
 // ---- multi-select for mass effects whose power data is incomplete (Searing Wave) ----
 let multiPickId = null, multiPickChosen = new Set();
 let truceAsked = false;
+let raceAsked = false;
+let ALL_RACES = [];
+fetch('/api/races').then(r => r.json()).then(list => { ALL_RACES = list || []; }).catch(() => {});
+
+function openRacePicker(source) {
+  const grid = document.getElementById('race-pick-grid');
+  document.getElementById('race-pick-title').textContent = source;
+  grid.innerHTML = '';
+  const search = document.getElementById('race-pick-search');
+  const draw = (filter) => {
+    grid.innerHTML = '';
+    const f = (filter || '').toLowerCase();
+    ALL_RACES.filter(r => !f || r.toLowerCase().includes(f)).slice(0, 400).forEach(r => {
+      const b = document.createElement('button');
+      b.className = 'race-chip';
+      b.textContent = r;
+      b.addEventListener('click', () => {
+        sendMsg({ type: 'choosePetrovaRace', race: r });
+        document.getElementById('race-pick-modal').style.display = 'none';
+      });
+      grid.appendChild(b);
+    });
+  };
+  search.value = '';
+  search.oninput = () => draw(search.value);
+  draw('');
+  document.getElementById('race-pick-modal').style.display = 'flex';
+}
 function openMultiPickModal(pm, me, opp) {
   multiPickId = pm.id;
   multiPickChosen = new Set();
@@ -1801,7 +1834,7 @@ function renderState(state) {
   renderManaZone('opp-mana', opp.mana, false, oppIdx);
   renderShieldZone('my-shields', me.shields, true, meIdx);
   renderShieldZone('opp-shields', opp.shields, false, oppIdx);
-  const pendingCorileUses = me.pendingCorileUses || 0;
+  const pendingCorileUses = 0;  // Corile now goes through the standard target highlighting
   renderBattleHalf('my-battle', me.battlezone, true, meIdx, pendingCorileUses, me.pendingTargets || []);
   renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx, pendingCorileUses, me.pendingTargets || []);
   const canSearch = me.battlezone.some(c => cardBaseName(c.id).toLowerCase() === 'crystal memory');
@@ -1868,6 +1901,14 @@ function renderState(state) {
   blockModal.style.display = 'none';   // blocking is chosen on the table now
   // shield breaking is handled by the select bar
 
+  // ---- Petrova: name a race ----
+  if (me.pendingRaceChoice && !raceAsked) {
+    raceAsked = true;
+    openRacePicker(me.pendingRaceChoice.source);
+  } else if (!me.pendingRaceChoice) {
+    raceAsked = false;
+  }
+
   // ---- Miraculous Truce: name a civilization ----
   if (me.pendingTruce && !truceAsked) {
     truceAsked = true;
@@ -1933,6 +1974,12 @@ function renderState(state) {
   }
   lastActiveTurn = (state.activeTurn === undefined) ? null : state.activeTurn;
   ti.className = 'turn-indicator' + (state.dealt[oppIdx] ? ' my-turn' : '');
+
+  const ws = document.getElementById('whose-side');
+  if (ws) {
+    const myName = (state.names && state.names[meIdx]) ? state.names[meIdx] : ('Player ' + (meIdx + 1));
+    ws.textContent = isSolo ? ('VIEWING: ' + myName.toUpperCase()) : myName.toUpperCase();
+  }
 
   applySelectionClasses();
   applySelectableHighlights(state, me, opp);
@@ -2089,7 +2136,10 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
     const div = document.createElement('div');
     div.className = 'card' + (c.tapped ? ' tapped' : '');
     div.dataset.key = c.key;
-    div.innerHTML = cardImgHtml(c.id);
+    // green overlay only when a buff has changed the printed power
+    const boosted = (c.livePower != null && c.basePower != null && c.livePower !== c.basePower);
+    div.innerHTML = cardImgHtml(c.id) +
+      (boosted ? '<div class="power-overlay">' + c.livePower + '</div>' : '');
     makeMagnifiable(div, c.id);
 
     const xPct0 = (c.x != null) ? c.x : 4;
@@ -2145,13 +2195,11 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
         items.push(['Destroy', () => sendMsg({ type: 'battleDestroy', key: c.key })]);
         items.push(['Return to Hand', () => sendMsg({ type: 'battleReturn', key: c.key })]);
       } else {
-        if (pendingCorileUses > 0) {
-          items.push(["Put on Top of Opponent's Deck (Corile)", () => sendMsg({ type: 'corilePutOnDeck', key: c.key })]);
-        }
         for (const t of (pendingTargets || []).filter(t => t.zone === 'oppBattle' || t.zone === 'anyBattle')) {
           const label = t.action === 'returnToHand' ? 'Return to Hand (' + t.source + ')'
                       : t.action === 'tap' ? 'Tap it (' + t.source + ')'
                       : t.action === 'toOwnerMana' ? 'Send to Mana (' + t.source + ')'
+                      : t.action === 'toTopOfDeck' ? 'Put on Top of Deck (' + t.source + ')'
                       : 'Destroy (' + t.source + ')';
           items.push([label, () => sendMsg({ type: 'effectTarget', effectId: t.id, key: c.key })]);
         }

@@ -156,6 +156,7 @@
       </div>
     </div>
 
+    <div id="whose-side" class="whose-side"></div>
     <div class="zone-label">Your Hand</div>
     <div id="my-hand" class="zone hand-zone"></div>
   </div>
@@ -302,6 +303,15 @@
     <button id="btn-manual-d">Defender is destroyed</button>
     <button id="btn-manual-both" class="ghost">Both destroyed</button>
     <button id="btn-manual-none" class="ghost">Neither</button>
+  </div>
+</div>
+
+<div id="race-pick-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h3 id="race-pick-title">Choose a race</h3>
+    <p class="hint">Your other creatures of this race get +4000 while Petrova stays in the battle zone.</p>
+    <input id="race-pick-search" placeholder="Search races..." style="width:100%;margin-bottom:8px" />
+    <div id="race-pick-grid" class="race-grid"></div>
   </div>
 </div>
 
