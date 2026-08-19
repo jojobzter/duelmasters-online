@@ -431,6 +431,7 @@ function openDeckViewModal(name, cards) {
 document.getElementById('deck-view-close').addEventListener('click', () => { document.getElementById('deck-view-modal').style.display = 'none'; });
 
 function refreshSavedDecks() {
+  setTimeout(refreshBotDeckSelect, 0);
   const wrap = document.getElementById('saved-decks');
   wrap.innerHTML = '';
   const decks = getSavedDecks();
@@ -708,6 +709,44 @@ document.getElementById('btn-join-room').addEventListener('click', () => {
   document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
   openSeat(0, { type: 'join', room: code, name: myName() });
 });
+// ---- play against the computer ----
+// Reuses the practice-mode plumbing: seat 0 is you, seat 1 is the bot. The bot gets
+// its own connection and only ever sees its own hand, exactly like a remote opponent.
+let isBotGame = false;
+let botDeck = null;
+function refreshBotDeckSelect() {
+  const sel = document.getElementById('bot-deck-select');
+  if (!sel) return;
+  const decks = getSavedDecks();
+  const names = Object.keys(decks);
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (!names.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = '(no saved decks)';
+    sel.appendChild(o);
+    return;
+  }
+  names.forEach(n => {
+    const o = document.createElement('option');
+    o.value = n; o.textContent = n + ' (' + decks[n].length + ')';
+    sel.appendChild(o);
+  });
+  if (prev && names.includes(prev)) sel.value = prev;
+  else if (selectedDeckName && names.includes(selectedDeckName)) sel.value = selectedDeckName;
+}
+document.getElementById('btn-vs-computer').addEventListener('click', () => {
+  const decks = getSavedDecks();
+  if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select your own deck above first.'); return; }
+  const botName = document.getElementById('bot-deck-select').value;
+  if (!botName || !decks[botName]) { alert("Choose a deck for the computer to play."); return; }
+  practiceDeck = healDeckIds(decks[selectedDeckName]);
+  botDeck = healDeckIds(decks[botName]);
+  isSolo = true; isBotGame = true;
+  document.getElementById('room-info').textContent = 'Starting game against the computer...';
+  openSeat(0, { type: 'create', name: myName() });
+});
+
 document.getElementById('btn-practice').addEventListener('click', () => {
   const decks = getSavedDecks();
   if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
@@ -767,8 +806,16 @@ function handleSeatMessage(seatIndex, msg) {
       // heal ids first, so a deck saved before a file rename still finds its images
       const deckToUse = healDeckIds(isSolo ? practiceDeck : decks[selectedDeckName]);
       if (deckToUse && deckToUse.length) sendOnSeat(0, { type: 'submitDeck', deck: deckToUse });
-      if (isSolo) { openSeat(1, { type: 'join', room: msg.room }); }
-    } else if (isSolo) { sendOnSeat(1, { type: 'submitDeck', deck: healDeckIds(practiceDeck) }); showSeatSwitcher(); }
+      if (isSolo) { openSeat(1, { type: 'join', room: msg.room, name: isBotGame ? 'Computer' : undefined }); }
+    } else if (isSolo) {
+      const seatDeck = isBotGame ? botDeck : practiceDeck;
+      sendOnSeat(1, { type: 'submitDeck', deck: healDeckIds(seatDeck) });
+      if (isBotGame) {
+        Bot.start({ seatIdx: 1, deck: botDeck, send: (m) => sendOnSeat(1, m) });
+      } else {
+        showSeatSwitcher();
+      }
+    }
     return;
   }
   if (msg.type === 'joinRequest') {
@@ -812,35 +859,49 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'summonRejected') {
+    if (isBotGame && seatIndex === 1) { Bot.onRejected(seats[1].state); return; }
     deliverPrompt(seatIndex, () => alert(msg.reason));
     return;
   }
   if (msg.type === 'searchDeckOffer') {
+    if (isBotGame && seatIndex === 1) {
+      // take the first legal option the server offered
+      const pick = (msg.cards || [])[0];
+      if (pick) setTimeout(() => sendOnSeat(1, { type: 'searchDeckPick', index: pick.index }), 600);
+      else setTimeout(() => sendOnSeat(1, { type: 'searchDeckCancel' }), 400);
+      return;
+    }
     deliverPrompt(seatIndex, () => openSearchModal(msg.cards, msg.filter, msg.source, msg.costEquals));
     return;
   }
   if (msg.type === 'revealCards') {
+    if (isBotGame && seatIndex === 1) { return; }
     deliverPrompt(seatIndex, () => openRevealModal(msg.title, msg.cards));
     return;
   }
   if (msg.type === 'manualBattle') {
+    if (isBotGame && seatIndex === 1) { return; }   // the human decides these
     deliverPrompt(seatIndex, () => openManualBattle(msg.battle));
     return;
   }
   if (msg.type === 'tapModeOffer') {
+    if (isBotGame && seatIndex === 1) { Bot.onTapMode(msg.key); return; }
     deliverPrompt(seatIndex, () => openTapModeModal(msg.key, msg.name));
     return;
   }
   if (msg.type === 'endTurnPrompt') {
+    if (isBotGame && seatIndex === 1) { return; }
     deliverPrompt(seatIndex, () => openEndTurnPrompt(msg.key, msg.name, msg.kind));
     return;
   }
   if (msg.type === 'shieldTriggerOffer') {
+    if (isBotGame && seatIndex === 1) { Bot.onShieldTrigger(msg.key); return; }
     deliverPrompt(seatIndex, () => openShieldTriggerModal(msg.key, msg.id));
     return;
   }
   if (msg.type === 'state') {
     seat.state = msg.state;
+    if (isBotGame && seatIndex === 1) { Bot.onState(msg.state); return; }
     if (seatIndex === activeSeat) renderState(msg.state);
     return;
   }
@@ -1257,6 +1318,8 @@ document.getElementById('btn-rematch').addEventListener('click', () => {
 });
 document.getElementById('btn-quit').addEventListener('click', () => {
   // return to the lobby without a page reload, so the loaded card images survive
+  if (typeof Bot !== 'undefined') Bot.stop();
+  isBotGame = false;
   seats.forEach(s => { try { if (s.ws) s.ws.close(); } catch (e) {} s.ws = null; s.idx = null; s.state = null; });
   activeSeat = 0; isSolo = false; lastActiveTurn = null;
   document.getElementById('game-over-modal').style.display = 'none';
@@ -1277,8 +1340,9 @@ document.getElementById('btn-stop-showing').addEventListener('click', () => send
 document.getElementById('btn-skip-corile').addEventListener('click', () => sendMsg({ type: 'corileSkip' }));
 document.getElementById('btn-end-turn').addEventListener('click', () => {
   sendMsg({ type: 'endTurn' });
-  // practice mode: hop to the other player so you're always looking at whoever is up
-  if (isSolo) setTimeout(() => switchSeat(activeSeat === 0 ? 1 : 0), 260);
+  // practice mode: hop to the other player so you're always looking at whoever is up.
+  // Against the computer you stay put — seat 1 is the bot.
+  if (isSolo && !isBotGame) setTimeout(() => switchSeat(activeSeat === 0 ? 1 : 0), 260);
 });
 
 // ====================== Shield Trigger prompt ======================
@@ -2215,7 +2279,7 @@ function renderState(state) {
   const ws = document.getElementById('whose-side');
   if (ws) {
     const myName = (state.names && state.names[meIdx]) ? state.names[meIdx] : ('Player ' + (meIdx + 1));
-    ws.textContent = isSolo ? ('VIEWING: ' + myName.toUpperCase()) : myName.toUpperCase();
+    ws.textContent = (isSolo && !isBotGame) ? ('VIEWING: ' + myName.toUpperCase()) : myName.toUpperCase();
   }
 
   applySelectionClasses();

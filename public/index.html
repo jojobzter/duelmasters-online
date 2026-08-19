@@ -77,6 +77,12 @@
         <button id="btn-join-room">Join Game</button>
       </div>
       <div><button id="btn-practice">Practice Mode (Solo)</button></div>
+      <div style="margin-top:10px">
+        <button id="btn-vs-computer">Play vs Computer</button>
+        <label class="hint" style="margin-left:8px">Computer's deck:
+          <select id="bot-deck-select"></select>
+        </label>
+      </div>
     </div>
     <div id="connect-progress-wrap" class="progress-wrap" style="display:none">
       <div id="connect-progress-bar" class="progress-bar indeterminate"></div>
@@ -364,6 +370,7 @@
 </div>
 
 
+<script src="bot.js"></script>
 <script src="client.js"></script>
 </body>
 </html>
