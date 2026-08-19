@@ -3,8 +3,8 @@
   /* --card-scale is driven by the in-game zoom control; every measurement in the
      table derives from these two, so zooming reflows the layout instead of
      scaling a bitmap or overflowing the screen */
-  --card-base-w: 108px;
-  --card-base-h: 151px;
+  --card-base-w: 120px;
+  --card-base-h: 168px;
   --card-scale: 1;
   --card-w: calc(var(--card-base-w) * var(--card-scale));
   --card-h: calc(var(--card-base-h) * var(--card-scale));
@@ -150,8 +150,8 @@ input {
 #btn-decline-join { background: #6a3a3a; }
 
 /* ---- Table ---- */
-.table-screen { display: flex; gap: 12px; align-items: center; font-size: 1.05em; max-width: min(1700px, 100%); margin: 0 auto; overflow-x: hidden; }
-#table { flex: 1; min-width: 0; max-width: 100%; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
+.table-screen { display: flex; gap: 12px; align-items: flex-start; font-size: 1.05em; max-width: min(2100px, 100%); margin: 0 auto; }
+#table { flex: 1; min-width: 0; max-width: 100%; overflow: visible; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
 .zone-label { font-size: 0.68em; color: #bcd; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
 .center-label { text-align: center; }
 .zone { min-width: 0; background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -194,7 +194,7 @@ input {
    That means the track needs a minimum pixel width — otherwise on a narrow phone
    13.8% works out narrower than a card and creatures overlap. Below that width the
    zone scrolls sideways instead of squashing. */
-.battle-zone { flex-direction: column; min-width: 0; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; overflow-x: auto; }
+.battle-zone { flex-direction: column; min-width: 0; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; overflow: hidden; }
 .battle-half { position: relative; width: 100%; min-width: min(calc(var(--bz-card-w) * 7.6), 100%); min-height: calc(var(--bz-card-h) * 1.15 + 16px); padding: 4px; overflow: hidden; }
 .battle-divider { height: 1px; background: rgba(255,255,255,0.15); margin: 4px 0; }
 
@@ -228,6 +228,8 @@ input {
 .battle-half .card.tapped { margin: 0 calc(var(--bz-card-w) * 0.29); }
 .battle-half .card.dragging, .mana-zone .card.dragging { z-index: 500 !important; cursor: grabbing; }
 .mana-zone { position: relative; overflow: hidden; }
+#table, .zone { scrollbar-width: none; }
+#table::-webkit-scrollbar, .zone::-webkit-scrollbar { display: none; }
 
 /* fanned hand */
 .hand-zone .card { width: var(--hand-card-w); height: var(--hand-card-h); margin-left: calc(var(--hand-card-w) * -0.5); transform-origin: bottom center; }
