@@ -484,6 +484,8 @@ input {
   .table-screen { flex-direction: column; }
   #right-column { width: 100%; }
   :root { --card-base-w: 78px; --card-base-h: 109px; --hand-scale: 1.7; }
+  /* battlezone cards sized to fit the 13.8% column spacing, so they don't overlap */
+  :root { --bz-card-w: calc(var(--card-w) * 1.12); --bz-card-h: calc(var(--card-h) * 1.12); }
   .chat-messages { max-height: 180px; min-height: 100px; }
   .hand-zone { padding-right: calc(var(--card-w) * 1.4); }
   html, body { max-width: 100%; overflow-x: clip; }
@@ -498,6 +500,7 @@ input {
    six shields still fits across the narrow side. */
 @media (max-width: 760px) and (orientation: portrait) {
   :root { --card-base-w: 52px; --card-base-h: 73px; --hand-scale: 1.9; }
+  :root { --bz-card-w: calc(var(--card-w) * 0.78); --bz-card-h: calc(var(--card-h) * 0.78); }
   .screen { padding: 8px; }
   #table { padding: 8px; }
   .zone { padding: 5px; gap: 5px; }
