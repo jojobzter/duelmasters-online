@@ -649,8 +649,29 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     me.pendingTargets.push({ id: newKey(), zone: 'oppBattle', action: 'toTopOfDeck', filter: null,
                              source: cardLabel(cardId), spellKey: null, sourceKey: cardKey });
   }
-  if (name === SKYSWORD_NAME) me.pendingSkyswordMana = (me.pendingSkyswordMana || 0) + 1;
-  if (name === BRONZE_ARM_NAME) me.pendingBronzeArm = (me.pendingBronzeArm || 0) + 1;
+  // Skysword: top card of the deck into mana, then the next into shields face down.
+  // Resolves on its own — no prompts, no shuffle.
+  if (name === SKYSWORD_NAME) {
+    const toMana = me.deck.shift();
+    if (toMana) {
+      const slot = manaSlot(me);
+      me.mana.push({ id: toMana, key: newKey(), tapped: false, x: slot.x, y: slot.y });
+    }
+    const toShield = me.deck.shift();
+    if (toShield) {
+      me.shields.push({ id: toShield, key: newKey(), faceUp: false, slot: nextShieldSlot(me) });
+    }
+    const bits = [];
+    if (toMana) bits.push(cardLabel(toMana) + ' to their mana zone');
+    if (toShield) bits.push('a card to their shields face down');
+    extraLog.push(bits.length ? ('used ' + cardLabel(cardId) + ' to put ' + bits.join(' and ') + '.')
+                              : ('used ' + cardLabel(cardId) + ' but their deck was empty.'));
+    notices.push({
+      self: cardLabel(cardId) + ' \u2014 ' + (toMana ? cardLabel(toMana) + ' went to your mana zone' : 'no card for mana') +
+            (toShield ? ', and a new shield was added.' : '.'),
+      other: "%p's " + cardLabel(cardId) + ' added a card to their mana zone and a new shield.'
+    });
+  }
 
   const targetEff = TARGET_EFFECTS[name];
   if (targetEff) {
