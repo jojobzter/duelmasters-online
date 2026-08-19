@@ -2,6 +2,11 @@
 let cardDB = new Map();      // id ("DM-1/Name.png") -> {url, name, set}
 let cardBackUrl = null;      // from a "card back" folder, if present
 const IMG_EXT = /\.(png|jpg|jpeg|webp|gif)$/i;
+// Old decks may hold ids captured before a file was renamed; map them onto whatever
+// file is actually loaded now so saved decks keep working.
+function healDeckIds(ids) {
+  return (ids || []).map(id => resolveCardId(id) || id);
+}
 function stripExt(id) { return typeof id === 'string' ? id.replace(IMG_EXT, '') : id; }
 function cardBaseName(id) { return id ? (id.split('/').pop() || id) : ''; }
 // Filenames often can't hold an apostrophe, so it arrives as '_'. Normalising it here
@@ -17,7 +22,7 @@ function normKeyClient(name) {
 function displayName(id) {
   const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   if (meta && meta.name) return meta.name;
-  const c = cardDB.get(id);
+  const c = lookupCard(id);
   return c ? c.name : cardBaseName(id);
 }
 const CARD_BACK_FOLDER = /^card ?back$/i;
@@ -149,6 +154,7 @@ async function loadFolder() {
       const handle = await window.showDirectoryPicker();
       await scanDirHandle(handle);
       idbSet('cardsFolder', handle);
+      rebuildCardIndex();
       const n = importFoundDecklists();
       statusEl.textContent = cardDB.size + ' cards loaded from "' + handle.name + '".' +
         (cardBackUrl ? ' Card back found.' : '') +
@@ -163,6 +169,7 @@ async function loadFolder() {
 }
 document.getElementById('fallback-input').addEventListener('change', async (e) => {
   await scanFileList(e.target.files);
+  rebuildCardIndex();
   const nDecks = importFoundDecklists();
   document.getElementById('load-status').textContent = cardDB.size + ' cards loaded.' +
     (cardBackUrl ? ' Card back found.' : '') +
@@ -182,6 +189,7 @@ async function reloadRememberedFolder() {
     const perm = await rememberedFolderHandle.requestPermission({ mode: 'read' });
     if (perm !== 'granted') { statusEl.textContent = 'Permission denied — use "Choose cards folder" instead.'; return; }
     await scanDirHandle(rememberedFolderHandle);
+    rebuildCardIndex();
     const nr = importFoundDecklists();
     statusEl.textContent = cardDB.size + ' cards loaded from "' + rememberedFolderHandle.name + '".' +
       (cardBackUrl ? ' Card back found.' : '') + (nr ? '  ' + nr + ' deck(s) loaded.' : '');
@@ -201,6 +209,7 @@ document.getElementById('btn-reload-folder').addEventListener('click', reloadRem
   const perm = await handle.queryPermission({ mode: 'read' });
   if (perm === 'granted') {
     await scanDirHandle(handle);
+    rebuildCardIndex();
     const nd = importFoundDecklists();
     document.getElementById('load-status').textContent = cardDB.size + ' cards loaded from "' + handle.name + '" (remembered).' +
       (nd ? '  ' + nd + ' deck' + (nd === 1 ? '' : 's') + ' loaded.' : '');
@@ -214,8 +223,29 @@ document.getElementById('btn-reload-folder').addEventListener('click', reloadRem
 })();
 
 function faceDownHtml() { return cardBackUrl ? `<img src="${cardBackUrl}" alt="card back">` : ''; }
+// Filenames can't hold an apostrophe, so the same card may be saved in a deck as
+// "Cap_n" but sit on disk as "Cap'n" (or the reverse after a rename). Every image
+// lookup goes through here so those still resolve to the right file.
+const cardDBNorm = new Map();
+function rebuildCardIndex() {
+  cardDBNorm.clear();
+  for (const key of cardDB.keys()) {
+    const n = normKeyClient(key);
+    if (!cardDBNorm.has(n)) cardDBNorm.set(n, key);
+  }
+}
+function resolveCardId(id) {
+  if (!id) return null;
+  if (cardDB.has(id)) return id;
+  return cardDBNorm.get(normKeyClient(id)) || null;
+}
+function lookupCard(id) {
+  const real = resolveCardId(id);
+  return real ? cardDB.get(real) : null;
+}
+
 function cardImgHtml(id) {
-  const c = cardDB.get(id);
+  const c = lookupCard(id);
   if (c) return `<img src="${c.url}" alt="${c.name}">`;
   return `<div class="placeholder-label">${id || '?'}</div>`;
 }
@@ -304,7 +334,7 @@ function refreshCardGrid() {
     const c = cardDB.get(id);
     if (query && !c.name.toLowerCase().includes(query) && !c.set.toLowerCase().includes(query)) continue;
     if (!cardPassesFilters(id)) continue;
-    const meta = cardMetaDB.get(c.name.toLowerCase());
+    const meta = cardMetaDB.get(normKeyClient(c.name));
     const div = document.createElement('div');
     div.className = 'card-thumb';
     const count = currentDeck.filter(x => x === id).length;
@@ -391,7 +421,6 @@ function openDeckViewModal(name, cards) {
   [...counts.entries()].sort().forEach(([id, n]) => {
     const div = document.createElement('div');
     div.className = 'card-thumb';
-    const c = cardDB.get(id);
     div.innerHTML = cardImgHtml(id) + (n > 1 ? `<div class="count-badge">${n}</div>` : '') +
       `<div class="name">${displayName(id)}</div>`;
     makeMagnifiable(div, id);
@@ -735,10 +764,11 @@ function handleSeatMessage(seatIndex, msg) {
         rc.style.display = 'block';
       }
       const decks = getSavedDecks();
-      const deckToUse = isSolo ? practiceDeck : decks[selectedDeckName];
-      if (deckToUse) sendOnSeat(0, { type: 'submitDeck', deck: deckToUse });
+      // heal ids first, so a deck saved before a file rename still finds its images
+      const deckToUse = healDeckIds(isSolo ? practiceDeck : decks[selectedDeckName]);
+      if (deckToUse && deckToUse.length) sendOnSeat(0, { type: 'submitDeck', deck: deckToUse });
       if (isSolo) { openSeat(1, { type: 'join', room: msg.room }); }
-    } else if (isSolo) { sendOnSeat(1, { type: 'submitDeck', deck: practiceDeck }); showSeatSwitcher(); }
+    } else if (isSolo) { sendOnSeat(1, { type: 'submitDeck', deck: healDeckIds(practiceDeck) }); showSeatSwitcher(); }
     return;
   }
   if (msg.type === 'joinRequest') {
@@ -1155,7 +1185,6 @@ function openSearchModal(entries, filter, source, costEquals) {
     if (allowed && costEquals != null) allowed = (cardMetaFor(id).cost === costEquals);
     const div = document.createElement('div');
     div.className = 'card-thumb' + (allowed ? '' : ' dimmed');
-    const c = cardDB.get(id);
     div.innerHTML = cardImgHtml(id) +
       '<div class="zoom-btn" title="Preview">\u{1F50D}</div>' +
       '<div class="name">' + displayName(id) + '</div>' +
