@@ -430,7 +430,8 @@ function blockerOnly(id) { return restrictionOf(id).includes('blocker only'); }
 // Summoning sickness, unless the creature has Speed Attacker or Turbo Rush is active.
 function hasSummoningSickness(state, ownerIdx, card) {
   const owner = state.players[ownerIdx];
-  if (isEvolutionCard(card.id)) return false;   // evolution creatures can attack at once
+  if (card.under && card.under.length) return false;   // evolved: never sick
+  if (isEvolutionCard(card.id)) return false;          // evolution creatures can attack at once
   if (metaOf(card.id).speedAttacker) return false;
   if (owner.turboRushActive) return false;
   return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
@@ -1371,9 +1372,46 @@ wss.on('connection', (ws) => {
           }
           plan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
         }
+        // Evolution creatures are never summoned onto empty ground — they stack onto
+        // one of your creatures that shares a race with them.
+        let evoBase = null;
+        if (isEvolutionCard(cardId)) {
+          const legal = me.battlezone.filter(b => canEvolveOnto(cardId, b.id));
+          if (!legal.length) {
+            const need = (cardMeta(cardId) || {}).race || 'a matching race';
+            send(ws, { type: 'summonRejected', reason: cardLabel(cardId) + ' is an evolution creature — you need a ' + need + ' creature in your battle zone to evolve from.' });
+            return;
+          }
+          if (!msg.baseKey) {
+            send(ws, { type: 'summonRejected', reason: 'Choose which creature ' + cardLabel(cardId) + ' evolves from.' });
+            return;
+          }
+          evoBase = legal.find(b => b.key === msg.baseKey);
+          if (!evoBase) {
+            send(ws, { type: 'summonRejected', reason: cardLabel(cardId) + " can't evolve from that creature — the races don't match." });
+            return;
+          }
+        }
+
         const [c] = me.hand.splice(i, 1);
-        const { x, y } = battlefieldSlot(me);
-        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, brokeShieldThisTurn: false });
+        let x, y, inheritTapped = false, stack = [];
+        if (evoBase) {
+          // take the base's position, and inherit anything already stacked under it
+          x = evoBase.x; y = evoBase.y;
+          inheritTapped = !!evoBase.tapped;
+          stack = (evoBase.under || []).concat([{ id: evoBase.id, key: evoBase.key }]);
+          removeBattleCard(me, evoBase.key);
+        } else {
+          const slot = battlefieldSlot(me);
+          x = slot.x; y = slot.y;
+        }
+        // An evolution creature never has summoning sickness, so it simply doesn't
+        // record an arrival turn — that way it can't be flagged as sick by either
+        // side even if the card database hasn't loaded yet.
+        me.battlezone.push({ id: c.id, key: c.key, tapped: inheritTapped, x, y,
+                             summonedTurn: evoBase ? null : s.turnNumber,
+                             brokeShieldThisTurn: false, under: stack });
+        if (evoBase) extraLogs.push('evolved ' + cardLabel(c.id) + ' from ' + cardLabel(evoBase.id) + '.');
         if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
         else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
         // Turbo Rush: if one of your creatures already broke a shield this turn, your
@@ -1412,7 +1450,7 @@ wss.on('connection', (ws) => {
         if (!hasShieldTrigger(me.hand[i].id)) return; // only valid for actual Shield Trigger cards
         const [c] = me.hand.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
-        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, brokeShieldThisTurn: false });
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, brokeShieldThisTurn: false, under: [] });
         if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
         else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
@@ -1609,7 +1647,7 @@ wss.on('connection', (ws) => {
         if (i === -1) return;
         const [c] = me.graveyard.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
-        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y });
+        me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, under: [] });
         logText = 'returned ' + cardLabel(c.id) + ' from the graveyard to the battlefield.';
         break;
       }
