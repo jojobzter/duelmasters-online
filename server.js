@@ -942,16 +942,15 @@ function playerLabel(room, idx) {
 }
 // Log lines are written per-viewer so the acting player reads "You drew a card."
 // while their opponent reads "jobster drew a card." — text passed in is a verb phrase.
+// The log always names the acting player, which reads better as a shared record of
+// the match — and matters in practice mode, where "you" flips meaning as you switch
+// sides. Text arrives in third person, so it needs no rewriting.
 function logMsg(room, idx, text) {
+  const line = playerLabel(room, idx) + ' ' + text;
   for (let i = 0; i < 2; i++) {
     const ws = room.sockets[i];
     if (!ws) continue;
-    const isSelf = (i === idx);
-    // log strings are written in third person ("shuffled their deck"), so swap the
-    // possessive when showing it to the player who actually did it
-    const body = isSelf ? text.replace(/\btheir\b/g, 'your') : text;
-    const who = isSelf ? 'You' : playerLabel(room, idx);
-    send(ws, { type: 'log', fromIdx: idx, text: who + ' ' + body });
+    send(ws, { type: 'log', fromIdx: idx, text: line });
   }
 }
 
