@@ -1546,19 +1546,22 @@ document.getElementById('btn-manual-none').addEventListener('click', () => sendM
 // ---- multi-select for mass effects whose power data is incomplete (Searing Wave) ----
 let multiPickId = null, multiPickChosen = new Set();
 let truceAsked = false;
-let raceAsked = false;
+let raceAsked = null;
 let ALL_RACES = [];
 fetch('/api/races').then(r => r.json()).then(list => { ALL_RACES = list || []; }).catch(() => {});
 
-function openRacePicker(source) {
+function openRacePicker(source, excludeRace) {
   const grid = document.getElementById('race-pick-grid');
   document.getElementById('race-pick-title').textContent = source;
   grid.innerHTML = '';
   const search = document.getElementById('race-pick-search');
+  const ex = (excludeRace || '').toLowerCase();
   const draw = (filter) => {
     grid.innerHTML = '';
     const f = (filter || '').toLowerCase();
-    ALL_RACES.filter(r => !f || r.toLowerCase().includes(f)).slice(0, 400).forEach(r => {
+    ALL_RACES
+      .filter(r => !ex || r.toLowerCase() !== ex)   // Petrova can't name its own race
+      .filter(r => !f || r.toLowerCase().includes(f)).slice(0, 400).forEach(r => {
       const b = document.createElement('button');
       b.className = 'race-chip';
       b.textContent = r;
@@ -2102,11 +2105,14 @@ function renderState(state) {
   // shield breaking is handled by the select bar
 
   // ---- Petrova: name a race ----
-  if (me.pendingRaceChoice && !raceAsked) {
-    raceAsked = true;
-    openRacePicker(me.pendingRaceChoice.source);
+  // tracked by id, not a boolean — a second Petrova queues its own prompt and must
+  // still open once the first is answered
+  if (me.pendingRaceChoice && raceAsked !== me.pendingRaceChoice.id) {
+    raceAsked = me.pendingRaceChoice.id;
+    openRacePicker(me.pendingRaceChoice.source, me.pendingRaceChoice.excludeRace);
   } else if (!me.pendingRaceChoice) {
-    raceAsked = false;
+    raceAsked = null;
+    document.getElementById('race-pick-modal').style.display = 'none';
   }
 
   // ---- Miraculous Truce: name a civilization ----
@@ -2338,9 +2344,15 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
     div.dataset.key = c.key;
     // green overlay only when a buff has changed the printed power
     const boosted = (c.livePower != null && c.basePower != null && c.livePower !== c.basePower);
+    // A Power Attacker's bonus only counts while it attacks, so show it as "+N"
+    // beforehand rather than leaving it invisible until mid-combat.
+    const pendingPA = (!c.isAttacking && c.powerAttacker && c.livePower != null);
+    const powerText = (boosted || pendingPA)
+      ? (c.livePower + (pendingPA ? ' <span class="pa-hint">+' + c.powerAttacker + '</span>' : ''))
+      : '';
     const stacked = (c.under && c.under.length) ? c.under.length : 0;
     div.innerHTML = cardImgHtml(c.id) +
-      (boosted ? '<div class="power-overlay">' + c.livePower + '</div>' : '') +
+      (powerText ? '<div class="power-overlay' + (c.isAttacking ? ' attacking' : '') + '">' + powerText + '</div>' : '') +
       (stacked ? '<div class="evo-badge" title="Evolution stack: ' + (stacked + 1) + ' cards">\u21D1' + (stacked + 1) + '</div>' : '');
     makeMagnifiable(div, c.id);
 
