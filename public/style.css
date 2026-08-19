@@ -251,6 +251,13 @@ input {
 .battle-half .card.tapped.menu-open:not(.dragging) { transform: rotate(90deg); }
 
 #right-column { display: flex; flex-direction: column; gap: 12px; width: 280px; flex-shrink: 0; }
+.panel-box { background: #1a1e25; border-radius: 10px; padding: 12px; box-sizing: border-box; width: 100%; }
+/* destructive buttons up top, End My Turn down by the chat and closest to your hand */
+#danger-actions { order: 1; }
+#sidebar         { order: 2; }
+#chat-panel      { order: 3; }
+#end-turn-block  { order: 4; }
+#end-turn-block .end-turn-btn { width: 100%; margin: 0; padding: 12px; font-size: 1.05em; font-weight: 600; }
 #sidebar { width: 100%; background: #1a1e25; border-radius: 10px; padding: 14px; font-size: 0.95em; box-sizing: border-box; }
 .turn-indicator { font-size: 1.1em; font-weight: bold; margin-bottom: 8px; padding: 8px; border-radius: 6px; background: #262b35; text-align: center; }
 
@@ -467,6 +474,12 @@ input {
   :root { --card-base-w: 78px; --card-base-h: 109px; --hand-scale: 1.7; }
   .chat-messages { max-height: 180px; min-height: 100px; }
   .hand-zone { padding-right: calc(var(--card-w) * 1.4); }
+  html, body { max-width: 100%; overflow-x: clip; }
+  .screen, .table-screen, #table, #right-column { max-width: 100%; box-sizing: border-box; }
+  #table { width: 100%; }
+  .zone, .row-with-side, .row-main, .shield-track { max-width: 100%; }
+  #end-turn-block { order: 0; }
+  #danger-actions { order: 5; }
 }
 
 /* Portrait is now playable rather than blocked — cards shrink so a full row of
@@ -486,6 +499,19 @@ input {
   .battle-zone { min-height: calc(var(--bz-card-h) * 2.15 + 24px); padding: 4px; }
   .battle-half { min-height: calc(var(--bz-card-h) * 1.02 + 8px); padding: 2px; min-width: 0; }
   .row-with-side { gap: 6px; }
+
+  /* Nothing may exceed the screen width, otherwise the page scrolls sideways and
+     leaves an empty strip beside the table. `clip` rather than `hidden` so pinch-zoom
+     panning still works. */
+  html, body { max-width: 100%; overflow-x: clip; }
+  .screen, .table-screen, #table, #right-column { max-width: 100%; box-sizing: border-box; }
+  #table { width: 100%; }
+  .zone, .row-with-side, .row-main { max-width: 100%; }
+  .shield-track { max-width: 100%; }
+
+  /* keep End My Turn where it already sits on a phone */
+  #end-turn-block { order: 0; }
+  #danger-actions { order: 5; }
   .shield-zone { min-height: calc(var(--card-h) + 10px); }
   .mana-zone { min-height: calc(var(--card-h) + 16px); }
   .hand-zone { min-height: calc(var(--hand-card-h) + 22px); padding-top: 18px; padding-right: calc(var(--card-w) * 0.6); }

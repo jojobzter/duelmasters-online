@@ -162,6 +162,13 @@
   </div>
 
   <div id="right-column">
+    <!-- Surrender / End Game sit apart from End My Turn so the destructive buttons
+         are never next to the one you press every turn. -->
+    <div id="danger-actions" class="sidebar-actions panel-box">
+      <button id="btn-surrender" class="danger-btn">Surrender</button>
+      <button id="btn-end-game" class="danger-btn">End Game</button>
+    </div>
+
     <div id="sidebar">
       <div id="table-room-code" class="table-room-code" style="display:none"></div>
       <div id="table-join-banner" class="join-request-banner" style="display:none">
@@ -178,15 +185,9 @@
       </div>
       <div id="turn-indicator" class="turn-indicator"></div>
       <div id="turn-banner" class="turn-banner" style="display:none"></div>
-      <button id="btn-end-turn" class="end-turn-btn">End My Turn</button>
 
       <div class="sidebar-section-label">Move Log</div>
       <div id="log" class="log"></div>
-
-      <div class="sidebar-actions">
-        <button id="btn-surrender" class="danger-btn">Surrender</button>
-        <button id="btn-end-game" class="danger-btn">End Game</button>
-      </div>
     </div>
 
     <div id="chat-panel" class="chat-panel">
@@ -200,6 +201,10 @@
         <input id="chat-input" placeholder="Message your opponent..." maxlength="500" />
         <button id="btn-chat-send">Send</button>
       </div>
+    </div>
+
+    <div id="end-turn-block" class="panel-box">
+      <button id="btn-end-turn" class="end-turn-btn">End My Turn</button>
     </div>
   </div>
 
