@@ -372,9 +372,12 @@ function effectivePower(state, ownerIdx, card, attacking) {
   if (bark && bark.tapped && bark.key !== card.key && raceOf(card.id).includes('beast folk')) p += 2000;
 
   // Petrova: +4000 to your OTHER creatures of the named race, while Petrova is out
-  const petrova = namedCard(owner, PETROVA_NAME);
-  if (petrova && owner.petrovaRace && petrova.key !== card.key &&
-      raceOf(card.id) === owner.petrovaRace.toLowerCase()) p += 4000;
+  // Every Petrova names its own race, and each one grants +4000 independently.
+  for (const pet of owner.battlezone) {
+    if (normalizeCardKey(cardLabel(pet.id)) !== PETROVA_NAME) continue;
+    if (!pet.petrovaRace || pet.key === card.key) continue;
+    if (racesOf(card.id).includes(pet.petrovaRace.toLowerCase())) p += 4000;
+  }
 
   // Pala Olesis: during the OPPONENT's turn, your other creatures get +2000
   const pala = namedCard(owner, 'pala olesis, morning guardian');
@@ -778,7 +781,8 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
 
   // Petrova: name a race — your other creatures of that race get +4000 while it stays
   if (name === PETROVA_NAME) {
-    me.pendingRaceChoice = { id: newKey(), source: cardLabel(cardId), cardKey };
+    me.pendingRaceChoices.push({ id: newKey(), source: cardLabel(cardId), cardKey,
+                                 excludeRace: (cardMeta(cardId) || {}).race || null });
   }
 
   // Miraculous Truce: name a civilization that can't attack you until your next turn
@@ -948,7 +952,7 @@ function emptyPlayerState() {
     pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
-    pendingRaceChoice: null, petrovaRace: null
+    pendingRaceChoices: []
   };
 }
 
@@ -1006,11 +1010,18 @@ function viewFor(room, viewerIdx) {
     showingHand: isSelf ? p.showingHand : undefined,
     deckCount: p.deck.length,
     mana: p.mana,
-    battlezone: p.battlezone.map(c => Object.assign({}, c, {
-      // live power including every buff, so the client can show it without recalculating
-      livePower: effectivePower(s, s.players.indexOf(p), c, false),
-      basePower: (cardMeta(c.id) || {}).power != null ? cardMeta(c.id).power : null
-    })),
+    battlezone: p.battlezone.map(c => {
+      const ownerIdx = s.players.indexOf(p);
+      // Power Attacker only counts while this creature is the one attacking, so the
+      // overlay reflects that: mid-attack it shows the boosted figure it will battle with.
+      const isAttacking = !!(s.combat && s.combat.attackerKey === c.key && s.combat.attackerIdx === ownerIdx);
+      return Object.assign({}, c, {
+        livePower: effectivePower(s, ownerIdx, c, isAttacking),
+        basePower: (cardMeta(c.id) || {}).power != null ? cardMeta(c.id).power : null,
+        powerAttacker: (cardMeta(c.id) || {}).powerAttacker || null,
+        isAttacking
+      });
+    }),
     shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, slot: sh.slot, id: sh.faceUp ? sh.id : undefined })),
     graveyard: p.graveyard,
     pendingCorileUses: isSelf ? (p.pendingCorileUses || 0) : undefined,
@@ -1025,8 +1036,7 @@ function viewFor(room, viewerIdx) {
     turboRushActive: !!p.turboRushActive,
     diamondCutterActive: !!p.diamondCutterActive,
     pendingTruce: isSelf ? p.pendingTruce : undefined,
-    pendingRaceChoice: isSelf ? p.pendingRaceChoice : undefined,
-    petrovaRace: p.petrovaRace || null,
+    pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
     truceCiv: p.truceCiv || null,
     brokeShieldThisTurn: !!p.brokeShieldThisTurn
   });
@@ -1965,11 +1975,18 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'choosePetrovaRace': {
-        if (!me.pendingRaceChoice) return;
+        const pending = me.pendingRaceChoices[0];
+        if (!pending) return;
         const race = (msg.race || '').toString().trim();
         if (!race) return;
-        me.petrovaRace = race;
-        me.pendingRaceChoice = null;
+        // Petrova can't name its own race
+        if (pending.excludeRace && race.toLowerCase() === pending.excludeRace.toLowerCase()) {
+          send(ws, { type: 'summonRejected', reason: "Petrova can't choose its own race (" + pending.excludeRace + ').' });
+          return;
+        }
+        const petCard = me.battlezone.find(c => c.key === pending.cardKey);
+        if (petCard) petCard.petrovaRace = race;
+        me.pendingRaceChoices.shift();
         logText = 'named ' + race + ' with Petrova — their other ' + race + ' creatures get +4000.';
         break;
       }
