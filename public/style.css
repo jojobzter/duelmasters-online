@@ -144,11 +144,11 @@ input {
 #btn-decline-join { background: #6a3a3a; }
 
 /* ---- Table ---- */
-.table-screen { display: flex; gap: 12px; align-items: center; font-size: 1.05em; }
-#table { flex: 1; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
+.table-screen { display: flex; gap: 12px; align-items: center; font-size: 1.05em; max-width: 100%; overflow-x: hidden; }
+#table { flex: 1; min-width: 0; max-width: 100%; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
 .zone-label { font-size: 0.68em; color: #bcd; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
 .center-label { text-align: center; }
-.zone { background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.zone { min-width: 0; background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 /* Hand sits over toward the right, clear of the deck/graveyard column above it. */
 .hand-zone { min-height: calc(var(--hand-card-h) + 30px); position: relative; align-items: flex-end; padding-top: 26px; justify-content: flex-end; padding-right: calc(var(--card-w) * 2.6); }
 /* Opponent's hand is all card backs, so there's nothing to read — keep it at the
@@ -188,8 +188,8 @@ input {
    That means the track needs a minimum pixel width — otherwise on a narrow phone
    13.8% works out narrower than a card and creatures overlap. Below that width the
    zone scrolls sideways instead of squashing. */
-.battle-zone { flex-direction: column; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; overflow-x: auto; }
-.battle-half { position: relative; width: 100%; min-width: calc(var(--bz-card-w) * 7.6); min-height: calc(var(--bz-card-h) * 1.15 + 16px); padding: 4px; overflow: hidden; }
+.battle-zone { flex-direction: column; min-width: 0; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; overflow-x: auto; }
+.battle-half { position: relative; width: 100%; min-width: min(calc(var(--bz-card-w) * 7.6), 100%); min-height: calc(var(--bz-card-h) * 1.15 + 16px); padding: 4px; overflow: hidden; }
 .battle-divider { height: 1px; background: rgba(255,255,255,0.15); margin: 4px 0; }
 
 .card {
@@ -364,6 +364,11 @@ input {
 .shield-trigger-preview img { width: auto; height: auto; max-width: min(70vw, 340px); max-height: 46vh; border-radius: 8px; display: block; }
 
 .effect-banner { background: #4a2a5a; border-color: #7a4a9a; }
+.evo-badge {
+  position: absolute; top: 4px; left: 4px; background: rgba(120,60,180,.92); color: #fff;
+  border: 1px solid #c9a4ff; border-radius: 6px; padding: 1px 6px; font-size: .78em;
+  font-weight: bold; z-index: 30; pointer-events: none;
+}
 .power-overlay {
   position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%);
   background: rgba(0,0,0,.78); color: #59ff9d; border: 1px solid #59ff9d;
@@ -380,6 +385,7 @@ input {
 
 .select-bar {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  box-sizing: border-box; flex-wrap: wrap; justify-content: center;
   background: rgba(20,32,48,0.96); border: 1px solid #4a7fb0; border-radius: 10px;
   padding: 10px 16px; z-index: 1050; display: flex; align-items: center; gap: 12px;
   font-size: 0.95em; font-weight: 600; color: #dceaf7; max-width: 92vw;
@@ -460,7 +466,9 @@ input {
   /* the battlezone reserved room for a second row of creatures, which just read
      as dead space on a tall narrow screen — keep it tight to one row */
   .battle-zone { min-height: calc(var(--bz-card-h) * 2.15 + 24px); padding: 4px; }
-  .battle-half { min-height: calc(var(--bz-card-h) * 1.02 + 8px); padding: 2px; }
+  .battle-half { min-height: calc(var(--bz-card-h) * 1.02 + 8px); padding: 2px; min-width: 0; }
+  body { overflow-x: hidden; }
+  .row-with-side { gap: 6px; }
   .shield-zone { min-height: calc(var(--card-h) + 10px); }
   .mana-zone { min-height: calc(var(--card-h) + 16px); }
   .hand-zone { min-height: calc(var(--hand-card-h) + 22px); padding-top: 18px; padding-right: calc(var(--card-w) * 0.6); }

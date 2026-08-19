@@ -1402,6 +1402,7 @@ let manualBattleData = null;
 function cardMetaFor(id) { return cardMetaDB.get(normKeyClient(cardBaseName(id))) || {}; }
 function isSummoningSick(state, card) {
   if (!state) return false;
+  if (isEvolutionById(card.id)) return false;    // evolutions can attack the turn they arrive
   if (cardMetaFor(card.id).speedAttacker) return false;
   const mine = state.players[state.you];
   if (mine && mine.turboRushActive) return false;
@@ -1656,10 +1657,33 @@ document.addEventListener('keydown', (e) => {
 // ---- on-table selection: valid cards glow and are clicked directly, so choosing a
 // target never covers the board with a dialog ----
 let attackMode = null;         // {key} while choosing what a creature attacks
+let evolveMode = null;         // {handKey, cardId} while choosing what to evolve from
+function isEvolutionById(id) { return /evolution/i.test(cardMetaFor(id).type || ''); }
+function racesOfId(id) {
+  return (cardMetaFor(id).race || '').toLowerCase().split('/').map(r => r.trim()).filter(Boolean);
+}
+function canEvolveOntoClient(evoId, baseId) {
+  const a = racesOfId(evoId), b = racesOfId(baseId);
+  return a.length && b.length && a.some(r => b.includes(r));
+}
 let multiTableChosen = new Set();
 
 function selectableKeysFor(state, me, opp) {
   // returns { keys:Set, onClick(key), banner:string, showConfirm:bool, showSkip:bool }
+  if (evolveMode) {
+    const legal = me.battlezone.filter(b => canEvolveOntoClient(evolveMode.cardId, b.id));
+    if (!legal.length) { evolveMode = null; return null; }
+    return {
+      keys: new Set(legal.map(c => c.key)),
+      onClick: key => {
+        sendMsg({ type: 'summonCard', key: evolveMode.handKey, baseKey: key });
+        evolveMode = null;
+      },
+      banner: 'Evolving ' + displayName(evolveMode.cardId) + ' — click one of your ' +
+              ((cardMetaFor(evolveMode.cardId).race) || 'matching') + ' creatures to evolve from.',
+      showSkip: true, skipLabel: 'Cancel', onSkip: () => { evolveMode = null; renderState(state); }
+    };
+  }
   if (attackMode) {
     const card = me.battlezone.find(c => c.key === attackMode.key);
     if (!card) { attackMode = null; return null; }
@@ -1670,8 +1694,12 @@ function selectableKeysFor(state, me, opp) {
       keys.add(c.key);
     });
     const dcActive = !!me.diamondCutterActive;
-    const canShields = (canAttackShieldsC(card.id) || dcActive) && opp.shields.length;
+    const mayHitPlayer = canAttackShieldsC(card.id) || dcActive;
+    const canShields = mayHitPlayer && opp.shields.length;
     if (canShields) opp.shields.forEach(sh => keys.add(sh.key));
+    // With no shields left there's no card to click, so the finishing blow needs its
+    // own button — otherwise the winning attack is impossible to declare.
+    const finisher = mayHitPlayer && !opp.shields.length;
     return {
       keys,
       onClick: key => {
@@ -1680,7 +1708,15 @@ function selectableKeysFor(state, me, opp) {
                   target: isShield ? { type: 'shield' } : { type: 'creature', key } });
         attackMode = null;
       },
-      banner: 'Attacking with ' + displayName(card.id) + ' — click an enemy creature' + (canShields ? ' or shield' : '') + ' to attack.',
+      banner: finisher
+        ? 'Attacking with ' + displayName(card.id) + ' — your opponent has NO SHIELDS LEFT. Attack them directly to win!'
+        : 'Attacking with ' + displayName(card.id) + ' — click an enemy creature' + (canShields ? ' or shield' : '') + ' to attack.',
+      showConfirm: finisher,
+      confirmLabel: '\u{1F3C6} Attack player to win',
+      onConfirm: () => {
+        sendMsg({ type: 'declareAttack', key: attackMode.key, target: { type: 'shield' } });
+        attackMode = null;
+      },
       showSkip: true, skipLabel: 'Cancel attack', onSkip: () => { attackMode = null; renderState(state); }
     };
   }
@@ -1764,12 +1800,12 @@ function applySelectableHighlights(state, me, opp) {
     .forEach(el => el.classList.remove('selectable-target', 'chosen-target'));
   const bar = document.getElementById('select-bar');
   if (!activeSelection || !activeSelection.keys.size) {
-    if (!activeSelection) bar.style.display = 'none';
-    else { // prompt exists but nothing valid to click
-      document.getElementById('select-bar-text').textContent = activeSelection.banner + ' (nothing valid)';
-      bar.style.display = 'flex';
-    }
-    if (activeSelection) wireSelectBarButtons();
+    if (!activeSelection) { bar.style.display = 'none'; return; }
+    // a prompt with no clickable cards can still be actionable (e.g. the winning attack)
+    document.getElementById('select-bar-text').textContent =
+      activeSelection.banner + (activeSelection.showConfirm ? '' : ' (nothing valid)');
+    bar.style.display = 'flex';
+    wireSelectBarButtons();
     return;
   }
   activeSelection.keys.forEach(key => {
@@ -1793,6 +1829,7 @@ function wireSelectBarButtons() {
   cf.style.display = (activeSelection && activeSelection.showConfirm) ? 'inline-block' : 'none';
   if (activeSelection) {
     sk.textContent = activeSelection.skipLabel || 'Skip';
+    cf.textContent = activeSelection.confirmLabel || 'Confirm';
     sk.onclick = () => { if (activeSelection.onSkip) activeSelection.onSkip(); };
     cf.onclick = () => { if (activeSelection.onConfirm) activeSelection.onConfirm(); };
   }
@@ -1930,7 +1967,22 @@ function renderState(state) {
       clearSelection();
       const items = [
         ['Charge Mana', () => sendMsg({ type: 'chargeMana', key: c.key })],
-        ['Summon', () => sendMsg({ type: 'summonCard', key: c.key })],
+        ['Summon', () => {
+          if (isEvolutionById(c.id)) {
+            const st = seats[activeSeat] && seats[activeSeat].state;
+            const mine = st && st.players[st.you];
+            const legal = mine ? mine.battlezone.filter(b => canEvolveOntoClient(c.id, b.id)) : [];
+            if (!legal.length) {
+              alert(displayName(c.id) + ' is an evolution creature — you need a ' +
+                    ((cardMetaFor(c.id).race) || 'matching') + ' creature in your battle zone first.');
+              return;
+            }
+            evolveMode = { handKey: c.key, cardId: c.id };
+            renderState(st);
+            return;
+          }
+          sendMsg({ type: 'summonCard', key: c.key });
+        }],
         ['Discard', () => sendMsg({ type: 'discardFromHand', key: c.key })],
         [me.showingHand ? 'Stop Showing Hand to Opponent' : 'Show Hand to Opponent', () => sendMsg({ type: 'setShowingHand', show: !me.showingHand })],
         ['Return Card to Deck & Shuffle', () => sendMsg({ type: 'handCardToDeckShuffle', key: c.key })]
@@ -2261,8 +2313,10 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
     div.dataset.key = c.key;
     // green overlay only when a buff has changed the printed power
     const boosted = (c.livePower != null && c.basePower != null && c.livePower !== c.basePower);
+    const stacked = (c.under && c.under.length) ? c.under.length : 0;
     div.innerHTML = cardImgHtml(c.id) +
-      (boosted ? '<div class="power-overlay">' + c.livePower + '</div>' : '');
+      (boosted ? '<div class="power-overlay">' + c.livePower + '</div>' : '') +
+      (stacked ? '<div class="evo-badge" title="Evolution stack: ' + (stacked + 1) + ' cards">\u21D1' + (stacked + 1) + '</div>' : '');
     makeMagnifiable(div, c.id);
 
     const xPct0 = (c.x != null) ? c.x : 4;
