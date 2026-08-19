@@ -1194,7 +1194,6 @@ document.getElementById('btn-surrender').addEventListener('click', () => {
 });
 document.getElementById('btn-end-game').addEventListener('click', () => {
   sendMsg({ type: 'requestEndGame' });
-  appendLog('Asked your opponent to end the game.');
 });
 document.getElementById('btn-accept-end').addEventListener('click', () => sendMsg({ type: 'respondEndGame', accept: true }));
 document.getElementById('btn-decline-end').addEventListener('click', () => sendMsg({ type: 'respondEndGame', accept: false }));
