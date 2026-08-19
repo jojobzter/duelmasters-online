@@ -907,6 +907,28 @@ function playSfx(name) {
   if (path) playSound(path);
 }
 
+// ---- table zoom: scales the card-size variables, so the whole board reflows to fit
+// rather than needing constant scrolling ----
+let tableZoom = parseFloat(localStorage.getItem('dm_table_zoom') || '1') || 1;
+function applyTableZoom() {
+  tableZoom = Math.max(0.4, Math.min(1.6, tableZoom));
+  document.documentElement.style.setProperty('--card-scale', tableZoom.toFixed(2));
+  const el = document.getElementById('zoom-val');
+  if (el) el.textContent = Math.round(tableZoom * 100) + '%';
+  localStorage.setItem('dm_table_zoom', String(tableZoom));
+}
+document.getElementById('btn-zoom-out').addEventListener('click', () => { tableZoom -= 0.1; applyTableZoom(); });
+document.getElementById('btn-zoom-in').addEventListener('click', () => { tableZoom += 0.1; applyTableZoom(); });
+document.getElementById('btn-zoom-reset').addEventListener('click', () => { tableZoom = 1; applyTableZoom(); });
+// keyboard shortcuts, ignored while typing in chat
+document.addEventListener('keydown', (e) => {
+  if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (e.key === '-' || e.key === '_') { tableZoom -= 0.1; applyTableZoom(); }
+  else if (e.key === '=' || e.key === '+') { tableZoom += 0.1; applyTableZoom(); }
+  else if (e.key === '0') { tableZoom = 1; applyTableZoom(); }
+});
+applyTableZoom();
+
 // ====================== On-screen notices ======================
 function showNotice(text) {
   const stack = document.getElementById('notice-stack');
@@ -1402,6 +1424,9 @@ let manualBattleData = null;
 function cardMetaFor(id) { return cardMetaDB.get(normKeyClient(cardBaseName(id))) || {}; }
 function isSummoningSick(state, card) {
   if (!state) return false;
+  // an evolved creature always carries a stack, so this works even before the card
+  // database has loaded — the metadata check below is the belt-and-braces version
+  if (card.under && card.under.length) return false;
   if (isEvolutionById(card.id)) return false;    // evolutions can attack the turn they arrive
   if (cardMetaFor(card.id).speedAttacker) return false;
   const mine = state.players[state.you];

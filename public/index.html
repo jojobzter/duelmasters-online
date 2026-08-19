@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.25, maximum-scale=5.0, user-scalable=yes" />
 <title>Duel Masters Table</title>
 <link rel="stylesheet" href="style.css" />
 </head>
@@ -168,6 +168,13 @@
         <span id="table-join-text">Someone wants to join your game.</span>
         <button id="btn-table-accept-join">Accept</button>
         <button id="btn-table-decline-join">Decline</button>
+      </div>
+      <div class="zoom-control">
+        <span>Zoom</span>
+        <button id="btn-zoom-out" title="Smaller cards, more of the table">−</button>
+        <span class="zoom-val" id="zoom-val">100%</span>
+        <button id="btn-zoom-in" title="Bigger cards">+</button>
+        <button id="btn-zoom-reset" title="Reset">↺</button>
       </div>
       <div id="turn-indicator" class="turn-indicator"></div>
       <div id="turn-banner" class="turn-banner" style="display:none"></div>

@@ -1,7 +1,13 @@
 * { box-sizing: border-box; }
 :root {
-  --card-w: 108px;
-  --card-h: 151px;
+  /* --card-scale is driven by the in-game zoom control; every measurement in the
+     table derives from these two, so zooming reflows the layout instead of
+     scaling a bitmap or overflowing the screen */
+  --card-base-w: 108px;
+  --card-base-h: 151px;
+  --card-scale: 1;
+  --card-w: calc(var(--card-base-w) * var(--card-scale));
+  --card-h: calc(var(--card-base-h) * var(--card-scale));
   /* battlezone cards render permanently at the old hover size */
   --bz-card-w: calc(var(--card-w) * 1.35);
   --bz-card-h: calc(var(--card-h) * 1.35);
@@ -44,7 +50,7 @@ input {
 
 .screen { padding: 16px; max-width: 1700px; margin: 0 auto; }
 /* the table itself gets much more room than the deck-builder screens */
-.table-screen { max-width: 2600px; }
+
 
 .panel {
   background: #1a1e25;
@@ -144,7 +150,7 @@ input {
 #btn-decline-join { background: #6a3a3a; }
 
 /* ---- Table ---- */
-.table-screen { display: flex; gap: 12px; align-items: center; font-size: 1.05em; max-width: 100%; overflow-x: hidden; }
+.table-screen { display: flex; gap: 12px; align-items: center; font-size: 1.05em; max-width: min(1700px, 100%); margin: 0 auto; overflow-x: hidden; }
 #table { flex: 1; min-width: 0; max-width: 100%; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
 .zone-label { font-size: 0.68em; color: #bcd; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
 .center-label { text-align: center; }
@@ -383,6 +389,16 @@ input {
   color: rgba(255,255,255,.10); margin: 2px 8px -6px 0; user-select: none; pointer-events: none;
 }
 
+.zoom-control {
+  display: flex; align-items: center; gap: 6px; justify-content: center;
+  margin-bottom: 10px; font-size: .8em; color: #9aa0a8;
+}
+.zoom-control button {
+  margin: 0; padding: 3px 11px; font-size: 1em; line-height: 1.2; min-width: auto; background: #2a2f3a;
+}
+.zoom-control button:hover { background: #3a5ba0; }
+.zoom-control .zoom-val { min-width: 44px; text-align: center; }
+
 .select-bar {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
   box-sizing: border-box; flex-wrap: wrap; justify-content: center;
@@ -446,7 +462,7 @@ input {
 @media (max-width: 1080px), (max-height: 500px) and (orientation: landscape) {
   .table-screen { flex-direction: column; }
   #right-column { width: 100%; }
-  :root { --card-w: 78px; --card-h: 109px; --hand-scale: 1.7; }
+  :root { --card-base-w: 78px; --card-base-h: 109px; --hand-scale: 1.7; }
   .chat-messages { max-height: 180px; min-height: 100px; }
   .hand-zone { padding-right: calc(var(--card-w) * 1.4); }
 }
@@ -454,7 +470,7 @@ input {
 /* Portrait is now playable rather than blocked — cards shrink so a full row of
    six shields still fits across the narrow side. */
 @media (max-width: 760px) and (orientation: portrait) {
-  :root { --card-w: 52px; --card-h: 73px; --hand-scale: 1.9; }
+  :root { --card-base-w: 52px; --card-base-h: 73px; --hand-scale: 1.9; }
   .screen { padding: 8px; }
   #table { padding: 8px; }
   .zone { padding: 5px; gap: 5px; }
@@ -467,7 +483,6 @@ input {
      as dead space on a tall narrow screen — keep it tight to one row */
   .battle-zone { min-height: calc(var(--bz-card-h) * 2.15 + 24px); padding: 4px; }
   .battle-half { min-height: calc(var(--bz-card-h) * 1.02 + 8px); padding: 2px; min-width: 0; }
-  body { overflow-x: hidden; }
   .row-with-side { gap: 6px; }
   .shield-zone { min-height: calc(var(--card-h) + 10px); }
   .mana-zone { min-height: calc(var(--card-h) + 16px); }
