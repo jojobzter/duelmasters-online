@@ -22,6 +22,7 @@ const Bot = (() => {
   let repeatCount = 0;
   let lastState = null;
   let lastAttemptKey = null;
+  let heartbeat = null;
 
   const DELAY = { fast: 420, normal: 700, slow: 950 };
 
@@ -324,15 +325,22 @@ const Bot = (() => {
     lastState = state;
     if (thinkingTimer) return;                    // an action is already queued
 
-    // Safety net: if the bot somehow asks for the same thing over and over, stop
-    // rather than spin. Better a stalled bot than a locked-up game.
+    // Outstanding prompts are ALWAYS answered first, before any stall protection.
+    // A pending effect can appear during the human's turn (a shield trigger the bot
+    // just cast, say), and it must never be skipped — leaving one unanswered strands
+    // a spell on the table and freezes the game.
+    if (handlePrompts(state)) return;
+
+    // Stall protection only guards the bot's own idle looping, never its prompts.
+    const me = myState(state);
     const sig = JSON.stringify([state.turnNumber, state.activeTurn,
-      myState(state).hand.length, myState(state).battlezone.length,
+      me.hand.length, me.battlezone.length, me.mana.length,
+      (me.pendingTargets || []).length, (me.pendingDiscards || []).length,
+      me.pendingMulti ? 1 : 0, me.pendingSearch ? 1 : 0,
       (state.combat && state.combat.phase) || '']);
     if (sig === lastActionSig) {
-      // Nothing has changed for several wake-ups: the bot is out of useful moves.
-      // End the turn rather than sitting there, so the game can never hang on it.
       if (++repeatCount > 6) {
+        // out of useful moves — end the turn rather than sitting there
         if (state.activeTurn === state.you && !state.combat) {
           repeatCount = 0;
           act(() => send({ type: 'endTurn' }), DELAY.fast);
@@ -340,8 +348,6 @@ const Bot = (() => {
         return;
       }
     } else { lastActionSig = sig; repeatCount = 0; }
-
-    if (handlePrompts(state)) return;
 
     const cb = state.combat;
     if (cb && cb.phase === 'blocking' && cb.attackerIdx !== state.you) {
@@ -402,8 +408,20 @@ const Bot = (() => {
       send = opts.send;
       turnState = { turn: -1, drew: false, charged: false };
       unaffordable = new Set();
+      // Heartbeat: the bot normally reacts to state pushes, but some things (a
+      // rejected action, a prompt that arrived without a state change) produce none.
+      // Re-checking periodically means it can never sit waiting for a wake-up that
+      // isn't coming.
+      if (heartbeat) clearInterval(heartbeat);
+      heartbeat = setInterval(() => {
+        if (active && lastState && !thinkingTimer) onState(lastState);
+      }, 1500);
     },
-    stop() { active = false; if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; } },
+    stop() {
+      active = false;
+      if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
+      if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+    },
     isActive() { return active; },
     deck() { return deck; },
     onState, onShieldTrigger, onTapMode, onRejected, noteUnaffordable
