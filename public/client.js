@@ -2072,7 +2072,7 @@ function renderState(state) {
   renderBattleHalf('my-battle', me.battlezone, true, meIdx, pendingCorileUses, me.pendingTargets || []);
   renderBattleHalf('opp-battle', opp.battlezone, false, oppIdx, pendingCorileUses, me.pendingTargets || []);
   const canSearch = me.battlezone.some(c => cardBaseName(c.id).toLowerCase() === 'crystal memory');
-  renderDeckZone('my-deck', me.deckCount, true, canSearch, me.pendingSkyswordMana || 0, me.pendingSkyswordShield || 0, me.pendingBronzeArm || 0);
+  renderDeckZone('my-deck', me.deckCount, true, canSearch);
   renderDeckZone('opp-deck', opp.deckCount, false, false, 0, 0, 0);
   renderGyZone('my-gy', me.graveyard, true, meIdx);
   renderGyZone('opp-gy', opp.graveyard, false, oppIdx);
@@ -2493,7 +2493,7 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
   });
 }
 
-function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pendingSkyswordShield, pendingBronzeArm) {
+function renderDeckZone(elId, count, isMine, canSearch) {
   const el = document.getElementById(elId);
   el.innerHTML = '';
   const card = document.createElement('div');
@@ -2519,9 +2519,6 @@ function renderDeckZone(elId, count, isMine, canSearch, pendingSkyswordMana, pen
       ['Shuffle Deck', () => sendMsg({ type: 'shuffleDeck' })]
     ];
     if (canSearch) items.push(['Search Deck', () => sendMsg({ type: 'requestSearchDeck' })]);
-    if (pendingSkyswordMana > 0) items.push(['Put in Mana Zone (Skysword)', () => sendMsg({ type: 'skyswordToMana' })]);
-    else if (pendingSkyswordShield > 0) items.push(['Put in Shield Zone (Skysword)', () => sendMsg({ type: 'skyswordToShield' })]);
-    if (pendingBronzeArm > 0) items.push(['Add to Mana Zone (Bronze-Arm Tribe)', () => sendMsg({ type: 'bronzeArmToMana' })]);
     showContextMenu(e.clientX, e.clientY, items, card);
   };
 }
