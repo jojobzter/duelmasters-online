@@ -786,7 +786,7 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'searchDeckOffer') {
-    deliverPrompt(seatIndex, () => openSearchModal(msg.cards, msg.filter, msg.source));
+    deliverPrompt(seatIndex, () => openSearchModal(msg.cards, msg.filter, msg.source, msg.costEquals));
     return;
   }
   if (msg.type === 'revealCards') {
@@ -1135,12 +1135,13 @@ function openGyModal(title, cards, ownerIdx, isMine) {
 }
 document.getElementById('gy-modal-close').addEventListener('click', () => { document.getElementById('gy-modal').style.display = 'none'; });
 
-function openSearchModal(entries, filter, source) {
+function openSearchModal(entries, filter, source, costEquals) {
   const grid = document.getElementById('search-modal-grid');
   const title = document.getElementById('search-modal-title');
   if (title) {
     title.textContent = (source || 'Search Your Deck') +
-      (filter ? ' \u2014 take one ' + filter.toUpperCase() : ' \u2014 take one card');
+      (filter ? ' \u2014 take one ' + filter.toUpperCase() : ' \u2014 take one card') +
+      (costEquals != null ? ' costing exactly ' + costEquals : '');
   }
   grid.innerHTML = '';
   entries.forEach(entry => {
@@ -1151,6 +1152,7 @@ function openSearchModal(entries, filter, source) {
     if (filter === 'spell') allowed = isSpellById(id);
     else if (filter === 'creature') allowed = !isSpellById(id);
     else if (filter === 'nature creature') allowed = !isSpellById(id) && (cardMetaFor(id).civs || []).includes('Nature');
+    if (allowed && costEquals != null) allowed = (cardMetaFor(id).cost === costEquals);
     const div = document.createElement('div');
     div.className = 'card-thumb' + (allowed ? '' : ' dimmed');
     const c = cardDB.get(id);
@@ -2342,17 +2344,18 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
     const div = document.createElement('div');
     div.className = 'card' + (c.tapped ? ' tapped' : '');
     div.dataset.key = c.key;
-    // green overlay only when a buff has changed the printed power
+    // Green overlay = lasting buffs only (Petrova, Barkwhip...). livePower is computed
+    // without the Power Attacker bonus, so that temporary boost can never leak into the
+    // green figure — it only ever appears in the gold badge. Both can show at once when
+    // a Power Attacker also has a permanent buff.
     const boosted = (c.livePower != null && c.basePower != null && c.livePower !== c.basePower);
-    // A Power Attacker's bonus only counts while it attacks, so show it as "+N"
-    // beforehand rather than leaving it invisible until mid-combat.
-    const pendingPA = (!c.isAttacking && c.powerAttacker && c.livePower != null);
-    const powerText = (boosted || pendingPA)
-      ? (c.livePower + (pendingPA ? ' <span class="pa-hint">+' + c.powerAttacker + '</span>' : ''))
-      : '';
+    // gold badge: Power Attacker, shown only while the creature is tapped from
+    // attacking, and gone again once the turn ends
+    const showPA = !!(c.powerAttacker && c.attackedThisTurn && c.tapped);
     const stacked = (c.under && c.under.length) ? c.under.length : 0;
     div.innerHTML = cardImgHtml(c.id) +
-      (powerText ? '<div class="power-overlay' + (c.isAttacking ? ' attacking' : '') + '">' + powerText + '</div>' : '') +
+      (boosted ? '<div class="power-overlay">' + c.livePower + '</div>' : '') +
+      (showPA ? '<div class="pa-badge"><span>POWER ATTACKER</span>+' + c.powerAttacker + '</div>' : '') +
       (stacked ? '<div class="evo-badge" title="Evolution stack: ' + (stacked + 1) + ' cards">\u21D1' + (stacked + 1) + '</div>' : '');
     makeMagnifiable(div, c.id);
 

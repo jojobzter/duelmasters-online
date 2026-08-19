@@ -384,8 +384,18 @@ input {
   border: 1px solid #c9a4ff; border-radius: 6px; padding: 1px 6px; font-size: .78em;
   font-weight: bold; z-index: 30; pointer-events: none;
 }
-.power-overlay .pa-hint { color: #ffd06a; font-size: .85em; opacity: .95; }
-.power-overlay.attacking { border-color: #ffd06a; color: #ffd06a; text-shadow: 0 0 8px rgba(255,208,106,.95); }
+/* Power Attacker: small gold badge, only while tapped from attacking */
+.pa-badge {
+  position: absolute; top: 3px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.82); color: #ffd06a; border: 1px solid #ffd06a;
+  border-radius: 5px; padding: 0 5px 1px; line-height: 1.15;
+  font-size: .72em; font-weight: bold; text-align: center;
+  pointer-events: none; z-index: 31; white-space: nowrap;
+}
+.pa-badge span {
+  display: block; font-size: .58em; font-weight: 600; letter-spacing: .04em;
+  opacity: .85; margin-bottom: -1px;
+}
 .power-overlay {
   position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%);
   background: rgba(0,0,0,.78); color: #59ff9d; border: 1px solid #59ff9d;
