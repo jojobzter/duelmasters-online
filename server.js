@@ -205,6 +205,7 @@ const TARGET_EFFECTS = {
   'volcanic arrows':  { zone: 'anyBattle', action: 'destroy', maxPower: 6000, thenShieldToGrave: true },
   'comet missile':    { zone: 'oppBattle', action: 'destroy', maxPower: 6000, requireBlocker: true, byOpponent: true },
   'volcano charger':  { zone: 'oppBattle', action: 'destroy', maxPower: 2000 },
+  'miraculous rebirth': { zone: 'oppBattle', action: 'destroy', maxPower: 5000, thenSearchSameCost: true },
   'galek, the shadow warrior': { zone: 'oppBattle', action: 'destroy', requireBlocker: true },
   'thrash crawler':   { zone: 'ownMana', action: 'toHand' },
   'belix, the explorer': { zone: 'ownMana', action: 'toHand', filter: 'spell' }
@@ -640,7 +641,8 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     const base = {
       id: newKey(), zone: targetEff.zone, action: targetEff.action,
       filter: targetEff.filter || null, maxPower: targetEff.maxPower || null,
-      requireBlocker: !!targetEff.requireBlocker, source: cardLabel(cardId),
+      requireBlocker: !!targetEff.requireBlocker,
+      thenSearchSameCost: !!targetEff.thenSearchSameCost, source: cardLabel(cardId),
       // only a SPELL leaves the battlezone once its effect resolves
       spellKey: isSpellCard(cardId) ? cardKey : null,
       sourceKey: cardKey            // never a legal target for its own effect
@@ -927,7 +929,7 @@ const SHIELD_TRIGGER_CARDS = new Set([
   'syforce, aurora elemental', 'spiral gate', 'teleportation', 'brain serum', 'crystal memory',
   'liquid scope', 'aqua surfer', 'hunter fish', 'aqua jolter', 'terror pit', 'ghost touch',
   'dark reversal', 'critical blade', 'zombie carnival', 'bone assassin, the ambusher',
-  'locomotiver', 'burst shot', 'tornado flame', "phantom dragon's flame", 'rikabu, the dismantler',
+  'locomotiver', 'burst shot', 'tornado flame', "phantom dragon's flame",
   'natural snare', 'dimension gate', 'mana crisis', 'mystic inscription', 'torcon', 'dome shell',
   'mighty shouter'
 ]);
@@ -1012,14 +1014,12 @@ function viewFor(room, viewerIdx) {
     mana: p.mana,
     battlezone: p.battlezone.map(c => {
       const ownerIdx = s.players.indexOf(p);
-      // Power Attacker only counts while this creature is the one attacking, so the
-      // overlay reflects that: mid-attack it shows the boosted figure it will battle with.
-      const isAttacking = !!(s.combat && s.combat.attackerKey === c.key && s.combat.attackerIdx === ownerIdx);
+      // livePower deliberately excludes Power Attacker — that bonus is shown separately
+      // and only while the creature is tapped from attacking.
       return Object.assign({}, c, {
-        livePower: effectivePower(s, ownerIdx, c, isAttacking),
+        livePower: effectivePower(s, ownerIdx, c, false),
         basePower: (cardMeta(c.id) || {}).power != null ? cardMeta(c.id).power : null,
-        powerAttacker: (cardMeta(c.id) || {}).powerAttacker || null,
-        isAttacking
+        powerAttacker: (cardMeta(c.id) || {}).powerAttacker || null
       });
     }),
     shields: p.shields.map(sh => ({ key: sh.key, faceUp: sh.faceUp, slot: sh.slot, id: sh.faceUp ? sh.id : undefined })),
@@ -1678,9 +1678,22 @@ wss.on('connection', (ws) => {
             send(ws, { type: 'summonRejected', reason: search.source + ' can only take a ' + f + ' from your deck.' });
             return;
           }
+          if (search.costEquals != null && (cardMeta(pickId) || {}).cost !== search.costEquals) {
+            send(ws, { type: 'summonRejected', reason: search.source + ' can only take a creature costing exactly ' + search.costEquals + '.' });
+            return;
+          }
         }
         const [cardId] = me.deck.splice(i, 1);
-        me.hand.push({ id: cardId, key: newKey() });
+        if (search && search.toBattlezone) {
+          // Miraculous Rebirth puts the fetched creature straight into play for free
+          const slot = battlefieldSlot(me);
+          me.battlezone.push({ id: cardId, key: newKey(), tapped: false, x: slot.x, y: slot.y,
+                               summonedTurn: s.turnNumber, brokeShieldThisTurn: false, under: [] });
+          s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
+          extraLogs.push('put ' + cardLabel(cardId) + ' into the battle zone for free with ' + search.source + '.');
+        } else {
+          me.hand.push({ id: cardId, key: newKey() });
+        }
         me.deck = shuffle(me.deck);
         logText = 'searched their deck and shuffled.'; // card taken is normally private
         if (search) {
@@ -1770,6 +1783,7 @@ wss.on('connection', (ws) => {
         const i = me.pendingTargets.findIndex(t => t.id === msg.effectId);
         if (i === -1) return;
         const eff = me.pendingTargets[i];
+        let destroyedCost = null;
         const zones = {
           oppBattle: { owner: opp, list: opp.battlezone },
           ownBattle: { owner: me,  list: me.battlezone },
@@ -1858,6 +1872,7 @@ wss.on('connection', (ws) => {
             list.splice(ci, 1);
             const dest = battleCardToGrave(owner, card);
             creatureDestroyed(owner, opponentOf(room, owner), card, extraLogs);
+            destroyedCost = (cardMeta(card.id) || {}).cost;
             logText = 'used ' + eff.source + ' to destroy ' + label + ' (to ' + dest + ').';
             break;
           }
@@ -1896,7 +1911,16 @@ wss.on('connection', (ws) => {
             return;
         }
         me.pendingTargets.splice(i, 1);
-        resolveSpellCard(me, eff, extraLogs);
+        // Miraculous Rebirth: the destroyed creature's cost decides what you may
+        // fetch, so the spell waits for that search rather than resolving now.
+        if (eff.thenSearchSameCost && destroyedCost != null) {
+          me.pendingSearch = {
+            id: newKey(), source: eff.source, spellKey: eff.spellKey,
+            filter: 'creature', costEquals: destroyedCost, toBattlezone: true
+          };
+        } else {
+          resolveSpellCard(me, eff, extraLogs);
+        }
         break;
       }
       case 'effectMultiResolve': {
@@ -2324,7 +2348,7 @@ wss.on('connection', (ws) => {
       if (tws) send(tws, { type: 'shieldTriggerOffer', key: shieldTriggerFor.key, id: shieldTriggerFor.id });
     }
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
-    if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, source: me.pendingSearch.source });
+    if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, costEquals: me.pendingSearch.costEquals != null ? me.pendingSearch.costEquals : null, source: me.pendingSearch.source });
     if (sfxToPlay) broadcastRaw(room, { type: 'sfx', name: sfxToPlay });
   });
 
