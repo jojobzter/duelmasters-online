@@ -859,7 +859,7 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'summonRejected') {
-    if (isBotGame && seatIndex === 1) { Bot.onRejected(seats[1].state); return; }
+    if (isBotGame && seatIndex === 1) { Bot.onRejected(); return; }
     deliverPrompt(seatIndex, () => alert(msg.reason));
     return;
   }

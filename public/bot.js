@@ -20,6 +20,8 @@ const Bot = (() => {
   let unaffordable = new Set(); // cards rejected this turn, so it stops retrying
   let lastActionSig = '';
   let repeatCount = 0;
+  let lastState = null;
+  let lastAttemptKey = null;
 
   const DELAY = { fast: 420, normal: 700, slow: 950 };
 
@@ -130,7 +132,8 @@ const Bot = (() => {
   function planAttack(state) {
     const me = myState(state), opp = oppState(state);
     const ready = me.battlezone.filter(c =>
-      !c.tapped && canAttackAtAll(c.id) && !isSummoningSick(state, c) && !isSpell(c.id));
+      !c.tapped && canAttackAtAll(c.id) && !isSummoningSick(state, c) && !isSpell(c.id) &&
+      !unaffordable.has('atk:' + c.key));
     if (!ready.length) return null;
     ready.sort((a, b) => livePowerOf(b) - livePowerOf(a));
 
@@ -292,15 +295,21 @@ const Bot = (() => {
       const base = isEvolution(creature.id) ? evolutionBaseFor(state, creature) : null;
       const msg = { type: 'summonCard', key: creature.key };
       if (base) msg.baseKey = base.key;
+      lastAttemptKey = creature.key;
       act(() => send(msg), DELAY.normal);
       return true;
     }
 
     const spell = pickSpell(state);
-    if (spell) { act(() => send({ type: 'summonCard', key: spell.key }), DELAY.normal); return true; }
+    if (spell) {
+      lastAttemptKey = spell.key;
+      act(() => send({ type: 'summonCard', key: spell.key }), DELAY.normal);
+      return true;
+    }
 
     const attack = planAttack(state);
-    if (attack) {
+    if (attack && !unaffordable.has('atk:' + attack.key)) {
+      lastAttemptKey = 'atk:' + attack.key;   // so a refused attack isn't retried forever
       act(() => send({ type: 'declareAttack', key: attack.key, target: attack.target }), DELAY.slow);
       return true;
     }
@@ -312,6 +321,7 @@ const Bot = (() => {
   // ---- main loop ------------------------------------------------------------
   function onState(state) {
     if (!active || !state || state.gameOver) return;
+    lastState = state;
     if (thinkingTimer) return;                    // an action is already queued
 
     // Safety net: if the bot somehow asks for the same thing over and over, stop
@@ -320,7 +330,15 @@ const Bot = (() => {
       myState(state).hand.length, myState(state).battlezone.length,
       (state.combat && state.combat.phase) || '']);
     if (sig === lastActionSig) {
-      if (++repeatCount > 12) return;
+      // Nothing has changed for several wake-ups: the bot is out of useful moves.
+      // End the turn rather than sitting there, so the game can never hang on it.
+      if (++repeatCount > 6) {
+        if (state.activeTurn === state.you && !state.combat) {
+          repeatCount = 0;
+          act(() => send({ type: 'endTurn' }), DELAY.fast);
+        }
+        return;
+      }
     } else { lastActionSig = sig; repeatCount = 0; }
 
     if (handlePrompts(state)) return;
@@ -362,12 +380,17 @@ const Bot = (() => {
     if (!active) return;
     act(() => send({ type: 'battleTap', key, mode: 'attack' }), DELAY.fast);
   }
-  // A rejected action (usually not enough mana) — don't retry that card this turn.
-  function onRejected(state) {
-    if (!active || !state) return;
-    const me = myState(state);
-    const last = me.hand[0];
-    if (last) unaffordable.add(last.key);
+  // A rejected action (usually not enough mana). Mark the card the bot ACTUALLY tried
+  // — not a guess — and wake it straight away, because a rejection produces no state
+  // update, so without this the bot would simply stop mid-turn.
+  function onRejected() {
+    if (!active) return;
+    if (lastAttemptKey) unaffordable.add(lastAttemptKey);
+    lastAttemptKey = null;
+    if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
+    repeatCount = 0;
+    lastActionSig = '';
+    if (lastState) act(() => onState(lastState), DELAY.fast);
   }
   function noteUnaffordable(key) { if (key) unaffordable.add(key); }
 
