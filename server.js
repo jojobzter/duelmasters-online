@@ -301,6 +301,8 @@ function removeBattleCard(owner, key) {
 // Single funnel for battlezone -> graveyard so the Coiling Vines redirect can't be
 // missed by one of the several paths that destroy a creature.
 function battleCardToGrave(owner, card) {
+  // destroyed: the whole stack goes to the graveyard together
+  dissolveStack(owner, card, null, 'graveyard');
   const nm = normalizeCardKey(cardLabel(card.id));
   // some creatures go home rather than dying
   if (RETURN_INSTEAD_OF_DESTROY.has(nm)) {
@@ -319,6 +321,34 @@ function battleCardToGrave(owner, card) {
 // ---------- power & combat helpers ----------
 function metaOf(id) { return cardMeta(id) || {}; }
 function raceOf(id) { return (metaOf(id).race || '').toLowerCase(); }
+// Races can be compound, e.g. "Angel Command/Lost Crusader"
+function racesOf(id) {
+  return (metaOf(id).race || '').toLowerCase().split('/').map(r => r.trim()).filter(Boolean);
+}
+function isEvolutionCard(id) {
+  const t = metaOf(id).type || '';
+  return /evolution/i.test(t);
+}
+// An evolution creature stacks onto one of your creatures sharing a race with it.
+function canEvolveOnto(evoId, baseId) {
+  const evoRaces = racesOf(evoId), baseRaces = racesOf(baseId);
+  if (!evoRaces.length || !baseRaces.length) return false;
+  return evoRaces.some(r => baseRaces.includes(r));
+}
+// Cards stacked under an evolution creature travel with it. Being DESTROYED sends the
+// whole stack to the graveyard; any other way of leaving the battlezone (bounced to
+// hand, put on the deck, sent to mana) just moves them along with the top card.
+function dissolveStack(owner, card, logs, dest) {
+  if (!card.under || !card.under.length) return;
+  const n = card.under.length;
+  for (const u of card.under) {
+    if (dest === 'graveyard') owner.graveyard.push({ id: u.id, key: u.key });
+    else owner.hand.push({ id: u.id, key: u.key });
+  }
+  if (logs) logs.push('the ' + n + ' card' + (n === 1 ? '' : 's') + ' under ' + cardLabel(card.id) +
+                      (dest === 'graveyard' ? ' went to the graveyard.' : ' went back to hand.'));
+  card.under = [];
+}
 function hasNamed(player, normName) {
   return player.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === normName);
 }
@@ -400,6 +430,7 @@ function blockerOnly(id) { return restrictionOf(id).includes('blocker only'); }
 // Summoning sickness, unless the creature has Speed Attacker or Turbo Rush is active.
 function hasSummoningSickness(state, ownerIdx, card) {
   const owner = state.players[ownerIdx];
+  if (isEvolutionCard(card.id)) return false;   // evolution creatures can attack at once
   if (metaOf(card.id).speedAttacker) return false;
   if (owner.turboRushActive) return false;
   return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
@@ -687,6 +718,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
         if (c.key === cardKey) continue;
         if (!metaOf(c.id).blocker) continue;
         removeBattleCard(owner, c.key);
+        dissolveStack(owner, c, extraLog, 'hand');
         owner.hand.push({ id: c.id, key: c.key });
         bounced.push(cardLabel(c.id));
       }
@@ -1549,6 +1581,7 @@ wss.on('connection', (ws) => {
         const i = me.battlezone.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const [c] = me.battlezone.splice(i, 1);
+        dissolveStack(me, c, extraLogs, 'hand');
         me.hand.push({ id: c.id, key: c.key });
         logText = 'returned ' + cardLabel(c.id) + ' from the battlefield to hand.';
         break;
@@ -1764,6 +1797,7 @@ wss.on('connection', (ws) => {
             break;
           case 'returnToHand':
             list.splice(ci, 1);
+            dissolveStack(owner, card, extraLogs, 'hand');
             owner.hand.push({ id: card.id, key: card.key });
             logText = 'used ' + eff.source + ' to return ' + label + " to its owner's hand.";
             break;
@@ -1781,6 +1815,7 @@ wss.on('connection', (ws) => {
           }
           case 'toOwnerMana': {
             list.splice(ci, 1);
+            dissolveStack(owner, card, extraLogs, 'hand');
             const slot = manaSlot(owner);
             owner.mana.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y });
             logText = 'used ' + eff.source + ' to put ' + label + " into its owner's mana zone.";
@@ -1800,6 +1835,7 @@ wss.on('connection', (ws) => {
             break;
           case 'toTopOfDeck':
             list.splice(ci, 1);
+            dissolveStack(owner, card, extraLogs, 'hand');
             owner.deck.unshift(card.id);
             logText = 'used ' + eff.source + ' to put ' + label + " on top of its owner's deck.";
             break;
@@ -1857,6 +1893,7 @@ wss.on('connection', (ws) => {
               break;
             case 'returnToHand':
               list.splice(i, 1);
+              dissolveStack(owner, card, extraLogs, 'hand');
               owner.hand.push({ id: card.id, key: card.key });
               done.push(label);
               break;
