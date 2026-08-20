@@ -1522,8 +1522,10 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'shieldTriggerDecline': {
+        // Keeping the card in hand IS a resolution — break (not return) so the state
+        // is broadcast, otherwise the opponent waits forever on a trigger already answered.
         me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
-        return;
+        break;
       }
       case 'castFreeFromHand': {
         me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
