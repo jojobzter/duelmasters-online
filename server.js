@@ -575,6 +575,15 @@ function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
   }
 }
 
+// Everything a player still has to answer. While this is non-zero the other player
+// must wait — you can't attack into an unresolved Shield Trigger.
+function pendingPromptTotal(p) {
+  return (p.pendingTargets || []).length + (p.pendingDiscards || []).length +
+    (p.pendingMulti ? 1 : 0) + (p.pendingSearch ? 1 : 0) +
+    (p.pendingRaceChoices || []).length + (p.pendingTruce ? 1 : 0) +
+    (p.pendingShieldTriggers || []).length + (p.pendingManaDiscards || 0);
+}
+
 function opponentOf(room, player) {
   return room.state.players[0] === player ? room.state.players[1] : room.state.players[0];
 }
@@ -1076,6 +1085,8 @@ function viewFor(room, viewerIdx) {
     pendingTruce: isSelf ? p.pendingTruce : undefined,
     pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
     pendingShieldTriggerCount: (p.pendingShieldTriggers || []).length,
+    // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
+    pendingPromptCount: pendingPromptTotal(p),
     truceCiv: p.truceCiv || null,
     brokeShieldThisTurn: !!p.brokeShieldThisTurn
   });
@@ -1295,6 +1306,18 @@ wss.on('connection', (ws) => {
     if (!room.decks[idx]) return; // must have dealt your own hand first
     const me = s.players[idx];
     const opp = s.players[oppIdx];
+
+    // While your opponent still has something to resolve — most often a Shield
+    // Trigger you just caused — you may not act. Otherwise you could attack with a
+    // creature their trigger is about to remove.
+    const WAIT_FOR_OPPONENT = new Set([
+      'summonCard', 'chargeMana', 'declareAttack', 'endTurn', 'breakShield',
+      'battleTap', 'drawCard', 'shuffleDeck', 'requestSearchDeck'
+    ]);
+    if (WAIT_FOR_OPPONENT.has(msg.type) && pendingPromptTotal(opp) > 0) {
+      send(ws, { type: 'summonRejected', reason: 'Wait — your opponent is still resolving something (Shield Trigger or card effect).' });
+      return;
+    }
 
     // An unpaid Ice Vapor mana cost blocks the caster's own plays until it's paid.
     // Only their own board actions are gated — they can still chat, resolve the
