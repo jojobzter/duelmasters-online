@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const XLSX = require('xlsx');
+const { parseEffect } = require('./effects-parser.js');
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -45,6 +46,7 @@ function loadCardDatabase(filePath) {
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet);
     const db = new Map();
+    const parseProblems = [];
     const yes = v => /^y(es)?$/i.test((v === undefined || v === null ? '' : v).toString().trim());
     const txt = v => (v === undefined || v === null) ? null : (v.toString().trim() || null);
     const num = v => {
@@ -73,15 +75,48 @@ function loadCardDatabase(filePath) {
         doubleBreaker: yes(row['Double Breaker']),
         tripleBreaker: yes(row['Triple Breaker']),
         attackRestriction: (txt(row['Attack restriction']) || 'none').toLowerCase(),
-        lightStealth: yes(row['Light Stealth'])
+        lightStealth: yes(row['Light Stealth']),
+        effectText: txt(row['Effect'])
       };
+      // Parse the Effect column into structured abilities. Anything unreadable is
+      // collected and reported at startup rather than silently ignored.
+      if (entry.effectText) {
+        const parsed = parseEffect(entry.effectText, name);
+        entry.parsedEffects = parsed.effects;
+        entry.effectProps = parsed.properties;
+        if (parsed.errors.length) {
+          parseProblems.push({ name, errors: parsed.errors.map(e => e.reason + ' :: ' + e.text) });
+        }
+      }
       // Duplicate rows (reprints) are merged field by field, keeping whichever row
       // actually has data — a blank reprint row must never blank out a filled one.
       const existing = db.get(key);
       db.set(key, existing ? mergeCardEntries(existing, entry) : entry);
     }
     CARD_DB = db;
-    console.log('Card database (re)loaded from', filePath, '-', CARD_DB.size, 'unique card names.');
+    const withEffects = [...CARD_DB.values()].filter(c => c.parsedEffects && c.parsedEffects.length).length;
+    console.log('Card database (re)loaded from', filePath, '-', CARD_DB.size, 'unique card names,',
+                withEffects, 'with parsed abilities.');
+    // which described cards does the rules engine not yet implement?
+    try {
+      const implemented = new Set(Object.keys(buildEffectIndex()).filter(k => {
+        const e = buildEffectIndex()[k];
+        return e && Object.keys(e).some(x => x !== 'described' && x !== 'resolvesTo' && x !== 'resolvesTapped');
+      }));
+      const describedOnly = [...CARD_DB.entries()]
+        .filter(([k, c]) => c.parsedEffects && c.parsedEffects.length && !implemented.has(k))
+        .map(([k, c]) => c.name);
+      if (describedOnly.length) {
+        console.log('Described in the sheet but not yet implemented by the engine (' +
+                    describedOnly.length + '):');
+        console.log('   ' + describedOnly.slice(0, 40).join(', '));
+      }
+    } catch (e) { /* reporting only */ }
+
+    if (parseProblems.length) {
+      console.warn('Effect column could not be read for', parseProblems.length, 'card(s):');
+      parseProblems.slice(0, 25).forEach(p => console.warn('   ' + p.name + ': ' + p.errors.join(' | ')));
+    }
   } catch (e) {
     console.warn('Card database not loaded (' + filePath + '):', e.message);
     CARD_DB = new Map();
@@ -166,6 +201,30 @@ function buildEffectIndex() {
   RETURN_INSTEAD_OF_DESTROY.forEach(n => put(n, { survivesDestruction: true }));
   ALWAYS_UNBLOCKABLE.forEach(n => put(n, { unblockable: true }));
   SHIELD_TRIGGER_CARDS.forEach(n => put(n, { shieldTrigger: true }));
+  put(PETROVA_NAME, { unchoosable: true });
+
+  // Anything described in the spreadsheet's Effect column is published too, so the
+  // bot understands every card you've written up — not just the ones the rules
+  // engine has hand-coded.
+  for (const [key, c] of CARD_DB) {
+    if (!c.parsedEffects || !c.parsedEffects.length) continue;
+    put(key, { described: c.parsedEffects.map(e => ({
+      trigger: e.trigger, action: e.action,
+      count: e.count === undefined ? null : e.count,
+      optional: !!e.optional,
+      zone: e.selector ? (e.selector.side + ':' + e.selector.zone) : null,
+      filters: e.selector ? e.selector.filters : null,
+      amount: e.amount || null,
+      keyword: e.keyword || null,
+      condition: e.condition || null
+    })) });
+    if (c.parsedEffects.some(e => e.action === 'grant' && /unchoosable/i.test(e.keyword || ''))) {
+      put(key, { unchoosable: true });
+    }
+    if (c.effectProps && c.effectProps.resolvesTo) {
+      put(key, { resolvesTo: c.effectProps.resolvesTo.to, resolvesTapped: !!c.effectProps.resolvesTo.tapped });
+    }
+  }
   return idx;
 }
 
@@ -628,6 +687,35 @@ function pendingPromptTotal(p) {
     (p.pendingShieldTriggers || []).length + (p.pendingManaDiscards || 0);
 }
 
+// Counts the targets an effect could legally hit right now. Used so an effect with
+// nothing to choose is skipped outright instead of leaving a prompt nobody can answer.
+function legalTargetCount(me, opp, eff) {
+  const zones = {
+    oppBattle: opp.battlezone, ownBattle: me.battlezone, ownHand: me.hand,
+    ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields, ownGrave: me.graveyard,
+    anyBattle: me.battlezone.concat(opp.battlezone)
+  };
+  let list = zones[eff.zone] || [];
+  list = list.filter(c => c.key !== eff.sourceKey);
+  if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
+  if (eff.filter === 'creature') list = list.filter(c => !isSpellCard(c.id));
+  if (eff.filter === 'spell') list = list.filter(c => isSpellCard(c.id));
+  if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test((cardMeta(c.id) || {}).type || ''));
+  if (eff.requireBlocker) list = list.filter(c => isBlocker(c.id));
+  if (eff.maxPower != null) list = list.filter(c => { const p = powerOf(c.id); return p == null || p <= eff.maxPower; });
+  // a card that can't be chosen by the opponent's effects (Petrova) isn't a target
+  if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle') {
+    list = list.filter(c => !(opp.battlezone.includes(c) && isUnchoosable(c.id)));
+  }
+  return list.length;
+}
+
+function isUnchoosable(id) {
+  const m = cardMeta(id) || {};
+  if (normalizeCardKey(cardLabel(id)) === PETROVA_NAME) return true;
+  return (m.parsedEffects || []).some(e => e.action === 'grant' && /unchoosable/i.test(e.keyword || ''));
+}
+
 function opponentOf(room, player) {
   return room.state.players[0] === player ? room.state.players[1] : room.state.players[0];
 }
@@ -741,10 +829,16 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey) {
     if (targetEff.byOpponent) {
       // Comet Missile makes the OPPONENT destroy one of their own creatures. The
       // spell itself is finished, so it isn't deferred waiting on their choice.
-      opp.pendingTargets.push(Object.assign({}, base, { zone: 'ownBattle', spellKey: null }));
-    } else {
+      const oppSide = Object.assign({}, base, { zone: 'ownBattle', spellKey: null });
+      if (legalTargetCount(opp, me, oppSide) > 0) opp.pendingTargets.push(oppSide);
+      else extraLog.push('cast ' + cardLabel(cardId) + ' — their opponent had no legal target.');
+    } else if (legalTargetCount(me, opp, base) > 0) {
       me.pendingTargets.push(base);
       defer = true;
+    } else {
+      // nothing it could legally choose, so it resolves with no effect rather than
+      // leaving a prompt that can never be answered
+      extraLog.push('cast ' + cardLabel(cardId) + ' — there was no legal target.');
     }
     // Volcanic Arrows also forces you to bin one of your own shields
     if (targetEff.thenShieldToGrave && me.shields.length) {
@@ -1913,6 +2007,13 @@ wss.on('connection', (ws) => {
         const i = me.pendingTargets.findIndex(t => t.id === msg.effectId);
         if (i === -1) return;
         const eff = me.pendingTargets[i];
+        // if the board changed and nothing is legal any more, drop the prompt
+        if (legalTargetCount(me, opp, eff) === 0) {
+          me.pendingTargets.splice(i, 1);
+          resolveSpellCard(me, eff, extraLogs);
+          logText = 'had no legal target for ' + eff.source + '.';
+          break;
+        }
         let destroyedCost = null;
         const zones = {
           oppBattle: { owner: opp, list: opp.battlezone },
