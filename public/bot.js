@@ -23,6 +23,7 @@ const Bot = (() => {
   let lastState = null;
   let lastAttemptKey = null;
   let heartbeat = null;
+  let lastProgressAt = Date.now();
 
   const DELAY = { fast: 420, normal: 700, slow: 950 };
 
@@ -347,7 +348,7 @@ const Bot = (() => {
         }
         return;
       }
-    } else { lastActionSig = sig; repeatCount = 0; }
+    } else { lastActionSig = sig; repeatCount = 0; lastProgressAt = Date.now(); }
 
     const cb = state.combat;
     if (cb && cb.phase === 'blocking' && cb.attackerIdx !== state.you) {
@@ -357,14 +358,21 @@ const Bot = (() => {
     }
     if (cb && cb.phase === 'breaking' && cb.attackerIdx === state.you) {
       const opp = oppState(state);
-      if (opp.shields.length) {
+      if (opp.shields.length && cb.shieldsToBreak > 0) {
         act(() => send({ type: 'breakShield', key: opp.shields[0].key }), DELAY.normal);
       } else {
         act(() => send({ type: 'cancelCombat' }), DELAY.fast);
       }
       return;
     }
-    if (cb) return;                               // waiting on the human
+    // Any other combat state belongs to the human — except one the bot itself started
+    // and can no longer act on, which it must close rather than wait on forever.
+    if (cb) {
+      if (cb.attackerIdx === state.you && cb.phase !== 'blocking') {
+        act(() => send({ type: 'cancelCombat' }), DELAY.normal);
+      }
+      return;
+    }
 
     if (state.activeTurn === state.you) takeTurn(state);
   }
@@ -413,8 +421,23 @@ const Bot = (() => {
       // Re-checking periodically means it can never sit waiting for a wake-up that
       // isn't coming.
       if (heartbeat) clearInterval(heartbeat);
+      lastProgressAt = Date.now();
       heartbeat = setInterval(() => {
-        if (active && lastState && !thinkingTimer) onState(lastState);
+        if (!active || !lastState) return;
+        if (!thinkingTimer) onState(lastState);
+
+        // Hard watchdog. If it's the bot's turn and nothing has changed for a while,
+        // force the turn to end — first backing out of any attack it left open. A
+        // stuck bot would otherwise freeze the human's game indefinitely, and it also
+        // stops the turn counter, which makes summoning sickness look broken.
+        const st = lastState;
+        if (st.gameOver || st.activeTurn !== st.you) return;
+        if (Date.now() - lastProgressAt < 8000) return;
+        lastProgressAt = Date.now();
+        if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
+        const cb = st.combat;
+        if (cb && cb.attackerIdx === st.you) send({ type: 'cancelCombat' });
+        else send({ type: 'endTurn' });
       }, 1500);
     },
     stop() {
