@@ -387,7 +387,24 @@ const Bot = (() => {
   // A shield trigger offer arrives as its own message rather than in the state.
   function onShieldTrigger(key) {
     if (!active) return;
-    act(() => send({ type: 'castFreeFromHand', key }), DELAY.normal);
+    let worthCasting = true;
+    try {
+      const st = lastState;
+      if (st) {
+        const card = myState(st).hand.find(c => c.key === key);
+        if (card) {
+          const n = (nameOf(card.id) || '').toLowerCase();
+          const opp = oppState(st);
+          // removal with nothing to remove is wasted — keep it in hand instead
+          if (/terror pit|death smoke|spiral gate|aqua surfer|natural snare|solar ray|crimson hammer|tornado flame|critical blade/.test(n)) {
+            worthCasting = opp.battlezone.length > 0;
+          }
+        }
+      }
+    } catch (e) { /* fall back to casting */ }
+    act(() => send(worthCasting
+      ? { type: 'castFreeFromHand', key }
+      : { type: 'shieldTriggerDecline', key }), DELAY.normal);
   }
   // Tap-ability choice (Gigazald): the bot just attacks.
   function onTapMode(key) {
