@@ -563,13 +563,14 @@ const QUIXOTIC_NAME = 'quixotic hero swine snout';
 // Called whenever a creature enters either battlezone. Every Quixotic already in play
 // gains a permanent +3000; the creature arriving doesn't count itself, and creatures
 // that were already out when Quixotic arrived never counted.
-function onCreatureEnteredBattlezone(state, enteringKey, enteringId) {
+function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
   if (isSpellCard(enteringId)) return;
   for (const p of state.players) {
     for (const c of p.battlezone) {
       if (c.key === enteringKey) continue;
       if (normalizeCardKey(cardLabel(c.id)) !== QUIXOTIC_NAME) continue;
       c.qxCount = (c.qxCount || 0) + 1;
+      if (logs) logs.push(cardLabel(c.id) + ' gained +3000 from ' + cardLabel(enteringId) + ' entering (now +' + (c.qxCount * 3000) + ').');
     }
   }
 }
@@ -1471,7 +1472,7 @@ wss.on('connection', (ws) => {
         me.battlezone.push({ id: c.id, key: c.key, tapped: inheritTapped, x, y,
                              summonedTurn: evoBase ? null : s.turnNumber,
                              brokeShieldThisTurn: false, under: stack });
-        onCreatureEnteredBattlezone(s, c.key, c.id);
+        onCreatureEnteredBattlezone(s, c.key, c.id, extraLogs);
         if (evoBase) extraLogs.push('evolved ' + cardLabel(c.id) + ' from ' + cardLabel(evoBase.id) + '.');
         if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
         else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
@@ -1517,7 +1518,7 @@ wss.on('connection', (ws) => {
         const [c] = me.hand.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, brokeShieldThisTurn: false, under: [] });
-        onCreatureEnteredBattlezone(s, c.key, c.id);
+        onCreatureEnteredBattlezone(s, c.key, c.id, extraLogs);
         if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
         else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
@@ -1715,7 +1716,7 @@ wss.on('connection', (ws) => {
         const [c] = me.graveyard.splice(i, 1);
         const { x, y } = battlefieldSlot(me);
         me.battlezone.push({ id: c.id, key: c.key, tapped: false, x, y, summonedTurn: s.turnNumber, under: [] });
-        onCreatureEnteredBattlezone(s, c.key, c.id);
+        onCreatureEnteredBattlezone(s, c.key, c.id, extraLogs);
         logText = 'returned ' + cardLabel(c.id) + ' from the graveyard to the battlefield.';
         break;
       }
@@ -1748,7 +1749,7 @@ wss.on('connection', (ws) => {
           const freeKey = newKey();
           me.battlezone.push({ id: cardId, key: freeKey, tapped: false, x: slot.x, y: slot.y,
                                summonedTurn: s.turnNumber, brokeShieldThisTurn: false, under: [] });
-          onCreatureEnteredBattlezone(s, freeKey, cardId);
+          onCreatureEnteredBattlezone(s, freeKey, cardId, extraLogs);
           s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
           extraLogs.push('put ' + cardLabel(cardId) + ' into the battle zone for free with ' + search.source + '.');
         } else {
