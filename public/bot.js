@@ -22,6 +22,7 @@ const Bot = (() => {
   let repeatCount = 0;
   let lastState = null;
   let lastAttemptKey = null;
+  let rejectedTargets = new Set();   // 'effectId:cardKey' the server has refused
   let heartbeat = null;
   let lastProgressAt = Date.now();
   let votedRematch = false;
@@ -426,6 +427,10 @@ const Bot = (() => {
       if (eff.requireBlocker) cands = cands.filter(c => meta(c.id).blocker);
       if (eff.maxPower != null) cands = cands.filter(c => powerOf(c.id) <= eff.maxPower);
 
+      // a card that can't be chosen by an opponent's effect (Petrova) is not a target,
+      // and neither is anything the server has already refused for this effect
+      cands = cands.filter(c => !(effectOf(c.id).unchoosable && pool === opp.battlezone));
+      cands = cands.filter(c => !rejectedTargets.has(eff.id + ':' + c.key));
       if (!cands.length) { act(() => send({ type: 'effectTargetSkip', effectId: eff.id }), DELAY.fast); return true; }
       // hitting the opponent: take their best. Choosing its own: give up the weakest.
       const ownZone = (eff.zone === 'ownBattle' || eff.zone === 'ownHand' || eff.zone === 'ownMana' || eff.zone === 'ownShield');
@@ -439,6 +444,7 @@ const Bot = (() => {
         // hitting the opponent: blockers and big bodies first
         cands.sort((a, b) => isThreat(b) - isThreat(a));
       }
+      lastAttemptKey = 'target:' + eff.id + ':' + cands[0].key;
       act(() => send({ type: 'effectTarget', effectId: eff.id, key: cands[0].key }), DELAY.normal);
       return true;
     }
@@ -511,6 +517,7 @@ const Bot = (() => {
       votedRematch = false;
       turnState = { turn: -1, drew: false, charged: false };
       unaffordable = new Set();
+      rejectedTargets = new Set();
       lastActionSig = '';
       repeatCount = 0;
       lastProgressAt = Date.now();
@@ -625,7 +632,12 @@ const Bot = (() => {
   // update, so without this the bot would simply stop mid-turn.
   function onRejected() {
     if (!active) return;
-    if (lastAttemptKey) unaffordable.add(lastAttemptKey);
+    if (lastAttemptKey && lastAttemptKey.startsWith('target:')) {
+      // don't offer this target for this effect again — otherwise it loops forever
+      rejectedTargets.add(lastAttemptKey.slice('target:'.length));
+    } else if (lastAttemptKey) {
+      unaffordable.add(lastAttemptKey);
+    }
     lastAttemptKey = null;
     if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
     repeatCount = 0;
