@@ -28,6 +28,17 @@ const Bot = (() => {
 
   const DELAY = { fast: 420, normal: 700, slow: 950 };
 
+  // The engine's own description of what every implemented card does. The bot reasons
+  // from this rather than from hardcoded card names, so a card added to the server's
+  // effect tables is immediately understood here with no changes to the AI.
+  let EFFECTS = {};
+  fetch('/api/effects').then(r => r.json()).then(x => { EFFECTS = x || {}; }).catch(() => {});
+  function normName(n) {
+    return (n || '').toLowerCase().replace(/[\u2018\u2019\u02BC`]/g, "'")
+      .replace(/_/g, "'").replace(/\s+/g, ' ').trim();
+  }
+  function effectOf(id) { return EFFECTS[normName(nameOf(id))] || {}; }
+
   function meta(id) {
     return (typeof cardMetaFor === 'function' ? cardMetaFor(id) : {}) || {};
   }
@@ -71,10 +82,10 @@ const Bot = (() => {
   function untappedMana(state) { return myState(state).mana.filter(m => !m.tapped); }
   function manaCivs(id) { return meta(id).civs || []; }
 
-  function canAfford(state, cardId) {
+  function canAfford(state, cardId) { return canAffordWith(untappedMana(state), cardId); }
+  function canAffordWith(pool, cardId) {
     const m = meta(cardId);
     if (m.cost == null) return true;                 // unknown — let the server judge
-    const pool = untappedMana(state);
     if (pool.length < m.cost) return false;
     const need = m.civs || [];
     if (!need.length) return true;
@@ -86,6 +97,84 @@ const Bot = (() => {
       used.add(hit.key);
     }
     return true;
+  }
+
+  // How good is this card to PLAY right now? Used to compare a summon against what
+  // charging a different card would unlock.
+  function cardValue(state, card) {
+    const m = meta(card.id);
+    const fx = effectOf(card.id);
+    const opp = oppState(state), me = myState(state);
+    let v = powerOf(card.id) / 1000;
+
+    // --- statistics the sheet gives us ---
+    if (m.speedAttacker) v += 4;        // attacks the turn it lands — real tempo
+    if (m.blocker) v += 3;
+    if (m.tripleBreaker) v += 5; else if (m.doubleBreaker) v += 3;
+    if (m.slayer) v += 2;
+    if (m.lightStealth) v += 2;
+    if (isEvolution(card.id)) v += 2;
+    const restriction = m.attackRestriction || '';
+    if (/cannot attack/.test(restriction)) v -= 2;
+    else if (/not players/.test(restriction)) v -= 1;
+
+    // --- abilities, read from the engine's effect index ---
+    if (fx.survivesDestruction) v += 3;
+    if (fx.unblockable) v += 3;
+    if (fx.returnsAtEndOfTurn) v += 1;      // reusable, but doesn't stick around
+    if (fx.shieldTrigger) v += 1;           // value even when drawn normally
+    if (fx.manaRamp) v += 3;
+    if (fx.draw) v += 2 * fx.draw;
+    if (fx.search) v += 3;
+    if (fx.entersManaTapped) v -= 1;
+    if (fx.tapAbility) v += 2;
+    if (fx.attackTrigger) v += 2;
+
+    if (fx.oppDiscard) {
+      const n = fx.oppDiscard.kind === 'all' ? (opp.handCount || 0) : (fx.oppDiscard.count || 1);
+      v = Math.max(v, (opp.handCount || 0) > 0 ? 3 + n * 2 : 0);
+    }
+    if (fx.tapAllOpponents) {
+      const untapped = opp.battlezone.filter(c => !c.tapped).length;
+      v = Math.max(v, untapped ? 3 + untapped * 2 : 0);
+    }
+    if (fx.massDestroy) {
+      // count what it would actually kill on the current board
+      const victims = opp.battlezone.filter(c => {
+        if (fx.massDestroy.maxPower != null) return powerOf(c.id) <= fx.massDestroy.maxPower;
+        if (fx.massDestroy.except) return !(meta(c.id).civs || []).includes(fx.massDestroy.except);
+        return true;
+      });
+      const selfLoss = fx.massDestroy.except
+        ? me.battlezone.filter(c => !(meta(c.id).civs || []).includes(fx.massDestroy.except)).length : 0;
+      v = Math.max(v, victims.length ? 4 + victims.length * 3 - selfLoss * 2 : 0);
+    }
+    if (fx.target) {
+      const t = fx.target;
+      const hitsOpponent = (t.zone === 'oppBattle' || t.zone === 'anyBattle' || t.zone === 'oppMana');
+      if (hitsOpponent) {
+        let pool = t.zone === 'oppMana' ? opp.mana : opp.battlezone;
+        if (t.maxPower != null) pool = pool.filter(c => powerOf(c.id) <= t.maxPower);
+        if (t.requireBlocker) pool = pool.filter(c => meta(c.id).blocker);
+        if (t.filter === 'untapped') pool = pool.filter(c => !c.tapped);
+        // removal is only worth something when it has a legal target
+        v = pool.length ? Math.max(v, 6 + (t.chains ? 3 : 0)) : 0;
+      } else if (t.zone === 'ownGrave') {
+        v = Math.max(v, me.graveyard.length ? 5 : 0);
+      } else if (t.zone === 'ownMana' || t.zone === 'ownHand') {
+        v = Math.max(v, 3);
+      }
+    }
+    if (fx.multi) {
+      const mm = fx.multi;
+      let pool = mm.zone === 'ownGrave' ? me.graveyard
+               : mm.zone === 'oppBattle' ? opp.battlezone
+               : me.battlezone.concat(opp.battlezone);
+      if (mm.maxPower != null) pool = pool.filter(c => powerOf(c.id) <= mm.maxPower);
+      const n = Math.min(pool.length, mm.max && mm.max < 90 ? mm.max : pool.length);
+      v = n ? Math.max(v, 4 + n * 2) : 0;
+    }
+    return v;
   }
 
   // ---- board reading --------------------------------------------------------
@@ -112,27 +201,27 @@ const Bot = (() => {
   function pickManaCard(state) {
     const me = myState(state);
     if (!me.hand.length) return null;
-    const haveCivs = new Set();
-    me.mana.forEach(m => manaCivs(m.id).forEach(c => haveCivs.add(c)));
+    const basePool = untappedMana(state);
 
-    const counts = {};
-    me.hand.forEach(c => { counts[c.id] = (counts[c.id] || 0) + 1; });
+    let best = null;
+    for (const cand of me.hand) {
+      // pretend this card is in the mana zone: the pool grows by one and gains its civ
+      const pool = basePool.concat([{ key: 'hypothetical', id: cand.id }]);
+      const rest = me.hand.filter(h => h.key !== cand.key);
 
-    const scored = me.hand.map(c => {
-      let score = 0;
-      const civs = manaCivs(c.id);
-      // a civilization it can't otherwise produce is valuable in the mana zone
-      if (civs.length && !civs.some(v => haveCivs.has(v))) score -= 4;
-      if (counts[c.id] > 1) score += 3;                       // spare copy
-      if (isEvolution(c.id)) score += 2;                       // often stuck in hand
-      score += Math.max(0, costOf(c.id) - (me.mana.length + 2)); // out of reach for a while
-      if (isSpell(c.id)) score += 1;
-      if (canAfford(state, c.id)) score -= 2;                  // castable now — keep it
-      if (powerOf(c.id) >= 5000) score -= 2;                   // strong body, keep it
-      return { c, score };
-    });
-    scored.sort((a, b) => b.score - a.score);
-    return scored[0].c;
+      let bestPlay = 0;
+      for (const c of rest) {
+        if (!canAffordWith(pool, c.id)) continue;
+        if (isEvolution(c.id) && !evolutionBaseFor(state, c)) continue;
+        const v = cardValue(state, c);
+        if (v > bestPlay) bestPlay = v;
+      }
+
+      // charging a strong card costs something, so weigh what's being given up
+      const score = bestPlay - cardValue(state, cand) * 0.45;
+      if (!best || score > best.score) best = { c: cand, score };
+    }
+    return best ? best.c : me.hand[0];
   }
 
   // ---- what to play this turn ----------------------------------------------
@@ -143,56 +232,25 @@ const Bot = (() => {
     const affordable = me.hand.filter(c => !unaffordable.has(c.key) && canAfford(state, c.id));
     if (!affordable.length) return null;
 
-    const oppCreatures = opp.battlezone.filter(c => !isSpell(c.id));
+    // Everything below is judged by cardValue, which reads each card's actual
+    // mechanics — nothing here is keyed to a specific card name.
+    const scored = affordable
+      .filter(c => !(isEvolution(c.id) && !evolutionBaseFor(state, c)))   // no valid base
+      .map(c => ({ c, v: cardValue(state, c), fx: effectOf(c.id) }))
+      .filter(x => x.v > 0);                                             // dead card right now
+    if (!scored.length) return null;
+
     const oppBlockers = untappedBlockers(opp);
-
-    const nameOfCard = c => (nameOf(c.id) || '').toLowerCase();
-
-    // 1. removal — only when there's something worth removing
-    const removal = affordable.filter(c => /terror pit|death smoke|crimson hammer|tornado flame|searing wave|apocalypse vise|volcano charger|miraculous rebirth|critical blade|natural snare|spiral gate|aqua surfer|corile/.test(nameOfCard(c)));
-    if (removal.length && oppCreatures.length) {
-      // worth it if it can answer a real threat, and especially a blocker in the way
-      const target = bestRemovalTarget(oppCreatures);
-      const worthIt = oppBlockers.length > 0 || isThreat(target) >= 4000 || oppCreatures.length >= 2;
-      if (worthIt) {
-        removal.sort((a, b) => costOf(a.id) - costOf(b.id));   // cheapest answer first
-        return removal[0];
-      }
+    for (const x of scored) {
+      // clearing a blocker before attacking is worth more than the card alone
+      if (oppBlockers.length && x.fx.target && x.fx.target.zone !== 'ownGrave') x.v += 3;
+      // a body is worth more when behind on board
+      if (!isSpell(x.c.id) && me.battlezone.length < opp.battlezone.length) x.v += 2;
+      // cheaper plays first when values are close, to use mana efficiently
+      x.v -= costOf(x.c.id) * 0.15;
     }
-
-    // 2. evolution, when a base is available — usually the strongest play available
-    const evo = affordable.filter(c => isEvolution(c.id) && evolutionBaseFor(state, c));
-    if (evo.length) {
-      evo.sort((a, b) => powerOf(b.id) - powerOf(a.id));
-      return evo[0];
-    }
-
-    // 3. creatures — biggest body the mana allows, blockers valued when behind
-    const creatures = affordable.filter(c => !isSpell(c.id) && !isEvolution(c.id));
-    if (creatures.length) {
-      const behind = me.battlezone.length < opp.battlezone.length;
-      creatures.sort((a, b) => {
-        const va = powerOf(a.id) + (behind && meta(a.id).blocker ? 3000 : 0);
-        const vb = powerOf(b.id) + (behind && meta(b.id).blocker ? 3000 : 0);
-        return vb - va || costOf(b.id) - costOf(a.id);
-      });
-      return creatures[0];
-    }
-
-    // 4. value spells (draw/search/disruption) with spare mana
-    const value = affordable.filter(c => {
-      if (!isSpell(c.id)) return false;
-      const n = nameOfCard(c);
-      if (/ghost touch|locomotiver|cranium clamp|lost soul|gigabalza|rain of arrows/.test(n)) return opp.handCount > 0;
-      if (/holy awe/.test(n)) return opp.battlezone.some(x => !x.tapped);
-      if (/logic cube|brain serum|energy stream|crystal memory|dimension gate/.test(n)) return true;
-      return false;
-    });
-    if (value.length) {
-      value.sort((a, b) => costOf(a.id) - costOf(b.id));
-      return value[0];
-    }
-    return null;
+    scored.sort((a, b) => b.v - a.v);
+    return scored[0].c;
   }
 
   function evolutionBaseFor(state, card) {
@@ -533,18 +591,12 @@ const Bot = (() => {
       if (st) {
         const card = myState(st).hand.find(c => c.key === key);
         if (card) {
-          const n = (nameOf(card.id) || '').toLowerCase();
-          const opp = oppState(st), mine = myState(st);
-          // removal with nothing to remove is wasted — keep it in hand instead
-          if (/terror pit|death smoke|spiral gate|aqua surfer|natural snare|solar ray|crimson hammer|tornado flame|critical blade|corile/.test(n)) {
-            worthCasting = opp.battlezone.length > 0;
-          } else if (/holy awe/.test(n)) {
-            worthCasting = opp.battlezone.some(x => !x.tapped);
-          } else if (/ghost touch|locomotiver|cranium clamp|lost soul|gigabalza/.test(n)) {
-            worthCasting = (opp.handCount || 0) > 0;
-          }
-          // when the game is on the line, take any effect that might help
-          if (!worthCasting && mine.shields.length <= 1) worthCasting = opp.battlezone.length > 0;
+          // cardValue already accounts for whether the effect has a legal target,
+          // so a trigger that would do nothing simply scores zero
+          const v = cardValue(st, card);
+          worthCasting = v > 0;
+          // one shield from losing: take anything that might swing the board
+          if (!worthCasting && myState(st).shields.length <= 1) worthCasting = v >= 0;
         }
       }
     } catch (e) { /* fall back to casting */ }
@@ -552,11 +604,7 @@ const Bot = (() => {
       ? { type: 'castFreeFromHand', key }
       : { type: 'shieldTriggerDecline', key }), DELAY.normal);
   }
-  // Tap-ability choice (Gigazald): the bot just attacks.
-  function onTapMode(key) {
-    if (!active) return;
-    act(() => send({ type: 'battleTap', key, mode: 'attack' }), DELAY.fast);
-  }
+
   // A rejected action (usually not enough mana). Mark the card the bot ACTUALLY tried
   // — not a guess — and wake it straight away, because a rejection produces no state
   // update, so without this the bot would simply stop mid-turn.
