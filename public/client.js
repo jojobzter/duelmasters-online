@@ -2450,7 +2450,8 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
     const showPA = !!(c.powerAttacker && c.attackedThisTurn && c.tapped);
     const stacked = (c.under && c.under.length) ? c.under.length : 0;
     div.innerHTML = cardImgHtml(c.id) +
-      (boosted ? '<div class="power-overlay">' + c.livePower + '</div>' : '') +
+      (boosted ? '<div class="power-overlay" title="Printed power ' + c.basePower +
+                 ', currently ' + c.livePower + '">' + c.livePower + '</div>' : '') +
       (showPA ? '<div class="pa-badge"><span>POWER ATTACKER</span>+' + c.powerAttacker + '</div>' : '') +
       (stacked ? '<div class="evo-badge" title="Evolution stack: ' + (stacked + 1) + ' cards">\u21D1' + (stacked + 1) + '</div>' : '');
     makeMagnifiable(div, c.id);
