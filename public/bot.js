@@ -24,6 +24,7 @@ const Bot = (() => {
   let lastAttemptKey = null;
   let heartbeat = null;
   let lastProgressAt = Date.now();
+  let votedRematch = false;
 
   const DELAY = { fast: 420, normal: 700, slow: 950 };
 
@@ -63,85 +64,176 @@ const Bot = (() => {
     return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
   }
 
-  // ---- decisions ------------------------------------------------------------
+  // ---- mana: what can it actually afford right now? -------------------------
+  // Knowing this is what lets the bot plan a turn instead of guessing and being
+  // refused. Mirrors the server's payment rule: one card per point of cost, and at
+  // least one card of each civilization the card requires.
+  function untappedMana(state) { return myState(state).mana.filter(m => !m.tapped); }
+  function manaCivs(id) { return meta(id).civs || []; }
 
-  // Which card to put into mana. Keeps the good stuff in hand: prefers a duplicate,
-  // then the most expensive card it can't realistically cast soon.
+  function canAfford(state, cardId) {
+    const m = meta(cardId);
+    if (m.cost == null) return true;                 // unknown — let the server judge
+    const pool = untappedMana(state);
+    if (pool.length < m.cost) return false;
+    const need = m.civs || [];
+    if (!need.length) return true;
+    // assign one distinct mana card to each required civilization
+    const used = new Set();
+    for (const civ of need) {
+      const hit = pool.find(x => !used.has(x.key) && manaCivs(x.id).includes(civ));
+      if (!hit) return false;
+      used.add(hit.key);
+    }
+    return true;
+  }
+
+  // ---- board reading --------------------------------------------------------
+  function untappedBlockers(player) {
+    return player.battlezone.filter(c => !c.tapped && meta(c.id).blocker);
+  }
+  function isThreat(card) {
+    // rough danger score: power, plus a premium for blockers and breakers
+    let t = livePowerOf(card);
+    if (meta(card.id).blocker) t += 3000;
+    if (meta(card.id).doubleBreaker) t += 2000;
+    if (meta(card.id).tripleBreaker) t += 4000;
+    if (meta(card.id).slayer) t += 2000;
+    return t;
+  }
+  function bestRemovalTarget(list) {
+    if (!list.length) return null;
+    return list.slice().sort((a, b) => isThreat(b) - isThreat(a))[0];
+  }
+
+  // ---- mana charging --------------------------------------------------------
+  // Keeps castable cards in hand, and makes sure the civilizations it actually
+  // needs are represented in the mana zone.
   function pickManaCard(state) {
-    const hand = myState(state).hand;
-    if (!hand.length) return null;
+    const me = myState(state);
+    if (!me.hand.length) return null;
+    const haveCivs = new Set();
+    me.mana.forEach(m => manaCivs(m.id).forEach(c => haveCivs.add(c)));
+
     const counts = {};
-    hand.forEach(c => { counts[c.id] = (counts[c.id] || 0) + 1; });
-    const scored = hand.map(c => {
+    me.hand.forEach(c => { counts[c.id] = (counts[c.id] || 0) + 1; });
+
+    const scored = me.hand.map(c => {
       let score = 0;
-      if (counts[c.id] > 1) score += 3;            // spare copy — safe to bury
-      if (isEvolution(c.id)) score += 2;           // often uncastable early
-      score += Math.max(0, costOf(c.id) - 5);      // very expensive cards are dead weight
+      const civs = manaCivs(c.id);
+      // a civilization it can't otherwise produce is valuable in the mana zone
+      if (civs.length && !civs.some(v => haveCivs.has(v))) score -= 4;
+      if (counts[c.id] > 1) score += 3;                       // spare copy
+      if (isEvolution(c.id)) score += 2;                       // often stuck in hand
+      score += Math.max(0, costOf(c.id) - (me.mana.length + 2)); // out of reach for a while
       if (isSpell(c.id)) score += 1;
+      if (canAfford(state, c.id)) score -= 2;                  // castable now — keep it
+      if (powerOf(c.id) >= 5000) score -= 2;                   // strong body, keep it
       return { c, score };
     });
     scored.sort((a, b) => b.score - a.score);
     return scored[0].c;
   }
 
-  // Best creature it can try to summon. Evolution creatures only when a valid base
-  // is on the table, since the server would refuse otherwise.
-  function pickSummon(state) {
-    const me = myState(state);
-    const options = me.hand.filter(c => {
-      if (unaffordable.has(c.key)) return false;
-      if (isSpell(c.id)) return false;             // spells handled separately
-      if (isEvolution(c.id)) {
-        return me.battlezone.some(b => {
-          const a = racesOf(c.id), bb = racesOf(b.id);
-          return a.length && bb.length && a.some(r => bb.includes(r));
-        });
+  // ---- what to play this turn ----------------------------------------------
+  // Removal comes first (clearing blockers before attacking), then bodies, then
+  // value spells with whatever mana is left.
+  function pickPlay(state) {
+    const me = myState(state), opp = oppState(state);
+    const affordable = me.hand.filter(c => !unaffordable.has(c.key) && canAfford(state, c.id));
+    if (!affordable.length) return null;
+
+    const oppCreatures = opp.battlezone.filter(c => !isSpell(c.id));
+    const oppBlockers = untappedBlockers(opp);
+
+    const nameOfCard = c => (nameOf(c.id) || '').toLowerCase();
+
+    // 1. removal — only when there's something worth removing
+    const removal = affordable.filter(c => /terror pit|death smoke|crimson hammer|tornado flame|searing wave|apocalypse vise|volcano charger|miraculous rebirth|critical blade|natural snare|spiral gate|aqua surfer|corile/.test(nameOfCard(c)));
+    if (removal.length && oppCreatures.length) {
+      // worth it if it can answer a real threat, and especially a blocker in the way
+      const target = bestRemovalTarget(oppCreatures);
+      const worthIt = oppBlockers.length > 0 || isThreat(target) >= 4000 || oppCreatures.length >= 2;
+      if (worthIt) {
+        removal.sort((a, b) => costOf(a.id) - costOf(b.id));   // cheapest answer first
+        return removal[0];
       }
-      return true;
+    }
+
+    // 2. evolution, when a base is available — usually the strongest play available
+    const evo = affordable.filter(c => isEvolution(c.id) && evolutionBaseFor(state, c));
+    if (evo.length) {
+      evo.sort((a, b) => powerOf(b.id) - powerOf(a.id));
+      return evo[0];
+    }
+
+    // 3. creatures — biggest body the mana allows, blockers valued when behind
+    const creatures = affordable.filter(c => !isSpell(c.id) && !isEvolution(c.id));
+    if (creatures.length) {
+      const behind = me.battlezone.length < opp.battlezone.length;
+      creatures.sort((a, b) => {
+        const va = powerOf(a.id) + (behind && meta(a.id).blocker ? 3000 : 0);
+        const vb = powerOf(b.id) + (behind && meta(b.id).blocker ? 3000 : 0);
+        return vb - va || costOf(b.id) - costOf(a.id);
+      });
+      return creatures[0];
+    }
+
+    // 4. value spells (draw/search/disruption) with spare mana
+    const value = affordable.filter(c => {
+      if (!isSpell(c.id)) return false;
+      const n = nameOfCard(c);
+      if (/ghost touch|locomotiver|cranium clamp|lost soul|gigabalza|rain of arrows/.test(n)) return opp.handCount > 0;
+      if (/holy awe/.test(n)) return opp.battlezone.some(x => !x.tapped);
+      if (/logic cube|brain serum|energy stream|crystal memory|dimension gate/.test(n)) return true;
+      return false;
     });
-    if (!options.length) return null;
-    // strongest creature first; cost is a tiebreak so it develops the board fast
-    options.sort((a, b) => (powerOf(b.id) - powerOf(a.id)) || (costOf(a.id) - costOf(b.id)));
-    return options[0];
+    if (value.length) {
+      value.sort((a, b) => costOf(a.id) - costOf(b.id));
+      return value[0];
+    }
+    return null;
   }
 
   function evolutionBaseFor(state, card) {
     const me = myState(state);
     const a = racesOf(card.id);
-    return me.battlezone.find(b => {
+    // evolve from the weakest valid base, keeping the better body on the table
+    const bases = me.battlezone.filter(b => {
       const bb = racesOf(b.id);
       return a.length && bb.length && a.some(r => bb.includes(r));
-    }) || null;
+    });
+    if (!bases.length) return null;
+    bases.sort((x, y) => powerOf(x.id) - powerOf(y.id));
+    return bases[0];
   }
 
-  // A spell is only cast when the bot can see something useful for it to do.
-  function pickSpell(state) {
-    const me = myState(state), opp = oppState(state);
-    return me.hand.find(c => {
-      if (!isSpell(c.id) || unaffordable.has(c.key)) return false;
-      const n = (nameOf(c.id) || '').toLowerCase();
-      if (/terror pit|death smoke|crimson hammer|tornado flame|searing wave|apocalypse vise|volcano charger|miraculous rebirth|critical blade/.test(n)) {
-        return opp.battlezone.length > 0;          // removal needs a target
-      }
-      if (/spiral gate|aqua surfer|natural snare|solar ray/.test(n)) return opp.battlezone.length > 0;
-      if (/ghost touch|locomotiver|cranium clamp|lost soul|gigabalza/.test(n)) return opp.handCount > 0;
-      if (/holy awe/.test(n)) return opp.battlezone.some(x => !x.tapped);
-      return true;                                  // draw/search spells are always fine
-    }) || null;
-  }
-
-  // Attackers, strongest first. Prefers a creature kill it wins outright, else shields.
+  // ---- attacking ------------------------------------------------------------
   function planAttack(state) {
     const me = myState(state), opp = oppState(state);
     const ready = me.battlezone.filter(c =>
       !c.tapped && canAttackAtAll(c.id) && !isSummoningSick(state, c) && !isSpell(c.id) &&
       !unaffordable.has('atk:' + c.key));
     if (!ready.length) return null;
+
+    const blockers = untappedBlockers(opp);
+    const strongestBlocker = blockers.length
+      ? blockers.slice().sort((a, b) => livePowerOf(b) - livePowerOf(a))[0] : null;
+
+    // LETHAL: no shields and nothing can block — swing for the win immediately
+    if (!opp.shields.length && !blockers.length) {
+      const finisher = ready.find(c => canAttackShields(c.id));
+      if (finisher) return { key: finisher.key, target: { type: 'shield' } };
+    }
+
     ready.sort((a, b) => livePowerOf(b) - livePowerOf(a));
 
     for (const atk of ready) {
       const myPow = livePowerOf(atk) + (meta(atk.id).powerAttacker || 0);
-      // a favourable trade against a creature it can legally hit
+      const survivesBlock = !strongestBlocker || myPow > livePowerOf(strongestBlocker);
+      const expendable = livePowerOf(atk) <= 2000;   // small body, fine to trade
+
+      // a clean kill on a creature it beats
       const targets = opp.battlezone.filter(v => {
         if (!v.tapped && !canAttackUntapped(atk.id)) return false;
         if (/blocker only/.test(meta(atk.id).attackRestriction || '') && !meta(v.id).blocker) return false;
@@ -149,11 +241,13 @@ const Bot = (() => {
       });
       const killable = targets.filter(v => myPow > livePowerOf(v));
       if (killable.length) {
-        killable.sort((a, b) => livePowerOf(b) - livePowerOf(a));   // take the biggest one it beats
-        return { key: atk.key, target: { type: 'creature', key: killable[0].key } };
+        // take out the most dangerous creature it can actually beat
+        const victim = bestRemovalTarget(killable);
+        return { key: atk.key, target: { type: 'creature', key: victim.key } };
       }
-      if (canAttackShields(atk.id)) {
-        // no shields left means this is the winning blow
+
+      // otherwise go at the shields, but don't feed a good creature to a bigger blocker
+      if (canAttackShields(atk.id) && (survivesBlock || expendable || !opp.shields.length)) {
         const shieldKey = opp.shields.length ? opp.shields[0].key : null;
         return { key: atk.key, target: shieldKey ? { type: 'shield', key: shieldKey } : { type: 'shield' } };
       }
@@ -161,7 +255,7 @@ const Bot = (() => {
     return null;
   }
 
-  // Block only when the blocker survives, or when the attack would otherwise end the game.
+  // ---- blocking -------------------------------------------------------------
   function pickBlocker(state) {
     const me = myState(state), opp = oppState(state);
     const cb = state.combat;
@@ -169,21 +263,30 @@ const Bot = (() => {
     const atk = opp.battlezone.find(c => c.key === cb.attackerKey);
     if (!atk) return null;
     const atkPow = livePowerOf(atk) + (meta(atk.id).powerAttacker || 0);
-    const blockers = me.battlezone.filter(c => !c.tapped && meta(c.id).blocker);
+    const blockers = untappedBlockers(me);
     if (!blockers.length) return null;
 
-    const survivors = blockers.filter(b => livePowerOf(b) > atkPow);
-    if (survivors.length) {
-      survivors.sort((a, b) => livePowerOf(a) - livePowerOf(b));    // cheapest that still wins
-      return survivors[0].key;
+    const wouldLoseGame = cb.target.type === 'shield' && me.shields.length === 0;
+    const lastShield = cb.target.type === 'shield' && me.shields.length === 1;
+
+    // a blocker that survives and kills the attacker is always worth it
+    const winners = blockers.filter(b => livePowerOf(b) > atkPow);
+    if (winners.length) {
+      winners.sort((a, b) => livePowerOf(a) - livePowerOf(b));   // smallest that still wins
+      return winners[0].key;
     }
-    // losing the blocker is worth it to avoid losing the game, or to stop a shield break
-    const desperate = cb.target.type === 'shield' && me.shields.length <= 1;
-    if (desperate) {
+    // trading evenly is fine against a serious attacker
+    const trades = blockers.filter(b => livePowerOf(b) === atkPow || meta(b.id).slayer);
+    if (trades.length && (isThreat(atk) >= 4000 || wouldLoseGame || lastShield)) {
+      trades.sort((a, b) => livePowerOf(a) - livePowerOf(b));
+      return trades[0].key;
+    }
+    // chump-block only to stay alive
+    if (wouldLoseGame) {
       blockers.sort((a, b) => livePowerOf(a) - livePowerOf(b));
       return blockers[0].key;
     }
-    return null;
+    return null;   // let the shield break — cards and triggers are worth more
   }
 
   // ---- prompt handling ------------------------------------------------------
@@ -196,7 +299,12 @@ const Bot = (() => {
       const eff = me.pendingDiscards[0];
       let keys = [];
       if (eff.kind === 'choose') {
-        const ranked = me.hand.slice().sort((a, b) => costOf(b.id) - costOf(a.id));
+        // pitch what it can't cast soon, keeping castable cards and strong bodies
+        const ranked = me.hand.slice().sort((a, b) => {
+          const va = (costOf(a.id) * 100) - powerOf(a.id) / 10;
+          const vb = (costOf(b.id) * 100) - powerOf(b.id) / 10;
+          return vb - va;
+        });
         keys = ranked.slice(0, eff.count).map(c => c.key);
       }
       act(() => send({ type: 'effectDiscardResolve', effectId: eff.id, keys }), DELAY.normal);
@@ -237,8 +345,8 @@ const Bot = (() => {
         ownGrave: me.graveyard, ownMana: me.mana, oppMana: opp.mana, ownHand: me.hand
       }[pm.zone] || [];
       let cands = pm.keys.map(k => pool.find(c => c.key === k)).filter(Boolean);
-      // for anything destructive, hit the biggest threats first
-      cands.sort((a, b) => powerOf(b.id) - powerOf(a.id));
+      const takingBack = (pm.action === 'toHand' || pm.action === 'toOwnMana');
+      cands.sort((a, b) => takingBack ? (powerOf(b.id) - powerOf(a.id)) : (isThreat(b) - isThreat(a)));
       const max = pm.max && pm.max < 90 ? pm.max : cands.length;
       const keys = cands.slice(0, max).map(c => c.key);
       act(() => send({ type: 'effectMultiResolve', effectId: pm.id, keys }), DELAY.normal);
@@ -263,7 +371,16 @@ const Bot = (() => {
       if (!cands.length) { act(() => send({ type: 'effectTargetSkip', effectId: eff.id }), DELAY.fast); return true; }
       // hitting the opponent: take their best. Choosing its own: give up the weakest.
       const ownZone = (eff.zone === 'ownBattle' || eff.zone === 'ownHand' || eff.zone === 'ownMana' || eff.zone === 'ownShield');
-      cands.sort((a, b) => ownZone ? (powerOf(a.id) - powerOf(b.id)) : (powerOf(b.id) - powerOf(a.id)));
+      if (ownZone) {
+        // giving something up: pick the least valuable thing it owns
+        cands.sort((a, b) => (isThreat(a) || powerOf(a.id)) - (isThreat(b) || powerOf(b.id)));
+      } else if (eff.action === 'toHand' || eff.zone === 'ownGrave') {
+        // recovering a card: take the strongest thing available
+        cands.sort((a, b) => powerOf(b.id) - powerOf(a.id));
+      } else {
+        // hitting the opponent: blockers and big bodies first
+        cands.sort((a, b) => isThreat(b) - isThreat(a));
+      }
       act(() => send({ type: 'effectTarget', effectId: eff.id, key: cands[0].key }), DELAY.normal);
       return true;
     }
@@ -292,26 +409,24 @@ const Bot = (() => {
       if (card) { act(() => send({ type: 'chargeMana', key: card.key }), DELAY.normal); return true; }
     }
 
-    const creature = pickSummon(state);
-    if (creature) {
-      const base = isEvolution(creature.id) ? evolutionBaseFor(state, creature) : null;
-      const msg = { type: 'summonCard', key: creature.key };
-      if (base) msg.baseKey = base.key;
-      lastAttemptKey = creature.key;
+    // Play the best affordable card. Affordability is checked here rather than
+    // discovered through rejections, so it can pick the strongest legal play and
+    // keep casting while mana remains.
+    const play = pickPlay(state);
+    if (play) {
+      const msg = { type: 'summonCard', key: play.key };
+      if (isEvolution(play.id)) {
+        const base = evolutionBaseFor(state, play);
+        if (base) msg.baseKey = base.key;
+      }
+      lastAttemptKey = play.key;
       act(() => send(msg), DELAY.normal);
-      return true;
-    }
-
-    const spell = pickSpell(state);
-    if (spell) {
-      lastAttemptKey = spell.key;
-      act(() => send({ type: 'summonCard', key: spell.key }), DELAY.normal);
       return true;
     }
 
     const attack = planAttack(state);
     if (attack && !unaffordable.has('atk:' + attack.key)) {
-      lastAttemptKey = 'atk:' + attack.key;   // so a refused attack isn't retried forever
+      lastAttemptKey = 'atk:' + attack.key;
       act(() => send({ type: 'declareAttack', key: attack.key, target: attack.target }), DELAY.slow);
       return true;
     }
@@ -322,8 +437,26 @@ const Bot = (() => {
 
   // ---- main loop ------------------------------------------------------------
   function onState(state) {
-    if (!active || !state || state.gameOver) return;
+    if (!active || !state) return;
     lastState = state;
+    if (state.gameOver) {
+      // both players must vote, so the bot accepts a rematch rather than leaving
+      // the human staring at a button that never does anything
+      if (!votedRematch) {
+        votedRematch = true;
+        act(() => send({ type: 'rematchVote' }), 1200);
+      }
+      return;
+    }
+    if (votedRematch) {
+      // a fresh match has started — clear everything from the last one
+      votedRematch = false;
+      turnState = { turn: -1, drew: false, charged: false };
+      unaffordable = new Set();
+      lastActionSig = '';
+      repeatCount = 0;
+      lastProgressAt = Date.now();
+    }
     if (thinkingTimer) return;                    // an action is already queued
 
     // Outstanding prompts are ALWAYS answered first, before any stall protection.
@@ -331,6 +464,13 @@ const Bot = (() => {
     // just cast, say), and it must never be skipped — leaving one unanswered strands
     // a spell on the table and freezes the game.
     if (handlePrompts(state)) return;
+
+    // If the human still has something to resolve — a Shield Trigger it just caused,
+    // say — the bot waits rather than acting into an effect that hasn't happened yet.
+    if ((oppState(state).pendingPromptCount || 0) > 0) {
+      lastProgressAt = Date.now();
+      return;
+    }
 
     // Stall protection only guards the bot's own idle looping, never its prompts.
     const me = myState(state);
@@ -394,11 +534,17 @@ const Bot = (() => {
         const card = myState(st).hand.find(c => c.key === key);
         if (card) {
           const n = (nameOf(card.id) || '').toLowerCase();
-          const opp = oppState(st);
+          const opp = oppState(st), mine = myState(st);
           // removal with nothing to remove is wasted — keep it in hand instead
-          if (/terror pit|death smoke|spiral gate|aqua surfer|natural snare|solar ray|crimson hammer|tornado flame|critical blade/.test(n)) {
+          if (/terror pit|death smoke|spiral gate|aqua surfer|natural snare|solar ray|crimson hammer|tornado flame|critical blade|corile/.test(n)) {
             worthCasting = opp.battlezone.length > 0;
+          } else if (/holy awe/.test(n)) {
+            worthCasting = opp.battlezone.some(x => !x.tapped);
+          } else if (/ghost touch|locomotiver|cranium clamp|lost soul|gigabalza/.test(n)) {
+            worthCasting = (opp.handCount || 0) > 0;
           }
+          // when the game is on the line, take any effect that might help
+          if (!worthCasting && mine.shields.length <= 1) worthCasting = opp.battlezone.length > 0;
         }
       }
     } catch (e) { /* fall back to casting */ }
@@ -449,7 +595,17 @@ const Bot = (() => {
         // stops the turn counter, which makes summoning sickness look broken.
         const st = lastState;
         if (st.gameOver || st.activeTurn !== st.you) return;
-        if (Date.now() - lastProgressAt < 8000) return;
+
+        // Never time out while the human is the one being waited on — they may be
+        // deciding whether to block, or resolving a shield trigger. Cancelling the
+        // attack here was pulling the block prompt out from under them.
+        const cb0 = st.combat;
+        const humanDeciding =
+          (cb0 && cb0.phase === 'blocking' && cb0.attackerIdx === st.you) ||
+          ((oppState(st).pendingPromptCount || 0) > 0);
+        if (humanDeciding) { lastProgressAt = Date.now(); return; }
+
+        if (Date.now() - lastProgressAt < 15000) return;
         lastProgressAt = Date.now();
         if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
         const cb = st.combat;

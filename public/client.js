@@ -2243,9 +2243,17 @@ function renderState(state) {
     document.getElementById('discard-modal').style.display = 'none';
   }
 
+  // make it obvious when the opponent is held up waiting on you
+  const waitingOnMe = (me.pendingPromptCount || 0) > 0;
+  const waitingOnThem = (opp.pendingPromptCount || 0) > 0;
+
   const ti = document.getElementById('turn-indicator');
   const oppLabel = (state.names && state.names[oppIdx]) ? state.names[oppIdx] : 'your opponent';
-  ti.textContent = state.dealt[oppIdx] ? ('Free play with ' + oppLabel + ' — act anytime') : 'Waiting for opponent to join & deal in...';
+  ti.textContent = !state.dealt[oppIdx] ? 'Waiting for opponent to join & deal in...'
+    : waitingOnThem ? (oppLabel + ' is resolving something — please wait.')
+    : waitingOnMe ? 'Resolve your prompt to continue.'
+    : ('Free play with ' + oppLabel + ' — act anytime');
+  ti.classList.toggle('waiting', waitingOnThem || waitingOnMe);
   // once the opponent is actually in, the room code is no longer useful
   if (state.dealt[oppIdx]) document.getElementById('table-room-code').style.display = 'none';
 

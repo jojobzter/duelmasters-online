@@ -268,6 +268,7 @@ input {
 #end-turn-block  { order: 4; }
 #end-turn-block .end-turn-btn { width: 100%; margin: 0; padding: 12px; font-size: 1.05em; font-weight: 600; }
 #sidebar { width: 100%; background: #1a1e25; border-radius: 10px; padding: 14px; font-size: 0.95em; box-sizing: border-box; }
+.turn-indicator.waiting { background: #5a4520; color: #ffd88a; }
 .turn-indicator { font-size: 1.1em; font-weight: bold; margin-bottom: 8px; padding: 8px; border-radius: 6px; background: #262b35; text-align: center; }
 
 .turn-banner {
