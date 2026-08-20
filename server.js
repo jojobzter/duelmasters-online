@@ -703,6 +703,9 @@ function legalTargetCount(me, opp, eff) {
   if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test((cardMeta(c.id) || {}).type || ''));
   if (eff.requireBlocker) list = list.filter(c => isBlocker(c.id));
   if (eff.maxPower != null) list = list.filter(c => { const p = powerOf(c.id); return p == null || p <= eff.maxPower; });
+  if (eff.civ) list = list.filter(c => civsOf(c.id).includes(eff.civ));
+  if (eff.negCiv) list = list.filter(c => !civsOf(c.id).includes(eff.negCiv));
+  if (eff.race) list = list.filter(c => racesOf(c.id).includes(eff.race.toLowerCase()));
   // a card that can't be chosen by the opponent's effects (Petrova) isn't a target
   if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle') {
     list = list.filter(c => !(opp.battlezone.includes(c) && isUnchoosable(c.id)));
@@ -778,11 +781,227 @@ const ATTACK_TRIGGERS = {
   'trixo, wicked doll':     { effect: 'oppDestroysOwnCreature' }
 };
 
+// ---------------------------------------------------------------------------
+// Interpreter for sheet-described effects.
+//
+// Translates a parsed clause into the engine's existing primitives. A card that has
+// Effect text is driven ENTIRELY from that text — the hardcoded tables are skipped
+// for it, so nothing can fire twice.
+// ---------------------------------------------------------------------------
+
+// parsed selector -> the zone name the engine's targeting uses
+function zoneNameOf(sel) {
+  if (!sel) return null;
+  if (sel.selfOnly) return 'self';
+  const key = sel.side + ':' + sel.zone;
+  return {
+    'opp:battle': 'oppBattle', 'own:battle': 'ownBattle', 'any:battle': 'anyBattle',
+    'own:mana': 'ownMana', 'opp:mana': 'oppMana',
+    'own:shield': 'ownShield', 'opp:shield': 'oppShield',
+    'own:grave': 'ownGrave', 'opp:grave': 'oppGrave',
+    'own:hand': 'ownHand', 'opp:hand': 'oppHand'
+  }[key] || null;
+}
+
+// parsed action verb -> the engine's action name
+const PARSED_ACTION_MAP = {
+  destroy: 'destroy', bounce: 'returnToHand', toMana: 'toOwnerMana',
+  toGrave: 'toGrave', toHand: 'toHand', toShield: 'toOwnerShield',
+  toDeckTop: 'toTopOfDeck', tap: 'tap', untap: 'untap'
+};
+
+// parsed filters -> the flags the engine's target validation understands
+function filtersToEngine(sel) {
+  const out = { filter: null, maxPower: null, requireBlocker: false, civ: null, race: null, negCiv: null };
+  for (const f of (sel && sel.filters) || []) {
+    if (f.key === 'power' && (f.op === '<=' || f.op === '<')) out.maxPower = parseInt(f.value, 10);
+    else if (f.key === 'blocker' && !f.negate) out.requireBlocker = true;
+    else if (f.key === 'untapped') out.filter = 'untapped';
+    else if (f.key === 'evolution' && f.negate) out.filter = 'nonEvolution';
+    else if (f.key === 'creature') out.filter = 'creature';
+    else if (f.key === 'spell') out.filter = 'spell';
+    else if (f.key === 'civ') { if (f.negate) out.negCiv = f.value; else out.civ = f.value; }
+    else if (f.key === 'race') out.race = f.value;
+  }
+  return out;
+}
+
+// does a card match the extra filters the engine doesn't natively check?
+function matchesExtra(id, ex) {
+  if (ex.civ && !civsOf(id).includes(ex.civ)) return false;
+  if (ex.negCiv && civsOf(id).includes(ex.negCiv)) return false;
+  if (ex.race && !racesOf(id).includes(ex.race.toLowerCase())) return false;
+  return true;
+}
+
+function listForZone(me, opp, zoneName) {
+  return {
+    oppBattle: opp.battlezone, ownBattle: me.battlezone, anyBattle: me.battlezone.concat(opp.battlezone),
+    ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields, oppShield: opp.shields,
+    ownGrave: me.graveyard, oppGrave: opp.graveyard, ownHand: me.hand, oppHand: opp.hand
+  }[zoneName] || [];
+}
+
+// Runs every clause of a card that fires on the given trigger.
+// Returns { defer, sfx } — defer means a prompt now owns the card.
+function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, notices) {
+  const meta = cardMeta(cardId) || {};
+  const clauses = (meta.parsedEffects || []).filter(e => e.trigger === trigger);
+  if (!clauses.length) return { defer: false, handled: false };
+  const me = state.players[meIdx], opp = state.players[oppIdx];
+  let defer = false;
+
+  for (const e of clauses) {
+    switch (e.action) {
+      case 'draw': {
+        const n = typeof e.count === 'number' ? e.count : 1;
+        let drawn = 0;
+        for (let i = 0; i < n; i++) { const c = me.deck.shift(); if (!c) break; me.hand.push({ id: c, key: newKey() }); drawn++; }
+        logs.push('drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + ' with ' + cardLabel(cardId) + '.');
+        break;
+      }
+      case 'fromDeck': {
+        const n = typeof e.count === 'number' ? e.count : 1;
+        for (let i = 0; i < n; i++) {
+          const top = me.deck.shift();
+          if (!top) break;
+          if (e.to === 'shield') me.shields.push({ id: top, key: newKey(), faceUp: false, slot: nextShieldSlot(me) });
+          else { const sl = manaSlot(me); me.mana.push({ id: top, key: newKey(), tapped: false, x: sl.x, y: sl.y }); }
+        }
+        logs.push('put ' + n + ' card' + (n === 1 ? '' : 's') + ' from the top of their deck into their ' + (e.to === 'shield' ? 'shields' : 'mana zone') + '.');
+        break;
+      }
+      case 'oppDiscard': {
+        if (!opp.hand.length) break;
+        opp.pendingDiscards.push({ id: newKey(), kind: e.mode === 'choose' ? 'choose' : e.mode,
+                                   count: typeof e.count === 'number' ? e.count : 0,
+                                   source: cardLabel(cardId) });
+        break;
+      }
+      case 'search': {
+        me.pendingSearch = { id: newKey(), source: cardLabel(cardId),
+                             spellKey: isSpellCard(cardId) ? cardKey : null,
+                             filter: e.filter && e.filter.raw ? null : (e.filter ? 'creature' : null),
+                             reveal: !!e.reveal, toBattlezone: e.to === 'battle' };
+        defer = true;
+        break;
+      }
+      case 'destroy': case 'bounce': case 'toMana': case 'toGrave': case 'toHand':
+      case 'toShield': case 'toDeckTop': case 'tap': case 'untap': {
+        const zoneName = zoneNameOf(e.selector);
+        if (!zoneName) break;
+        const ex = filtersToEngine(e.selector);
+        const engineAction = PARSED_ACTION_MAP[e.action];
+
+        // "all" resolves immediately with no choice
+        if (e.count === 'all' && !e.optional) {
+          const pool = listForZone(me, opp, zoneName).slice();
+          const hit = [];
+          for (const card of pool) {
+            if (card.key === cardKey) continue;
+            if (ex.maxPower != null) { const p = powerOf(card.id); if (p != null && p > ex.maxPower) continue; }
+            if (ex.requireBlocker && !isBlocker(card.id)) continue;
+            if (ex.filter === 'untapped' && card.tapped) continue;
+            if (!matchesExtra(card.id, ex)) continue;
+            const owner = opp.battlezone.includes(card) ? opp : me;
+            applyImmediate(state, owner, card, engineAction, logs);
+            hit.push(cardLabel(card.id));
+          }
+          logs.push(cardLabel(cardId) + ': ' + (hit.length ? engineAction + ' ' + hit.join(', ') : 'nothing to affect') + '.');
+          break;
+        }
+
+        // a choice — one target, or several
+        const base = {
+          id: newKey(), zone: zoneName, action: engineAction,
+          filter: ex.filter, maxPower: ex.maxPower, requireBlocker: ex.requireBlocker,
+          civ: ex.civ, negCiv: ex.negCiv, race: ex.race,
+          source: cardLabel(cardId), sourceKey: cardKey,
+          spellKey: isSpellCard(cardId) ? cardKey : null
+        };
+        const wantsMany = (e.count === 'all') || (typeof e.count === 'number' && e.count > 1);
+        if (wantsMany) {
+          const pool = listForZone(me, opp, zoneName)
+            .filter(c => c.key !== cardKey)
+            .filter(c => ex.maxPower == null || (powerOf(c.id) == null || powerOf(c.id) <= ex.maxPower))
+            .filter(c => !ex.requireBlocker || isBlocker(c.id))
+            .filter(c => matchesExtra(c.id, ex))
+            .filter(c => !(zoneName === 'oppBattle' && isUnchoosable(c.id)));
+          if (pool.length) {
+            me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: zoneName,
+                                action: engineAction, max: e.count === 'all' ? 99 : e.count,
+                                keys: pool.map(c => c.key), spellKey: base.spellKey,
+                                prompt: 'Choose up to ' + (e.count === 'all' ? 'any number of' : e.count) + ' card(s).' };
+            defer = true;
+          } else logs.push(cardLabel(cardId) + ': no legal target.');
+        } else if (legalTargetCount(me, opp, base) > 0) {
+          me.pendingTargets.push(base);
+          defer = true;
+        } else {
+          logs.push(cardLabel(cardId) + ': no legal target.');
+        }
+        break;
+      }
+      case 'nameRace':
+        me.pendingRaceChoices.push({ id: newKey(), source: cardLabel(cardId), cardKey,
+                                     excludeRace: (cardMeta(cardId) || {}).race || null });
+        break;
+      case 'nameCiv':
+        me.pendingTruce = { id: newKey(), source: cardLabel(cardId), spellKey: isSpellCard(cardId) ? cardKey : null };
+        defer = true;
+        break;
+      default:
+        break;   // statics, grants and preventions are handled elsewhere
+    }
+  }
+  return { defer, handled: true };
+}
+
+// immediate, no-choice application used by "all" effects
+function applyImmediate(state, owner, card, action, logs) {
+  const i = owner.battlezone.findIndex(c => c.key === card.key);
+  const inBattle = i !== -1;
+  switch (action) {
+    case 'destroy':
+      if (!inBattle) return;
+      owner.battlezone.splice(i, 1);
+      battleCardToGrave(owner, card);
+      break;
+    case 'returnToHand':
+      if (!inBattle) return;
+      owner.battlezone.splice(i, 1);
+      dissolveStack(owner, card, logs, 'hand');
+      owner.hand.push({ id: card.id, key: card.key });
+      break;
+    case 'tap': card.tapped = true; break;
+    case 'untap': card.tapped = false; break;
+    default: break;
+  }
+}
+
 // Shared by summonCard and castFreeFromHand — both are "a card entered the battlezone" events.
 // Returns { defer, sfx, extraLog }: defer means a prompt now owns this card, so a
 // spell must NOT be swept to the graveyard until that prompt resolves.
-function applyOnSummonTriggers(me, opp, cardId, cardKey) {
-  const name = cardLabel(cardId).toLowerCase();
+function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
+  const name = normalizeCardKey(cardLabel(cardId));
+
+  // If the spreadsheet describes this card, that description is authoritative and
+  // the hardcoded tables below are skipped entirely — otherwise every effect would
+  // be applied twice.
+  const described = cardMeta(cardId) && (cardMeta(cardId).parsedEffects || []).length > 0;
+  if (described && state) {
+    const meIdx = state.players.indexOf(me), oppIdx = state.players.indexOf(opp);
+    const notices = [];
+    const extraLog = [];
+    const res = runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, 'onsummon', extraLog, notices);
+    // still honour the Ice Vapor passive, which belongs to the OPPONENT's board
+    if (isSpellCard(cardId) && opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === ICE_VAPOR_NAME)) {
+      if (me.hand.length) me.pendingDiscards.push({ id: newKey(), kind: 'choose', count: 1, source: 'Ice Vapor, Shadow of Anguish' });
+      if (me.mana.length) me.pendingManaDiscards = (me.pendingManaDiscards || 0) + 1;
+    }
+    return { defer: res.defer, sfx: null, extraLog, notices, revealHand: null, peekShields: null };
+  }
+
   let defer = false, sfx = null, revealHand = null, peekShields = null;
   const extraLog = [];
   const notices = [];
@@ -1645,7 +1864,7 @@ wss.on('connection', (ws) => {
         }
         logText = 'summoned ' + cardLabel(c.id) + '.';
         {
-          const res = applyOnSummonTriggers(me, opp, c.id, c.key);
+          const res = applyOnSummonTriggers(me, opp, c.id, c.key, s);
           if (res.sfx) sfxToPlay = res.sfx;
           res.extraLog.forEach(t => extraLogs.push(t));
           (res.notices || []).forEach(n => pendingNotices.push(n));
@@ -1687,7 +1906,7 @@ wss.on('connection', (ws) => {
         logText = 'used Shield Trigger to cast ' + cardLabel(c.id) + ' for free.';
         sfxToPlay = 'shieldTrigger';
         {
-          const res = applyOnSummonTriggers(me, opp, c.id, c.key);
+          const res = applyOnSummonTriggers(me, opp, c.id, c.key, s);
           res.extraLog.forEach(t => extraLogs.push(t));
           (res.notices || []).forEach(n => pendingNotices.push(n));
           if (res.revealHand) revealPayload = { title: "Your opponent's hand", cards: res.revealHand };
@@ -2060,6 +2279,18 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a spell.' });
           return;
         }
+        if (eff.civ && !civsOf(card.id).includes(eff.civ)) {
+          send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a ' + eff.civ + ' card.' });
+          return;
+        }
+        if (eff.negCiv && civsOf(card.id).includes(eff.negCiv)) {
+          send(ws, { type: 'summonRejected', reason: eff.source + " can't choose a " + eff.negCiv + ' card.' });
+          return;
+        }
+        if (eff.race && !racesOf(card.id).includes(eff.race.toLowerCase())) {
+          send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a ' + eff.race + '.' });
+          return;
+        }
         if (eff.requireBlocker && !isBlocker(card.id)) {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a creature with Blocker.' });
           return;
@@ -2087,6 +2318,10 @@ wss.on('connection', (ws) => {
             if (card.tapped) { send(ws, { type: 'summonRejected', reason: label + ' is already tapped.' }); return; }
             card.tapped = true;
             logText = 'used ' + eff.source + ' to tap ' + label + '.';
+            break;
+          case 'untap':
+            card.tapped = false;
+            logText = 'used ' + eff.source + ' to untap ' + label + '.';
             break;
           case 'returnToHand':
             list.splice(ci, 1);
