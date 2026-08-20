@@ -605,6 +605,21 @@ const Bot = (() => {
       : { type: 'shieldTriggerDecline', key }), DELAY.normal);
   }
 
+  // Gigazald offers a choice between attacking and using a tap ability. The bot
+  // attacks unless the ability would actually accomplish something.
+  function onTapMode(key) {
+    if (!active) return;
+    let useAbility = false;
+    try {
+      const st = lastState;
+      if (st) {
+        const opp = oppState(st);
+        useAbility = (opp.handCount || 0) > 0 && opp.battlezone.length === 0;
+      }
+    } catch (e) { /* default to attacking */ }
+    act(() => send({ type: 'battleTap', key, mode: useAbility ? 'ability' : 'attack' }), DELAY.fast);
+  }
+
   // A rejected action (usually not enough mana). Mark the card the bot ACTUALLY tried
   // — not a guess — and wake it straight away, because a rejection produces no state
   // update, so without this the bot would simply stop mid-turn.
