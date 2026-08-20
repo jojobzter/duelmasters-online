@@ -131,6 +131,50 @@ function ensureCardDatabaseFresh() {
 }
 ensureCardDatabaseFresh();
 
+// A machine-readable index of every ability the engine implements, built from the
+// same tables the rules use. The bot reads this instead of hardcoding card names, so
+// any card added to the tables below is understood by the AI with no AI changes.
+function buildEffectIndex() {
+  const idx = {};
+  const put = (name, data) => {
+    idx[name] = Object.assign(idx[name] || {}, data);
+  };
+  for (const [n, e] of Object.entries(TARGET_EFFECTS)) {
+    put(n, { target: { zone: e.zone, action: e.action, filter: e.filter || null,
+                       maxPower: e.maxPower || null, requireBlocker: !!e.requireBlocker,
+                       byOpponent: !!e.byOpponent, chains: !!e.thenSearchSameCost } });
+  }
+  for (const [n, e] of Object.entries(MULTI_EFFECTS)) {
+    put(n, { multi: { zone: e.zone, action: e.action, max: e.max, maxPower: e.maxPower || null } });
+  }
+  for (const [n, e] of Object.entries(OPPONENT_DISCARD_EFFECTS)) {
+    put(n, { oppDiscard: { kind: e.kind, count: e.count || 0 } });
+  }
+  for (const [n, c] of Object.entries(AUTO_DRAW_ON_SUMMON)) put(n, { draw: c });
+  for (const [n, o] of Object.entries(AUTO_SEARCH_ON_SUMMON)) {
+    put(n, { search: { filter: o.filter, reveal: !!o.reveal } });
+  }
+  for (const [n, a] of Object.entries(ATTACK_TRIGGERS)) put(n, { attackTrigger: a.effect });
+  for (const [n, a] of Object.entries(TAP_ABILITIES)) put(n, { tapAbility: a.kind });
+  for (const [n, v] of Object.entries(MASS_POWER_DESTROY)) put(n, { massDestroy: { maxPower: v } });
+  MASS_DESTROY_CARDS.forEach(n => put(n, { massDestroy: { except: 'Darkness' } }));
+  AUTO_MANA_FROM_DECK.forEach(n => put(n, { manaRamp: 1 }));
+  TAP_ALL_OPP.forEach(n => put(n, { tapAllOpponents: true }));
+  ENTERS_MANA_TAPPED.forEach(n => put(n, { entersManaTapped: true }));
+  END_TURN_RETURN_TO_HAND.forEach(n => put(n, { returnsAtEndOfTurn: true }));
+  SPELL_RESOLVES_TO_MANA.forEach(n => put(n, { resolvesToMana: true }));
+  RETURN_INSTEAD_OF_DESTROY.forEach(n => put(n, { survivesDestruction: true }));
+  ALWAYS_UNBLOCKABLE.forEach(n => put(n, { unblockable: true }));
+  SHIELD_TRIGGER_CARDS.forEach(n => put(n, { shieldTrigger: true }));
+  return idx;
+}
+
+app.get('/api/effects', (req, res) => {
+  ensureCardDatabaseFresh();
+  res.set('Cache-Control', 'no-store');
+  res.json(buildEffectIndex());
+});
+
 app.get('/api/races', (req, res) => {
   ensureCardDatabaseFresh();
   const races = new Set();
