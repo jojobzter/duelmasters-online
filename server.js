@@ -991,7 +991,7 @@ function emptyPlayerState() {
     pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
-    pendingRaceChoices: []
+    pendingRaceChoices: [], pendingShieldTriggers: []
   };
 }
 
@@ -1074,6 +1074,7 @@ function viewFor(room, viewerIdx) {
     diamondCutterActive: !!p.diamondCutterActive,
     pendingTruce: isSelf ? p.pendingTruce : undefined,
     pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
+    pendingShieldTriggerCount: (p.pendingShieldTriggers || []).length,
     truceCiv: p.truceCiv || null,
     brokeShieldThisTurn: !!p.brokeShieldThisTurn
   });
@@ -1335,6 +1336,11 @@ wss.on('connection', (ws) => {
       case 'shuffleDeck': { me.deck = shuffle(me.deck); logText = 'shuffled their deck.'; break; }
       case 'endTurn': {
         if (s.combat) { send(ws, { type: 'summonRejected', reason: 'Finish resolving the current attack first.' }); return; }
+        // the defender may still be deciding on a shield trigger you caused
+        if ((opp.pendingShieldTriggers || []).length) {
+          send(ws, { type: 'summonRejected', reason: 'Wait — your opponent is still deciding on a Shield Trigger.' });
+          return;
+        }
         // end of MY turn: bounce cards that go home, and ask about shield-break returns
         for (const c of me.battlezone.slice()) {
           const nm = normalizeCardKey(cardLabel(c.id));
@@ -1402,6 +1408,13 @@ wss.on('connection', (ws) => {
         const meta = (metaRaw && smog && civsOf(cardId).includes('Light') && metaRaw.cost != null)
           ? Object.assign({}, metaRaw, { cost: metaRaw.cost + 2 })
           : metaRaw;
+        // A card the database doesn't recognise would silently bypass the mana cost AND
+        // never be treated as a spell, so it would sit on the battlefield forever.
+        // Refuse it outright and name it, so the mismatch is obvious and fixable.
+        if (!metaRaw) {
+          send(ws, { type: 'summonRejected', reason: '"' + cardLabel(cardId) + '" was not found in the card database.\n\nThe image filename must match the Name column in your spreadsheet, otherwise its cost, type and abilities are all unknown.' });
+          return;
+        }
         if (meta && meta.cost != null) {
           const plan = planManaPayment(me, meta);
           if (!plan) {
@@ -1484,7 +1497,12 @@ wss.on('connection', (ws) => {
         }
         break;
       }
+      case 'shieldTriggerDecline': {
+        me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
+        return;
+      }
       case 'castFreeFromHand': {
+        me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
         // Glena Vuele watches for the opponent casting a shield trigger
         if (opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'glena vuele, the hypnotic')) {
           const top = opp.deck.shift();
@@ -2386,8 +2404,12 @@ wss.on('connection', (ws) => {
       logMsg(room, w, 'won the game — the final attack connected with no shields left to defend.');
     }
     if (shieldTriggerFor) {
+      const target = s.players[shieldTriggerFor.idx];
+      target.pendingShieldTriggers = target.pendingShieldTriggers || [];
+      target.pendingShieldTriggers.push(shieldTriggerFor.key);
       const tws = room.sockets[shieldTriggerFor.idx];
       if (tws) send(tws, { type: 'shieldTriggerOffer', key: shieldTriggerFor.key, id: shieldTriggerFor.id });
+      broadcastState(room);
     }
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
     if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, costEquals: me.pendingSearch.costEquals != null ? me.pendingSearch.costEquals : null, source: me.pendingSearch.source });
