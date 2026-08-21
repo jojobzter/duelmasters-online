@@ -2093,7 +2093,7 @@ function renderState(state) {
       clearSelection();
       const items = [
         ['Charge Mana', () => sendMsg({ type: 'chargeMana', key: c.key })],
-        ['Summon', () => {
+        [(isSpellById(c.id) ? 'Cast' : 'Summon'), () => {
           if (isEvolutionById(c.id)) {
             const st = seats[activeSeat] && seats[activeSeat].state;
             const mine = st && st.players[st.you];
