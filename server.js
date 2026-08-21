@@ -9,7 +9,8 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const XLSX = require('xlsx');
-const { parseEffect } = require('./effects-parser.js');
+const { parseEffect, parseSelector } = require('./effects-parser.js');
+let SELECTOR_CACHE = new Map();
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -94,6 +95,9 @@ function loadCardDatabase(filePath) {
       db.set(key, existing ? mergeCardEntries(existing, entry) : entry);
     }
     CARD_DB = db;
+    META_CACHE = new Map();   // all stale after a reload
+    SELECTOR_CACHE = new Map();
+    STATIC_CACHE.clear();
     const withEffects = [...CARD_DB.values()].filter(c => c.parsedEffects && c.parsedEffects.length).length;
     console.log('Card database (re)loaded from', filePath, '-', CARD_DB.size, 'unique card names,',
                 withEffects, 'with parsed abilities.');
@@ -146,11 +150,17 @@ function mergeCardEntries(a, b) {
   return out;
 }
 
-function ensureCardDatabaseFresh() {
+let CARD_DB_LAST_CHECK = 0;
+function ensureCardDatabaseFresh(force) {
+  // Checking the file more than a couple of times a second buys nothing and costs a
+  // directory scan plus a stat on every single card lookup.
+  const now = Date.now();
+  if (!force && now - CARD_DB_LAST_CHECK < 2000) return;
+  CARD_DB_LAST_CHECK = now;
   const filePath = findCardDataFile();
   if (!filePath) {
     if (CARD_DB.size > 0) console.warn('No .xlsx file found in carddata/ anymore — card database cleared.');
-    CARD_DB = new Map(); CARD_DB_SOURCE_PATH = null; CARD_DB_MTIME = 0;
+    CARD_DB = new Map(); META_CACHE = new Map(); CARD_DB_SOURCE_PATH = null; CARD_DB_MTIME = 0;
     return;
   }
   try {
@@ -229,13 +239,13 @@ function buildEffectIndex() {
 }
 
 app.get('/api/effects', (req, res) => {
-  ensureCardDatabaseFresh();
+  ensureCardDatabaseFresh(true);
   res.set('Cache-Control', 'no-store');
   res.json(buildEffectIndex());
 });
 
 app.get('/api/races', (req, res) => {
-  ensureCardDatabaseFresh();
+  ensureCardDatabaseFresh(true);
   const races = new Set();
   for (const c of CARD_DB.values()) if (c.race) races.add(c.race);
   res.set('Cache-Control', 'no-store');
@@ -884,9 +894,14 @@ const ATTACK_TRIGGERS = {
 // the moment it leaves. Everything here is driven by the spreadsheet.
 // ---------------------------------------------------------------------------
 
+const STATIC_CACHE = new Map();
 function staticClauses(card) {
+  let list = STATIC_CACHE.get(card.id);
+  if (list !== undefined) return list;
   const m = cardMeta(card.id) || {};
-  return (m.parsedEffects || []).filter(e => e.trigger === 'static');
+  list = (m.parsedEffects || []).filter(e => e.trigger === 'static');
+  STATIC_CACHE.set(card.id, list);
+  return list;
 }
 
 // Does `card` (owned by cardOwnerIdx) match `sel`, as written on a source card
@@ -984,8 +999,11 @@ function conditionHolds(state, srcOwnerIdx, srcCard, condition, ctx) {
 
 // how many cards match a selector, used by "per" and count conditions
 function countSelector(state, srcOwnerIdx, srcCard, selText) {
-  const { parseSelector } = require('./effects-parser.js');
-  const sel = typeof selText === 'string' ? parseSelector(selText) : selText;
+  let sel = selText;
+  if (typeof selText === 'string') {
+    sel = SELECTOR_CACHE.get(selText);
+    if (sel === undefined) { sel = parseSelector(selText); SELECTOR_CACHE.set(selText, sel); }
+  }
   if (!sel) return 0;
   const own = state.players[srcOwnerIdx], other = state.players[srcOwnerIdx === 0 ? 1 : 0];
   const zoneList = (p) => ({
@@ -2053,7 +2071,15 @@ function nextShieldSlot(me) {
   return i;
 }
 
-function cardMeta(id) { ensureCardDatabaseFresh(); return CARD_DB.get(normalizeCardKey(cardLabel(id))) || null; }
+let META_CACHE = new Map();
+function cardMeta(id) {
+  ensureCardDatabaseFresh();
+  let m = META_CACHE.get(id);
+  if (m !== undefined) return m;
+  m = CARD_DB.get(normalizeCardKey(cardLabel(id))) || null;
+  META_CACHE.set(id, m);
+  return m;
+}
 
 // Figures out which untapped mana cards would pay for a card, respecting both
 // the total cost and needing at least one untapped mana of each required
@@ -2611,7 +2637,7 @@ wss.on('connection', (ws) => {
           }
           // Gigazald lets your other Darkness creatures tap for an ability instead of attacking
           const gigazald = me.battlezone.some(g => normalizeCardKey(cardLabel(g.id)) === GIGAZALD_NAME);
-          const grantsChoice = TAP_ABILITIES[name] ||
+          const grantsChoice = hasSheetTrigger(c.id, 'tapability') || TAP_ABILITIES[name] ||
             (gigazald && name !== GIGAZALD_NAME && civsOf(c.id).includes('Darkness'));
           if (grantsChoice && !msg.mode) {
             send(ws, { type: 'tapModeOffer', key: c.key, name: cardLabel(c.id) });
@@ -2623,6 +2649,12 @@ wss.on('connection', (ws) => {
         logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.';
 
         if (c.tapped && msg.mode === 'ability') {
+          // a card described in the sheet runs its own tapAbility clause
+          if (hasSheetTrigger(c.id, 'tapability')) {
+            firePar(s, idx, c, 'tapability', extraLogs);
+            logText = 'used ' + cardLabel(c.id) + "'s tap ability instead of attacking.";
+            break;
+          }
           const own = hasSheetEffects(c.id) ? null : TAP_ABILITIES[name];
           const gigazaldGrant = me.battlezone.some(g => normalizeCardKey(cardLabel(g.id)) === GIGAZALD_NAME)
                                 && name !== GIGAZALD_NAME && civsOf(c.id).includes('Darkness');
