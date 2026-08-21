@@ -2219,6 +2219,12 @@ wss.on('connection', (ws) => {
       }
       case 'shuffleDeck': { me.deck = shuffle(me.deck); logText = 'shuffled their deck.'; break; }
       case 'endTurn': {
+        // You can only end YOUR turn. Without this, a stray end-turn could hand the
+        // turn straight back — or take the opponent's turn away from them.
+        if (s.activeTurn != null && s.activeTurn !== idx) {
+          send(ws, { type: 'summonRejected', reason: "It isn't your turn to end." });
+          return;
+        }
         if (s.combat) { send(ws, { type: 'summonRejected', reason: 'Finish resolving the current attack first.' }); return; }
         // the defender may still be deciding on a shield trigger you caused
         if ((opp.pendingShieldTriggers || []).length) {
