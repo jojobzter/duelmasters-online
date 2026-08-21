@@ -491,7 +491,7 @@ function effectivePower(state, ownerIdx, card, attacking) {
 
   // continuous buffs described in the spreadsheet, plus any granted this turn
   p += staticBuffTotal(state, ownerIdx, card, { attacking });
-  p += (card.tempBuff || 0);
+  p += (card.tempBuff || 0) + (card.permBuff || 0);
   // a Power Attacker bonus granted by another card
   if (attacking) {
     const kw = grantedKeywords(state, ownerIdx, card);
@@ -1279,11 +1279,11 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       }
       case 'grant': {
         // a keyword granted for the rest of the turn, recorded on the affected cards
-        const zoneName = zoneNameOf(e.selector) || 'ownBattle';
+        const selfKw = !!(e.selector && e.selector.selfOnly);
+        const zoneName = selfKw ? 'ownBattle' : (zoneNameOf(e.selector) || 'ownBattle');
         const pool = listForZone(me, opp, zoneName);
         const ex = filtersToEngine(e.selector);
-        let hit = pool.filter(c => matchesExtra(c.id, ex));
-        if (e.selector && e.selector.selfOnly) hit = pool.filter(c => c.key === cardKey);
+        let hit = selfKw ? pool.filter(c => c.key === cardKey) : pool.filter(c => matchesExtra(c.id, ex));
         const n = (e.count === 'all') ? hit.length : (typeof e.count === 'number' ? e.count : hit.length);
         hit.slice(0, n).forEach(c => {
           c.tempGrants = c.tempGrants || [];
@@ -1293,15 +1293,25 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         break;
       }
       case 'buff': {
-        // a temporary power change for the rest of the turn
-        const zoneName = zoneNameOf(e.target) || 'ownBattle';
+        // "self" isn't a zone — resolve it to this very card, which is why a
+        // self-targeting buff previously found nothing and did nothing at all.
+        const selfOnly = !!(e.target && e.target.selfOnly);
+        const zoneName = selfOnly ? 'ownBattle' : (zoneNameOf(e.target) || 'ownBattle');
         const pool = listForZone(me, opp, zoneName);
         const ex = filtersToEngine(e.target);
-        const hit = (e.target && e.target.selfOnly)
+        const hit = selfOnly
           ? pool.filter(c => c.key === cardKey)
           : pool.filter(c => matchesExtra(c.id, ex));
-        hit.forEach(c => { c.tempBuff = (c.tempBuff || 0) + (e.amount || 0); });
-        if (hit.length) logs.push(cardLabel(cardId) + ' gave +' + e.amount + ' this turn.');
+        // Most trigger buffs last the turn. "permanent" makes them stack up and stay,
+        // which is what a card like Quixotic Hero Swine Snout needs.
+        const lasting = !!(e.mods && e.mods.permanent);
+        hit.forEach(c => {
+          if (lasting) c.permBuff = (c.permBuff || 0) + (e.amount || 0);
+          else c.tempBuff = (c.tempBuff || 0) + (e.amount || 0);
+        });
+        if (hit.length) {
+          logs.push(cardLabel(cardId) + ' gained +' + e.amount + (lasting ? ' permanently.' : ' this turn.'));
+        }
         break;
       }
       case 'ownDiscard': {
@@ -2251,6 +2261,7 @@ wss.on('connection', (ws) => {
         // sheet-described end-of-turn effects for this player's creatures
         for (const c of me.battlezone.slice()) firePar(s, idx, c, 'endturn', extraLogs);
         // temporary buffs and granted keywords expire now
+        // only the this-turn effects expire; permanent ones stay
         for (const p of s.players) for (const c of p.battlezone) { c.tempBuff = 0; c.tempGrants = []; }
 
         // per-turn counters reset as the turn passes

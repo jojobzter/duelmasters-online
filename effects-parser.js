@@ -121,7 +121,7 @@ function parseClause(raw, cardName) {
 
   // trailing modifiers: ", optional", ", oppChoice", ", reveal"
   const mods = {};
-  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder)\b/gi, (_, w) => {
+  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder|permanent)\b/gi, (_, w) => {
     mods[w.toLowerCase()] = true; return '';
   }).trim();
   // ", min 2" puts a floor under a cost reduction
