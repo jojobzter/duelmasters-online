@@ -39,6 +39,24 @@ const Bot = (() => {
       .replace(/_/g, "'").replace(/\s+/g, ' ').trim();
   }
   function effectOf(id) { return EFFECTS[normName(nameOf(id))] || {}; }
+  // A creature that goes back to hand at end of turn is only worth playing if it
+  // actually attacks this turn — otherwise the mana is simply thrown away.
+  function bouncesAtEndOfTurn(id) {
+    const fx = effectOf(id);
+    if (fx.returnsAtEndOfTurn) return true;
+    return (fx.described || []).some(d => d.trigger === 'endturn' && d.action === 'moveSelf');
+  }
+  // Would this creature's attack accomplish anything worth the mana?
+  function attackWouldPayOff(state, cardId) {
+    const me = myState(state), opp = oppState(state);
+    const myPow = powerOf(cardId) + (meta(cardId).powerAttacker || 0);
+    if (!opp.shields.length) return true;              // it's the winning swing
+    const blockers = untappedBlockers(opp);
+    // a blocker that beats it means the attack just feeds them a creature
+    if (blockers.some(b => livePowerOf(b) >= myPow)) return false;
+    // otherwise it either breaks a shield or kills something
+    return opp.shields.length > 0 || opp.battlezone.some(c => myPow > livePowerOf(c));
+  }
 
   function meta(id) {
     return (typeof cardMetaFor === 'function' ? cardMetaFor(id) : {}) || {};
@@ -122,7 +140,11 @@ const Bot = (() => {
     // --- abilities, read from the engine's effect index ---
     if (fx.survivesDestruction) v += 3;
     if (fx.unblockable) v += 3;
-    if (fx.returnsAtEndOfTurn) v += 1;      // reusable, but doesn't stick around
+    if (bouncesAtEndOfTurn(card.id)) {
+      // it leaves at end of turn, so its whole value is the attack it makes now
+      if (!attackWouldPayOff(state, card.id)) return 0.2;   // effectively a wasted card
+      v += 1;                                                // reusable across turns
+    }
     if (fx.shieldTrigger) v += 1;           // value even when drawn normally
     if (fx.manaRamp) v += 3;
     if (fx.draw) v += 2 * fx.draw;
@@ -290,7 +312,8 @@ const Bot = (() => {
     for (const atk of ready) {
       const myPow = livePowerOf(atk) + (meta(atk.id).powerAttacker || 0);
       const survivesBlock = !strongestBlocker || myPow > livePowerOf(strongestBlocker);
-      const expendable = livePowerOf(atk) <= 2000;   // small body, fine to trade
+      // a creature returning to hand at end of turn costs nothing extra to attack with
+      const expendable = livePowerOf(atk) <= 2000 || bouncesAtEndOfTurn(atk.id);
 
       // a clean kill on a creature it beats
       const targets = opp.battlezone.filter(v => {
