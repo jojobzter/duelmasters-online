@@ -508,7 +508,7 @@ const Bot = (() => {
       return true;
     }
 
-    act(() => send({ type: 'endTurn' }), DELAY.normal);
+    act(() => { if (lastState && lastState.activeTurn === lastState.you) send({ type: 'endTurn' }); }, DELAY.normal);
     return true;
   }
 
@@ -562,7 +562,7 @@ const Bot = (() => {
         // out of useful moves — end the turn rather than sitting there
         if (state.activeTurn === state.you && !state.combat) {
           repeatCount = 0;
-          act(() => send({ type: 'endTurn' }), DELAY.fast);
+          act(() => { if (lastState && lastState.activeTurn === lastState.you) send({ type: 'endTurn' }); }, DELAY.fast);
         }
         return;
       }
@@ -698,7 +698,7 @@ const Bot = (() => {
         if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
         const cb = st.combat;
         if (cb && cb.attackerIdx === st.you) send({ type: 'cancelCombat' });
-        else send({ type: 'endTurn' });
+        else if (st.activeTurn === st.you) send({ type: 'endTurn' });
       }, 1500);
     },
     stop() {

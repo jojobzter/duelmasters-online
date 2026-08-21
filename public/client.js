@@ -2287,6 +2287,17 @@ function renderState(state) {
   lastActiveTurn = (state.activeTurn === undefined) ? null : state.activeTurn;
   ti.className = 'turn-indicator' + (state.dealt[oppIdx] ? ' my-turn' : '');
 
+  // Mana cards overlap, so an explicit count removes any doubt about what's available
+  const manaLabel = (el, zone) => {
+    const node = document.getElementById(el);
+    if (!node) return;
+    const free = zone.filter(c => !c.tapped).length;
+    node.textContent = '— ' + free + ' of ' + zone.length + ' available';
+    node.classList.toggle('none-left', free === 0 && zone.length > 0);
+  };
+  manaLabel('my-mana-count', me.mana);
+  manaLabel('opp-mana-count', opp.mana);
+
   const ws = document.getElementById('whose-side');
   if (ws) {
     const myName = (state.names && state.names[meIdx]) ? state.names[meIdx] : ('Player ' + (meIdx + 1));

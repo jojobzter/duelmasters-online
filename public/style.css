@@ -161,6 +161,8 @@ input {
 /* ---- Table ---- */
 .table-screen { display: flex; gap: 12px; align-items: flex-start; font-size: 1.05em; max-width: min(2100px, 100%); margin: 0 auto; }
 #table { flex: 1; min-width: 0; max-width: 100%; overflow: visible; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
+.mana-count { color: #7fd4a0; font-weight: 600; letter-spacing: 0; }
+.mana-count.none-left { color: #d08a8a; }
 .zone-label { font-size: 0.68em; color: #bcd; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
 .center-label { text-align: center; }
 .zone { min-width: 0; background: rgba(0,0,0,0.2); border-radius: 6px; min-height: calc(var(--card-h) * 0.55); padding: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -514,7 +516,9 @@ input {
   .screen { padding: 8px; }
   #table { padding: 8px; }
   .zone { padding: 5px; gap: 5px; }
-  .zone-label { font-size: 0.62em; margin-top: 3px; }
+  .mana-count { color: #7fd4a0; font-weight: 600; letter-spacing: 0; }
+.mana-count.none-left { color: #d08a8a; }
+.zone-label { font-size: 0.62em; margin-top: 3px; }
   .deck-gy-pair { gap: 5px; }
   .chat-messages { max-height: 130px; min-height: 90px; }
   .log { max-height: 110px; }
