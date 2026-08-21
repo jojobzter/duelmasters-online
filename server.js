@@ -1108,16 +1108,41 @@ function castPrevented(state, playerIdx, cardId) {
         const what = String(e.what || '').toLowerCase();
         if (what !== 'anycast' && what !== 'oppcast') continue;
         if (what === 'oppcast' && playerIdx === si) continue;
-        if (!e.selector) continue;
-        const fake = { id: cardId, key: '__playing__' };
-        const test = Object.assign({}, e.selector, { zone: 'battle', side: 'any' });
-        if (selectorMatches(state, si, src, test, playerIdx, fake)) {
-          return cardLabel(src.id);
-        }
+        if (cardMatchesFilter(cardId, e.cardFilter)) return cardLabel(src.id);
       }
     }
   }
   return null;
+}
+
+// Does a card match a description like "spell[!civ=Light]" or "creature[race~Dragon]"?
+function cardMatchesFilter(cardId, filter) {
+  if (!filter) return false;
+  const kind = filter.kind;
+  if (kind === 'spell' && !isSpellCard(cardId)) return false;
+  if (kind === 'creature' && isSpellCard(cardId)) return false;
+  for (const f of filter.filters || []) {
+    let ok = true;
+    switch (f.key) {
+      case 'civ': ok = civsOf(cardId).includes(f.value); break;
+      case 'race': {
+        const races = racesOf(cardId);
+        ok = f.op === '~' ? races.some(r => r.includes(String(f.value).toLowerCase()))
+                          : races.includes(String(f.value).toLowerCase());
+        break;
+      }
+      case 'cost': {
+        const c = (cardMeta(cardId) || {}).cost;
+        ok = c == null ? true : (f.op === '<=' ? c <= +f.value : f.op === '>=' ? c >= +f.value : c === +f.value);
+        break;
+      }
+      case 'evolution': ok = /evolution/i.test((cardMeta(cardId) || {}).type || ''); break;
+      default: ok = true;
+    }
+    if (f.negate) ok = !ok;
+    if (!ok) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,6 +1307,23 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           source: cardLabel(cardId), sourceKey: cardKey,
           spellKey: isSpellCard(cardId) ? cardKey : null
         };
+
+        // "oppChoice" means the OPPONENT picks, from their own side. The prompt goes
+        // to them, the zone flips to their perspective, and this card doesn't wait.
+        if (e.mods && e.mods.oppchoice) {
+          const flipped = { oppBattle: 'ownBattle', ownBattle: 'oppBattle',
+                            oppMana: 'ownMana', ownMana: 'oppMana',
+                            oppHand: 'ownHand', ownHand: 'oppHand',
+                            oppShield: 'ownShield', ownShield: 'oppShield' }[zoneName] || zoneName;
+          const forOpp = Object.assign({}, base, { zone: flipped, spellKey: null });
+          if (legalTargetCount(opp, me, forOpp) > 0) {
+            opp.pendingTargets.push(forOpp);
+            logs.push(cardLabel(cardId) + ': their opponent must choose.');
+          } else {
+            logs.push(cardLabel(cardId) + ': their opponent had no legal choice.');
+          }
+          break;
+        }
         const wantsMany = (wantCount === 'all') || (typeof wantCount === 'number' && wantCount > 1);
         if (wantsMany) {
           const pool = listForZone(me, opp, zoneName)
@@ -3278,6 +3320,10 @@ wss.on('connection', (ws) => {
         logText = 'attacked with ' + cardLabel(atk.id) +
           (target.type === 'shield' ? ' \u2014 aiming at shields.' : ' \u2014 targeting ' + cardLabel((opp.battlezone.find(c => c.key === target.key) || {}).id) + '.');
         if (!canBlock) {
+          // Nobody could block, so the attack is unblocked by definition. This is the
+          // common case (defender has no blockers) and previously fired nothing —
+          // only an explicit "don't block" did.
+          firePar(s, idx, atk, 'onunblockedattack', extraLogs);
           if (target.type === 'creature') {
             const victim = opp.battlezone.find(c => c.key === target.key);
             s.combat = null;

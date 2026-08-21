@@ -216,8 +216,10 @@ function parseAction(body, mods) {
     }
     case 'prevent': {
       const what = rest[0];
-      const sel = rest.length > 1 ? parseSelector(rest.slice(1).join(' ')) : null;
-      return { action: 'prevent', what, selector: sel };
+      // "spell[!civ=Light]" is a description of a card, not a zone, so it needs the
+      // card-filter parser rather than parseSelector (which only knows zones).
+      const sel = rest.length > 1 ? parseCardFilter(rest.slice(1).join(' ')) : null;
+      return { action: 'prevent', what, cardFilter: sel };
     }
     case 'oppkeeps': {
       // "oppKeeps 1 of 2 oppCreature, rest -> destroy"
@@ -282,6 +284,25 @@ function parseAction(body, mods) {
   }
 }
 
+// "spell[!civ=Light]", "creature[race~Dragon]", "anyCard[civ=Light]" — a description
+// of a card rather than a place to look for one.
+function parseCardFilter(raw) {
+  if (!raw) return null;
+  const m = raw.trim().match(/^([a-zA-Z]+)(?:\[(.*)\])?$/);
+  if (!m) return null;
+  const out = { kind: m[1].toLowerCase(), filters: [] };
+  if (m[2]) {
+    for (const f of splitTop(m[2], ',')) {
+      const neg = f.startsWith('!');
+      const body = neg ? f.slice(1) : f;
+      const cmp = body.match(/^([a-zA-Z]+)\s*(<=|>=|~|=|<|>)\s*(.+)$/);
+      if (cmp) out.filters.push({ key: cmp[1].toLowerCase(), op: cmp[2], value: cmp[3].trim(), negate: neg });
+      else out.filters.push({ key: body.toLowerCase(), op: 'flag', value: true, negate: neg });
+    }
+  }
+  return out;
+}
+
 function parseEffect(text, cardName) {
   const clauses = splitTop(String(text || ''), ';');
   const out = { effects: [], properties: {}, errors: [] };
@@ -295,4 +316,4 @@ function parseEffect(text, cardName) {
   return out;
 }
 
-module.exports = { parseEffect, parseClause, parseSelector, TRIGGERS };
+module.exports = { parseEffect, parseClause, parseSelector, parseCardFilter, TRIGGERS };
