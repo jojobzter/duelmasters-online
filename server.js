@@ -628,8 +628,7 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
 function fireAttackTriggers(state, meIdx, oppIdx, card, logs, when) {
   const me = state.players[meIdx], opp = state.players[oppIdx];
   // the sheet wins if it describes this card's attack behaviour
-  if (hasSheetTrigger(card.id, 'onattack') || hasSheetTrigger(card.id, 'onunblockedattack') ||
-      hasSheetTrigger(card.id, 'onplayerattack')) return;
+  if (hasSheetEffects(card.id)) return;
   const trig = ATTACK_TRIGGERS[normalizeCardKey(cardLabel(card.id))];
   if (!trig) return;
   const onHit = trig.effect === 'oppDestroysOwnCreature';   // needs an unblocked connection
@@ -684,8 +683,8 @@ function resolveBattle(state, aIdx, aCard, dIdx, dCard, logs) {
 
   // "when this creature wins a battle, destroy it" (Bloody Squito, Bone Spider)
   const SELF_DESTRUCT_ON_WIN = new Set(['bloody squito', 'bone spider']);
-  const aSheetWin = hasSheetTrigger(aCard.id, 'onbattlewin');
-  const dSheetWin = hasSheetTrigger(dCard.id, 'onbattlewin');
+  const aSheetWin = hasSheetEffects(aCard.id);
+  const dSheetWin = hasSheetEffects(dCard.id);
   const winner = losers.some(l => l[1].key === aCard.key) ? null : aCard;
   const loserD = losers.some(l => l[1].key === dCard.key);
   if (!aSheetWin && winner && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(aName)) && loserD) losers.push([A, aCard, aIdx]);
@@ -726,7 +725,7 @@ function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
     for (const c of p.battlezone) {
       if (c.key === enteringKey) continue;
       if (normalizeCardKey(cardLabel(c.id)) !== QUIXOTIC_NAME) continue;
-      if (hasSheetStatic(c.id) || hasSheetTrigger(c.id, 'onanycreatureenter')) continue;
+      if (hasSheetEffects(c.id)) continue;
       c.qxCount = (c.qxCount || 0) + 1;
       if (logs) logs.push(cardLabel(c.id) + ' gained +3000 from ' + cardLabel(enteringId) + ' entering (now +' + (c.qxCount * 3000) + ').');
     }
@@ -806,7 +805,7 @@ function creatureDestroyed(owner, _opp, card, logs, wentToGrave) {
   const name = cardLabel(card.id).toLowerCase();
   if (name === MONGREL_MAN_NAME) return;
   if (isSpellCard(card.id)) return;
-  if (!owner.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === MONGREL_MAN_NAME && !hasSheetTrigger(c.id, 'onanycreaturedestroyed'))) return;
+  if (!owner.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === MONGREL_MAN_NAME && !hasSheetEffects(c.id))) return;
   const drawn = owner.deck.shift();
   if (drawn) {
     owner.hand.push({ id: drawn, key: newKey() });
@@ -1464,7 +1463,15 @@ function hasSheetTrigger(cardId, trigger) {
   const m = cardMeta(cardId) || {};
   return (m.parsedEffects || []).some(e => e.trigger === trigger);
 }
-function hasSheetStatic(cardId) { return hasSheetTrigger(cardId, 'static'); }
+// If a card is described in the spreadsheet AT ALL, the sheet is the single source of
+// truth for it and every hardcoded behaviour stands down — not just the matching
+// trigger. Otherwise a stale (or plain wrong) hardcoded entry keeps firing alongside
+// it, which is how Gigabalza ended up discarding on attack as well as on summon.
+function hasSheetEffects(cardId) {
+  const m = cardMeta(cardId) || {};
+  return (m.parsedEffects || []).length > 0;
+}
+function hasSheetStatic(cardId) { return hasSheetEffects(cardId); }
 
 // Fires a card's own sheet-described effects for a given trigger.
 function firePar(state, ownerIdx, card, trigger, logs) {
@@ -1503,7 +1510,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
     const extraLog = [];
     const res = runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, 'onsummon', extraLog, notices);
     // Ice Vapor's passive, only when its own Effect text doesn't already cover it
-    if (isSpellCard(cardId) && opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === ICE_VAPOR_NAME && !hasSheetTrigger(c.id, 'onoppcast'))) {
+    if (isSpellCard(cardId) && opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === ICE_VAPOR_NAME && !hasSheetEffects(c.id))) {
       if (me.hand.length) me.pendingDiscards.push({ id: newKey(), kind: 'choose', count: 1, source: 'Ice Vapor, Shadow of Anguish' });
       if (me.mana.length) me.pendingManaDiscards = (me.pendingManaDiscards || 0) + 1;
     }
@@ -2244,7 +2251,7 @@ wss.on('connection', (ws) => {
         // end of MY turn: bounce cards that go home, and ask about shield-break returns
         for (const c of me.battlezone.slice()) {
           const nm = normalizeCardKey(cardLabel(c.id));
-          if (hasSheetTrigger(c.id, 'endturn')) continue;   // the sheet handles it
+          if (hasSheetEffects(c.id)) continue;   // the sheet handles this card
           if (END_TURN_RETURN_TO_HAND.has(nm) || nm === 'bazagazeal dragon') {
             removeBattleCard(me, c.key);
             me.hand.push({ id: c.id, key: c.key });
@@ -2441,7 +2448,7 @@ wss.on('connection', (ws) => {
       case 'castFreeFromHand': {
         me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
         // Glena Vuele watches for the opponent casting a shield trigger
-        if (opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'glena vuele, the hypnotic' && !hasSheetTrigger(c.id, 'onoppshieldtrigger'))) {
+        if (opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'glena vuele, the hypnotic' && !hasSheetEffects(c.id))) {
           const top = opp.deck.shift();
           if (top) {
             opp.shields.push({ id: top, key: newKey(), faceUp: false, slot: nextShieldSlot(opp) });
@@ -2581,7 +2588,7 @@ wss.on('connection', (ws) => {
         logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.';
 
         if (c.tapped && msg.mode === 'ability') {
-          const own = hasSheetTrigger(c.id, 'tapability') ? null : TAP_ABILITIES[name];
+          const own = hasSheetEffects(c.id) ? null : TAP_ABILITIES[name];
           const gigazaldGrant = me.battlezone.some(g => normalizeCardKey(cardLabel(g.id)) === GIGAZALD_NAME)
                                 && name !== GIGAZALD_NAME && civsOf(c.id).includes('Darkness');
           const ability = own || (gigazaldGrant ? { kind: 'oppDiscardRandom' } : null);
@@ -3277,12 +3284,12 @@ wss.on('connection', (ws) => {
         if (!ok) return;
         if (!s.combat) {
           const atkNameNorm = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
-          if (atkNameNorm === 'aqua master' && !hasSheetTrigger(attacker.id, 'onunblockedattack') && opp.shields.length) {
+          if (atkNameNorm === 'aqua master' && !hasSheetEffects(attacker.id) && opp.shields.length) {
             const t = opp.shields[Math.floor(Math.random() * opp.shields.length)];
             t.faceUp = true;
             extraLogs.push("turned one of their opponent's shields face up with Aqua Master.");
           }
-          if (atkNameNorm === 'marrow ooze, the twister' && attacker && !hasSheetTrigger(attacker.id, 'onplayerattack')) {
+          if (atkNameNorm === 'marrow ooze, the twister' && attacker && !hasSheetEffects(attacker.id)) {
             removeBattleCard(me, attacker.key);
             const dest = battleCardToGrave(me, attacker);
             creatureDestroyed(me, opp, attacker, extraLogs, dest === 'graveyard');
