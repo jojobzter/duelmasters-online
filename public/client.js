@@ -1762,23 +1762,11 @@ document.getElementById('btn-shield-trigger-no').addEventListener('click', () =>
   document.getElementById('shield-trigger-modal').style.display = 'none';
   processNextShieldTrigger();
 });
-// Safety escape: tapping the dark backdrop or pressing Escape declines the trigger
-// (the card just stays in hand) so it's never possible to get stuck behind this modal.
-document.getElementById('shield-trigger-modal').addEventListener('click', (e) => {
-  if (e.target.id !== 'shield-trigger-modal') return;
-  if (shieldTriggerPendingKey) sendMsg({ type: 'shieldTriggerDecline', key: shieldTriggerPendingKey });
-  document.getElementById('shield-trigger-modal').style.display = 'none';
-  processNextShieldTrigger();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  const m = document.getElementById('shield-trigger-modal');
-  if (m.style.display === 'flex') {
-    if (shieldTriggerPendingKey) sendMsg({ type: 'shieldTriggerDecline', key: shieldTriggerPendingKey });
-    m.style.display = 'none';
-    processNextShieldTrigger();
-  }
-});
+// A decision prompt only closes through its own buttons. Clicking the backdrop or
+// pressing Escape does nothing — an accidental tap shouldn't silently decline a
+// Shield Trigger. The modal is height-capped and scrollable, so the buttons are
+// always reachable.
+
 
 // ---- on-table selection: valid cards glow and are clicked directly, so choosing a
 // target never covers the board with a dialog ----
