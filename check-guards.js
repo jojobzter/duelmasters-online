@@ -26,3 +26,22 @@ if (problems.length) {
   process.exit(1);
 }
 console.log('guard check: all hardcoded power effects stand down for sheet-described cards');
+
+// Second check: module-level caches must be declared before anything assigns to them.
+// A `let` declared below its first use sits in the temporal dead zone and throws at
+// start-up, which silently leaves the card database empty.
+const srcLines = src.split('\n');
+const caches = ['META_CACHE', 'SELECTOR_CACHE', 'STATIC_CACHE', 'CARD_DB'];
+const tdz = [];
+for (const c of caches) {
+  const declared = srcLines.findIndex(l => new RegExp('^(let|const|var)\\s+' + c + '\\b').test(l.trim()));
+  const firstUse = srcLines.findIndex(l => new RegExp('\\b' + c + '\\b').test(l));
+  if (declared === -1) continue;
+  if (firstUse < declared) tdz.push(c + ': declared line ' + (declared + 1) + ', used line ' + (firstUse + 1));
+}
+if (tdz.length) {
+  console.error('TEMPORAL DEAD ZONE (start-up will throw):');
+  tdz.forEach(t => console.error('   ' + t));
+  process.exit(1);
+}
+console.log('cache declaration order: OK');

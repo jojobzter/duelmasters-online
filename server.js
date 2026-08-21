@@ -10,7 +10,13 @@ const fs = require('fs');
 const crypto = require('crypto');
 const XLSX = require('xlsx');
 const { parseEffect, parseSelector } = require('./effects-parser.js');
+
+// Lookup caches. Declared up here deliberately: loadCardDatabase() clears them and
+// runs during module start-up, so a `let` further down the file would still be in its
+// temporal dead zone and throw — silently leaving the card database empty.
 let SELECTOR_CACHE = new Map();
+let META_CACHE = new Map();
+let STATIC_CACHE = new Map();
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -171,10 +177,19 @@ function ensureCardDatabaseFresh(force) {
       CARD_DB_MTIME = stat.mtimeMs;
     }
   } catch (e) {
-    // ignore transient read errors — keep whatever was last loaded
+    // A transient read error is fine — keep whatever was last loaded. But a real
+    // fault here leaves EVERY card unknown, so it must be visible, not swallowed.
+    console.error('Card database load failed:', e && e.message ? e.message : e);
+    if (e && e.stack) console.error(e.stack.split('\n').slice(0, 3).join('\n'));
   }
 }
 ensureCardDatabaseFresh();
+if (!CARD_DB.size) {
+  console.error('WARNING: the card database is EMPTY. Every card will be rejected as unknown.');
+  console.error('         Check that carddata/ contains a readable .xlsx file.');
+} else {
+  console.log('Card database ready:', CARD_DB.size, 'cards.');
+}
 
 // A machine-readable index of every ability the engine implements, built from the
 // same tables the rules use. The bot reads this instead of hardcoding card names, so
@@ -894,7 +909,6 @@ const ATTACK_TRIGGERS = {
 // the moment it leaves. Everything here is driven by the spreadsheet.
 // ---------------------------------------------------------------------------
 
-const STATIC_CACHE = new Map();
 function staticClauses(card) {
   let list = STATIC_CACHE.get(card.id);
   if (list !== undefined) return list;
@@ -2071,13 +2085,14 @@ function nextShieldSlot(me) {
   return i;
 }
 
-let META_CACHE = new Map();
 function cardMeta(id) {
   ensureCardDatabaseFresh();
   let m = META_CACHE.get(id);
   if (m !== undefined) return m;
   m = CARD_DB.get(normalizeCardKey(cardLabel(id))) || null;
-  META_CACHE.set(id, m);
+  // Only cache hits. Caching a miss would make a card that wasn't loaded yet look
+  // permanently unknown, even after the database is in place.
+  if (m) META_CACHE.set(id, m);
   return m;
 }
 
