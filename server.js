@@ -503,7 +503,7 @@ function effectivePower(state, ownerIdx, card, attacking) {
 
   // Barkwhip, the Smasher: while TAPPED, your other Beast Folk get +2000
   const bark = namedCard(owner, 'barkwhip, the smasher');
-  if (bark && bark.tapped && bark.key !== card.key && raceOf(card.id).includes('beast folk')) p += 2000;
+  if (bark && !hasSheetStatic(bark.id) && bark.tapped && bark.key !== card.key && raceOf(card.id).includes('beast folk')) p += 2000;
 
   // Petrova: +4000 to your OTHER creatures of the named race, while Petrova is out
   // Every Petrova names its own race, and each one grants +4000 independently.
@@ -515,27 +515,27 @@ function effectivePower(state, ownerIdx, card, attacking) {
 
   // Pala Olesis: during the OPPONENT's turn, your other creatures get +2000
   const pala = namedCard(owner, 'pala olesis, morning guardian');
-  if (pala && pala.key !== card.key && state.activeTurn != null && state.activeTurn !== ownerIdx) p += 2000;
+  if (pala && !hasSheetStatic(pala.id) && pala.key !== card.key && state.activeTurn != null && state.activeTurn !== ownerIdx) p += 2000;
 
   // Quixotic Hero Swine Snout: +3000 for each creature that has entered play since
   // it arrived — permanent, and carries across turns
-  if (selfKey === QUIXOTIC_NAME) p += 3000 * (card.qxCount || 0);
+  if (selfKey === QUIXOTIC_NAME && !hasSheetStatic(card.id)) p += 3000 * (card.qxCount || 0);
 
   // Super Necrodragon Abzo Dolba: +2000 per creature in your graveyard
-  if (selfKey === 'super necrodragon abzo dolba') {
+  if (selfKey === 'super necrodragon abzo dolba' && !hasSheetStatic(card.id)) {
     p += 2000 * owner.graveyard.filter(g => !isSpellCard(g.id)).length;
   }
 
   // Bolshack Dragon: while ATTACKING, +1000 per fire card in your graveyard
-  if (attacking && selfKey === 'bolshack dragon') {
+  if (attacking && selfKey === 'bolshack dragon' && !hasSheetStatic(card.id)) {
     p += 1000 * owner.graveyard.filter(g => civsOf(g.id).includes('Fire')).length;
   }
 
   // Magmadragon Ogrist Vhal: +3000 per card in your hand
-  if (selfKey === 'magmadragon ogrist vhal') p += 3000 * owner.hand.length;
+  if (selfKey === 'magmadragon ogrist vhal' && !hasSheetStatic(card.id)) p += 3000 * owner.hand.length;
 
   // Rikabu Flipper: +2000 per spell you cast this turn
-  if (selfKey === 'rikabu flipper, explosive artisan') p += 2000 * (owner.spellsCastThisTurn || 0);
+  if (selfKey === 'rikabu flipper, explosive artisan' && !hasSheetStatic(card.id)) p += 2000 * (owner.spellsCastThisTurn || 0);
 
   return p;
 }
@@ -600,6 +600,7 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
   if (attacker) attacker.brokeShieldThisTurn = true;
 
   if (attacker) firePar(state, atkIdx, attacker, 'onbreak', logs);
+  fireBoardWide(state, 'onownshieldbreak', logs, { onlySide: defIdx });
   fireBoardWide(state, 'onanycreaturebreak', logs, { onlySide: atkIdx });
   const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
   if (atkName === 'bolmeteus steel dragon') {
@@ -626,6 +627,9 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
 // pay off if the attack actually connects without being blocked.
 function fireAttackTriggers(state, meIdx, oppIdx, card, logs, when) {
   const me = state.players[meIdx], opp = state.players[oppIdx];
+  // the sheet wins if it describes this card's attack behaviour
+  if (hasSheetTrigger(card.id, 'onattack') || hasSheetTrigger(card.id, 'onunblockedattack') ||
+      hasSheetTrigger(card.id, 'onplayerattack')) return;
   const trig = ATTACK_TRIGGERS[normalizeCardKey(cardLabel(card.id))];
   if (!trig) return;
   const onHit = trig.effect === 'oppDestroysOwnCreature';   // needs an unblocked connection
@@ -680,10 +684,12 @@ function resolveBattle(state, aIdx, aCard, dIdx, dCard, logs) {
 
   // "when this creature wins a battle, destroy it" (Bloody Squito, Bone Spider)
   const SELF_DESTRUCT_ON_WIN = new Set(['bloody squito', 'bone spider']);
+  const aSheetWin = hasSheetTrigger(aCard.id, 'onbattlewin');
+  const dSheetWin = hasSheetTrigger(dCard.id, 'onbattlewin');
   const winner = losers.some(l => l[1].key === aCard.key) ? null : aCard;
   const loserD = losers.some(l => l[1].key === dCard.key);
-  if (winner && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(aName)) && loserD) losers.push([A, aCard, aIdx]);
-  if (!losers.some(l => l[1].key === dCard.key) && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(dName))) losers.push([D, dCard, dIdx]);
+  if (!aSheetWin && winner && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(aName)) && loserD) losers.push([A, aCard, aIdx]);
+  if (!dSheetWin && !losers.some(l => l[1].key === dCard.key) && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(dName))) losers.push([D, dCard, dIdx]);
 
   logs.push('battle: ' + aName + ' (' + ap + ') vs ' + dName + ' (' + dp + ').');
   firePar(state, aIdx, aCard, 'onbattle', logs);
@@ -709,6 +715,8 @@ function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
   if (isSpellCard(enteringId)) return;
   // creatures that react to any creature arriving, or to the OPPONENT summoning
   fireBoardWide(state, 'onanycreatureenter', logs || [], { exceptKey: enteringKey });
+  const side0 = state.players.findIndex(p => p.battlezone.some(c => c.key === enteringKey));
+  if (side0 !== -1) fireBoardWide(state, 'onownsummon', logs || [], { onlySide: side0, exceptKey: enteringKey });
   const enteringSide = state.players.findIndex(p => p.battlezone.some(c => c.key === enteringKey));
   if (enteringSide !== -1) {
     fireBoardWide(state, 'onoppsummon', logs || [], { onlySide: enteringSide === 0 ? 1 : 0 });
@@ -718,6 +726,7 @@ function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
     for (const c of p.battlezone) {
       if (c.key === enteringKey) continue;
       if (normalizeCardKey(cardLabel(c.id)) !== QUIXOTIC_NAME) continue;
+      if (hasSheetStatic(c.id) || hasSheetTrigger(c.id, 'onanycreatureenter')) continue;
       c.qxCount = (c.qxCount || 0) + 1;
       if (logs) logs.push(cardLabel(c.id) + ' gained +3000 from ' + cardLabel(enteringId) + ' entering (now +' + (c.qxCount * 3000) + ').');
     }
@@ -735,7 +744,16 @@ function pendingPromptTotal(p) {
 
 // Counts the targets an effect could legally hit right now. Used so an effect with
 // nothing to choose is skipped outright instead of leaving a prompt nobody can answer.
+// current power including every buff, for the power restrictions on effects
+let __stateRef = null;
+function state0Index(player) { return __stateRef ? __stateRef.players.indexOf(player) : 0; }
+function currentPower(card, ownerIdx) {
+  if (!__stateRef) return powerOf(card.id);
+  return effectivePower(__stateRef, ownerIdx, card, false);
+}
+
 function legalTargetCount(me, opp, eff) {
+  __stateRef = (me && me.__state) || __stateRef;
   const zones = {
     oppBattle: opp.battlezone, ownBattle: me.battlezone, ownHand: me.hand,
     ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields, ownGrave: me.graveyard,
@@ -748,7 +766,11 @@ function legalTargetCount(me, opp, eff) {
   if (eff.filter === 'spell') list = list.filter(c => isSpellCard(c.id));
   if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test((cardMeta(c.id) || {}).type || ''));
   if (eff.requireBlocker) list = list.filter(c => isBlocker(c.id));
-  if (eff.maxPower != null) list = list.filter(c => { const p = powerOf(c.id); return p == null || p <= eff.maxPower; });
+  if (eff.maxPower != null) list = list.filter(c => {
+    const ownerIdx = opp.battlezone.includes(c) ? state0Index(opp) : state0Index(me);
+    const p = currentPower(c, ownerIdx);
+    return p == null || p <= eff.maxPower;
+  });
   if (eff.civ) list = list.filter(c => civsOf(c.id).includes(eff.civ));
   if (eff.negCiv) list = list.filter(c => !civsOf(c.id).includes(eff.negCiv));
   if (eff.race) list = list.filter(c => racesOf(c.id).includes(eff.race.toLowerCase()));
@@ -774,11 +796,17 @@ function opponentOf(room, player) {
 // dying doesn't trigger itself.
 function creatureDestroyed(owner, _opp, card, logs, wentToGrave) {
   if (wentToGrave === false) return;
-  if (owner.__state) fireBoardWide(owner.__state, 'onanycreaturedestroyed', logs || [], { exceptKey: card.key });
+  if (owner.__state) {
+    const st = owner.__state;
+    const ownIdx = st.players.indexOf(owner);
+    fireBoardWide(st, 'onanycreaturedestroyed', logs || [], { exceptKey: card.key });
+    fireBoardWide(st, 'onowncreaturedestroyed', logs || [], { onlySide: ownIdx, exceptKey: card.key });
+    fireBoardWide(st, 'onoppcreaturedestroyed', logs || [], { onlySide: ownIdx === 0 ? 1 : 0 });
+  }
   const name = cardLabel(card.id).toLowerCase();
   if (name === MONGREL_MAN_NAME) return;
   if (isSpellCard(card.id)) return;
-  if (!owner.battlezone.some(c => cardLabel(c.id).toLowerCase() === MONGREL_MAN_NAME)) return;
+  if (!owner.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === MONGREL_MAN_NAME && !hasSheetTrigger(c.id, 'onanycreaturedestroyed'))) return;
   const drawn = owner.deck.shift();
   if (drawn) {
     owner.hand.push({ id: drawn, key: newKey() });
@@ -1159,7 +1187,11 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           const hit = [];
           for (const card of pool) {
             if (card.key === cardKey) continue;
-            if (ex.maxPower != null) { const p = powerOf(card.id); if (p != null && p > ex.maxPower) continue; }
+            if (ex.maxPower != null) {
+              const oi = state.players.findIndex(pp => pp.battlezone.includes(card));
+              const p = effectivePower(state, oi === -1 ? meIdx : oi, card, false);
+              if (p != null && p > ex.maxPower) continue;
+            }
             if (ex.requireBlocker && !isBlocker(card.id)) continue;
             if (ex.filter === 'untapped' && card.tapped) continue;
             if (!matchesExtra(card.id, ex)) continue;
@@ -1183,7 +1215,12 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         if (wantsMany) {
           const pool = listForZone(me, opp, zoneName)
             .filter(c => c.key !== cardKey)
-            .filter(c => ex.maxPower == null || (powerOf(c.id) == null || powerOf(c.id) <= ex.maxPower))
+            .filter(c => {
+              if (ex.maxPower == null) return true;
+              const oi = state.players.findIndex(pp => pp.battlezone.includes(c));
+              const p = effectivePower(state, oi === -1 ? meIdx : oi, c, false);
+              return p == null || p <= ex.maxPower;
+            })
             .filter(c => !ex.requireBlocker || isBlocker(c.id))
             .filter(c => matchesExtra(c.id, ex))
             .filter(c => !(zoneName === 'oppBattle' && isUnchoosable(c.id)));
@@ -1315,6 +1352,22 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         }
         break;
       }
+      case 'oppDraw': {
+        const n = typeof e.count === 'number' ? e.count : 1;
+        let drawn = 0;
+        for (let i = 0; i < n; i++) { const c = opp.deck.shift(); if (!c) break; opp.hand.push({ id: c, key: newKey() }); drawn++; }
+        logs.push('let their opponent draw ' + drawn + ' card' + (drawn === 1 ? '' : 's') + '.');
+        break;
+      }
+      case 'lookTop': {
+        const n = typeof e.count === 'number' ? e.count : 1;
+        logs.push('looked at the top ' + n + ' card' + (n === 1 ? '' : 's') + ' of their deck.');
+        break;
+      }
+      case 'nameCost': {
+        logs.push('named a mana cost with ' + cardLabel(cardId) + '.');
+        break;
+      }
       case 'look': {
         // reveal-to-self: recorded in the log, the peek itself is client-side
         logs.push('looked at ' + (e.selector ? e.selector.name : 'cards') + '.');
@@ -1368,6 +1421,15 @@ function discardRedirect(state, ownerIdx, card, logs) {
   return false;
 }
 
+// THE guard. If the spreadsheet describes this card for this trigger, the sheet is
+// authoritative and every hardcoded path for it must stand down — otherwise the
+// effect happens twice.
+function hasSheetTrigger(cardId, trigger) {
+  const m = cardMeta(cardId) || {};
+  return (m.parsedEffects || []).some(e => e.trigger === trigger);
+}
+function hasSheetStatic(cardId) { return hasSheetTrigger(cardId, 'static'); }
+
 // Fires a card's own sheet-described effects for a given trigger.
 function firePar(state, ownerIdx, card, trigger, logs) {
   if (!card) return { defer: false };
@@ -1404,8 +1466,8 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
     const notices = [];
     const extraLog = [];
     const res = runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, 'onsummon', extraLog, notices);
-    // still honour the Ice Vapor passive, which belongs to the OPPONENT's board
-    if (isSpellCard(cardId) && opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === ICE_VAPOR_NAME)) {
+    // Ice Vapor's passive, only when its own Effect text doesn't already cover it
+    if (isSpellCard(cardId) && opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === ICE_VAPOR_NAME && !hasSheetTrigger(c.id, 'onoppcast'))) {
       if (me.hand.length) me.pendingDiscards.push({ id: newKey(), kind: 'choose', count: 1, source: 'Ice Vapor, Shadow of Anguish' });
       if (me.mana.length) me.pendingManaDiscards = (me.pendingManaDiscards || 0) + 1;
     }
@@ -1493,7 +1555,8 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
   if (massMax != null) {
     const killed = [], unknown = [];
     for (const card of opp.battlezone.slice()) {
-      const pw = powerOf(card.id);
+      const oppIdx2 = me.__state ? me.__state.players.indexOf(opp) : 1;
+      const pw = me.__state ? effectivePower(me.__state, oppIdx2, card, false) : powerOf(card.id);
       if (pw == null) { unknown.push(card.key); continue; }
       if (pw > massMax) continue;
       removeBattleCard(opp, card.key);
@@ -2139,6 +2202,7 @@ wss.on('connection', (ws) => {
         // end of MY turn: bounce cards that go home, and ask about shield-break returns
         for (const c of me.battlezone.slice()) {
           const nm = normalizeCardKey(cardLabel(c.id));
+          if (hasSheetTrigger(c.id, 'endturn')) continue;   // the sheet handles it
           if (END_TURN_RETURN_TO_HAND.has(nm) || nm === 'bazagazeal dragon') {
             removeBattleCard(me, c.key);
             me.hand.push({ id: c.id, key: c.key });
@@ -2164,6 +2228,9 @@ wss.on('connection', (ws) => {
 
         s.activeTurn = oppIdx;
         s.turnNumber = (s.turnNumber || 0) + 1;
+        // start-of-turn effects for the player whose turn is beginning
+        for (const c of opp.battlezone.slice()) firePar(s, oppIdx, c, 'startturn', extraLogs);
+        for (const c of me.battlezone.slice()) firePar(s, idx, c, 'oppstartturn', extraLogs);
         // untap step: the player whose turn is starting untaps their mana and creatures
         let untapped = 0;
         for (const m of opp.mana) { if (m.tapped) { m.tapped = false; untapped++; } }
@@ -2306,7 +2373,7 @@ wss.on('connection', (ws) => {
           me.turboRushActive = true;
           extraLogs.push('activated Turbo Rush — their creatures have Speed Attacker this turn.');
         }
-        logText = 'summoned ' + cardLabel(c.id) + '.';
+        logText = (isSpellCard(c.id) ? 'cast ' : 'summoned ') + cardLabel(c.id) + '.';
         {
           const res = applyOnSummonTriggers(me, opp, c.id, c.key, s);
           if (res.sfx) sfxToPlay = res.sfx;
@@ -2331,7 +2398,7 @@ wss.on('connection', (ws) => {
       case 'castFreeFromHand': {
         me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
         // Glena Vuele watches for the opponent casting a shield trigger
-        if (opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'glena vuele, the hypnotic')) {
+        if (opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'glena vuele, the hypnotic' && !hasSheetTrigger(c.id, 'onoppshieldtrigger'))) {
           const top = opp.deck.shift();
           if (top) {
             opp.shields.push({ id: top, key: newKey(), faceUp: false, slot: nextShieldSlot(opp) });
@@ -2471,7 +2538,7 @@ wss.on('connection', (ws) => {
         logText = (c.tapped ? 'tapped ' : 'untapped ') + cardLabel(c.id) + '.';
 
         if (c.tapped && msg.mode === 'ability') {
-          const own = TAP_ABILITIES[name];
+          const own = hasSheetTrigger(c.id, 'tapability') ? null : TAP_ABILITIES[name];
           const gigazaldGrant = me.battlezone.some(g => normalizeCardKey(cardLabel(g.id)) === GIGAZALD_NAME)
                                 && name !== GIGAZALD_NAME && civsOf(c.id).includes('Darkness');
           const ability = own || (gigazaldGrant ? { kind: 'oppDiscardRandom' } : null);
@@ -2741,11 +2808,11 @@ wss.on('connection', (ws) => {
           return;
         }
         if (eff.maxPower != null) {
-          const pw = powerOf(card.id);
-          // pw === null means the sheet has no power for this card yet, so the
-          // player's on-screen confirmation is what we go on
+          // current power, so a buffed creature is genuinely out of range
+          const ownerIdx = s.players.indexOf(owner);
+          const pw = effectivePower(s, ownerIdx, card, false);
           if (pw != null && pw > eff.maxPower) {
-            send(ws, { type: 'summonRejected', reason: eff.source + ' can only affect a creature with power ' + eff.maxPower + ' or less. ' + cardLabel(card.id) + ' has ' + pw + '.' });
+            send(ws, { type: 'summonRejected', reason: eff.source + ' can only affect a creature with power ' + eff.maxPower + ' or less. ' + cardLabel(card.id) + ' currently has ' + pw + '.' });
             return;
           }
         }
@@ -3063,6 +3130,11 @@ wss.on('connection', (ws) => {
         atk.attackedThisTurn = true;
         fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'declare');
         firePar(s, idx, atk, 'onattack', extraLogs);
+        fireBoardWide(s, 'oncreatureattack', extraLogs, { onlySide: idx, exceptKey: atk.key });
+        if (target.type === 'creature') {
+          const victim = opp.battlezone.find(c => c.key === target.key);
+          if (victim) firePar(s, oppIdx, victim, 'onattacked', extraLogs);
+        }
         if (target.type === 'shield') firePar(s, idx, atk, 'onplayerattack', extraLogs);
 
         const canBlock = hasLegalBlocker(s, opp, atk);
@@ -3118,6 +3190,7 @@ wss.on('connection', (ws) => {
           blk.tapped = true;
           logText = 'blocked with ' + cardLabel(blk.id) + '.';
           firePar(s, idx, blk, 'onblock', extraLogs);
+          firePar(s, idx, blk, 'onattacked', extraLogs);
           firePar(s, cb.attackerIdx, atk, 'onblocked', extraLogs);
           const res = resolveBattle(s, cb.attackerIdx, atk, idx, blk, extraLogs);
           s.combat = null;
@@ -3161,12 +3234,12 @@ wss.on('connection', (ws) => {
         if (!ok) return;
         if (!s.combat) {
           const atkNameNorm = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
-          if (atkNameNorm === 'aqua master' && opp.shields.length) {
+          if (atkNameNorm === 'aqua master' && !hasSheetTrigger(attacker.id, 'onunblockedattack') && opp.shields.length) {
             const t = opp.shields[Math.floor(Math.random() * opp.shields.length)];
             t.faceUp = true;
             extraLogs.push("turned one of their opponent's shields face up with Aqua Master.");
           }
-          if (atkNameNorm === 'marrow ooze, the twister' && attacker) {
+          if (atkNameNorm === 'marrow ooze, the twister' && attacker && !hasSheetTrigger(attacker.id, 'onplayerattack')) {
             removeBattleCard(me, attacker.key);
             const dest = battleCardToGrave(me, attacker);
             creatureDestroyed(me, opp, attacker, extraLogs, dest === 'graveyard');

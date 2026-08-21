@@ -18,7 +18,10 @@ const TRIGGERS = new Set([
   'onoppcast', 'onplayerattack', 'onunblockedattack', 'onblock', 'cast', 'onbreak',
   // reactive triggers
   'onblocked', 'onbattle', 'onanycreaturebreak', 'onoppshieldtrigger',
-  'onoppmanatograve', 'onoppsummon', 'onoppplay', 'ondiscard'
+  'onoppmanatograve', 'onoppsummon', 'onoppplay', 'ondiscard',
+  'startturn', 'onownshieldbreak', 'onattacked', 'onowncreaturedestroyed',
+  'onownsummon', 'oncreatureattack', 'oppstartturn', 'onoppcreaturedestroyed',
+  'silentskill'
 ]);
 
 // Zones the selectors may refer to
@@ -40,7 +43,8 @@ const ZONES = {
   anycard: { side: 'any', zone: 'played' },
   owncard: { side: 'own', zone: 'played' },
   oppcard: { side: 'opp', zone: 'played' },
-  target: { side: 'any', zone: 'target' }
+  target: { side: 'any', zone: 'target' },
+  otheranycreature: { side: 'any', zone: 'battle', excludeSelf: true }
 };
 
 function splitTop(text, sep) {
@@ -61,7 +65,7 @@ function splitTop(text, sep) {
 function parseSelector(raw) {
   if (!raw) return null;
   let accessor = null;
-  const acc = raw.match(/^(.*)\.(topCard|count)$/);
+  const acc = raw.match(/^(.*)\.(topCard|count|evoBase|name)$/);
   if (acc) { raw = acc[1]; accessor = acc[2]; }
   const m = raw.match(/^([a-zA-Z]+)(?:\[(.*)\])?$/);
   if (!m) return null;
@@ -117,7 +121,7 @@ function parseClause(raw, cardName) {
 
   // trailing modifiers: ", optional", ", oppChoice", ", reveal"
   const mods = {};
-  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger)\b/gi, (_, w) => {
+  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder)\b/gi, (_, w) => {
     mods[w.toLowerCase()] = true; return '';
   }).trim();
   // ", min 2" puts a floor under a cost reduction
@@ -261,6 +265,16 @@ function parseAction(body, mods) {
       return { action: 'breakShield', count: c.count,
                selector: parseSelector(c.rest) || { name: c.rest } };
     }
+    case 'looktop': {
+      const n = parseInt(rest[0], 10) || 1;
+      const arrow = rest.indexOf('->');
+      return { action: 'lookTop', count: n, then: arrow > -1 ? (rest[arrow + 1] || 'reorder').toLowerCase() : 'reorder' };
+    }
+    case 'oppdraw': {
+      const c = parseCount(rest);
+      return { action: 'oppDraw', count: c.count, optional: !!c.optional };
+    }
+    case 'namecost': return { action: 'nameCost' };
     case 'namerace': return { action: 'nameRace' };
     case 'nameciv': return { action: 'nameCiv' };
     default:
