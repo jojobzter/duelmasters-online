@@ -816,6 +816,33 @@ function creatureDestroyed(owner, _opp, card, logs, wentToGrave) {
 
 // Once a spell's prompt is done the card leaves the battlezone — usually to the
 // graveyard, but a few go elsewhere.
+// Where does a spell go once it's done? The sheet's "resolvesTo" wins; the hardcoded
+// set is only a fallback for cards with no Effect text.
+function spellDestination(cardId) {
+  const m = cardMeta(cardId) || {};
+  const prop = m.effectProps && m.effectProps.resolvesTo;
+  if (prop) return { to: prop.to, tapped: !!prop.tapped };
+  if (SPELL_RESOLVES_TO_MANA.has(normalizeCardKey(cardLabel(cardId)))) return { to: 'mana', tapped: false };
+  return { to: 'grave', tapped: false };
+}
+
+// Sends a finished spell to wherever it belongs. Used by every path that retires a
+// spell, so a Charger can never be dropped in the graveyard by a path that forgot.
+function retireSpell(me, card, logs) {
+  const dest = spellDestination(card.id);
+  if (dest.to === 'mana') {
+    const sl = manaSlot(me);
+    me.mana.push({ id: card.id, key: card.key, tapped: !!dest.tapped, x: sl.x, y: sl.y });
+    logs.push('put ' + cardLabel(card.id) + ' into their mana zone' + (dest.tapped ? ' (tapped).' : '.'));
+  } else if (dest.to === 'hand') {
+    me.hand.push({ id: card.id, key: card.key });
+    logs.push('returned ' + cardLabel(card.id) + ' to their hand.');
+  } else {
+    me.graveyard.push({ id: card.id, key: card.key });
+    logs.push('sent ' + cardLabel(card.id) + ' to the graveyard.');
+  }
+}
+
 function resolveSpellCard(me, eff, logs) {
   if (!eff.spellKey) return;
   // A spell can queue several prompts (Hydro Hurricane queues one per Light and per
@@ -828,14 +855,7 @@ function resolveSpellCard(me, eff, logs) {
     me.battlezone.push(spent);
     return;
   }
-  if (SPELL_RESOLVES_TO_MANA.has(cardLabel(spent.id).toLowerCase())) {
-    const slot = manaSlot(me);
-    me.mana.push({ id: spent.id, key: spent.key, tapped: false, x: slot.x, y: slot.y });
-    logs.push('put ' + cardLabel(spent.id) + ' into their mana zone.');
-  } else {
-    me.graveyard.push({ id: spent.id, key: spent.key });
-    logs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.');
-  }
+  retireSpell(me, spent, logs);
 }
 
 // "The opponent discards from hand."
@@ -2435,7 +2455,7 @@ wss.on('connection', (ws) => {
           // a spell has done its job once nothing is waiting on it
           if (isSpellCard(c.id) && !res.defer) {
             const spent = removeBattleCard(me, c.key);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
+            if (spent) retireSpell(me, spent, extraLogs);
           }
         }
         break;
@@ -2475,7 +2495,7 @@ wss.on('connection', (ws) => {
           if (res.peekShields) revealPayload = { title: "One of your opponent's shields", cards: [res.peekShields[Math.floor(Math.random() * res.peekShields.length)].id] };
           if (isSpellCard(c.id) && !res.defer) {
             const spent = removeBattleCard(me, c.key);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
+            if (spent) retireSpell(me, spent, extraLogs);
           }
         }
         break;
@@ -2714,7 +2734,7 @@ wss.on('connection', (ws) => {
           }
           if (search.spellKey) {
             const spent = removeBattleCard(me, search.spellKey);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
+            if (spent) retireSpell(me, spent, extraLogs);
           }
         }
         break;
@@ -2728,7 +2748,7 @@ wss.on('connection', (ws) => {
           me.pendingSearch = null;
           if (spellKey) {
             const spent = removeBattleCard(me, spellKey);
-            if (spent) { me.graveyard.push({ id: spent.id, key: spent.key }); extraLogs.push('sent ' + cardLabel(spent.id) + ' to the graveyard.'); }
+            if (spent) retireSpell(me, spent, extraLogs);
           }
         }
         break;
