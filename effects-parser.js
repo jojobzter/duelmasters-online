@@ -15,7 +15,10 @@
 const TRIGGERS = new Set([
   'onsummon', 'oncast', 'static', 'ondestroy', 'endturn', 'onattack',
   'onbattlewin', 'tapability', 'onanycreatureenter', 'onanycreaturedestroyed',
-  'onoppcast', 'onplayerattack', 'onunblockedattack', 'onblock', 'cast', 'onbreak'
+  'onoppcast', 'onplayerattack', 'onunblockedattack', 'onblock', 'cast', 'onbreak',
+  // reactive triggers
+  'onblocked', 'onbattle', 'onanycreaturebreak', 'onoppshieldtrigger',
+  'onoppmanatograve', 'onoppsummon', 'onoppplay', 'ondiscard'
 ]);
 
 // Zones the selectors may refer to
@@ -32,7 +35,12 @@ const ZONES = {
   oppgrave: { side: 'opp', zone: 'grave' },
   ownhand: { side: 'own', zone: 'hand' },
   opphand: { side: 'opp', zone: 'hand' },
-  self: { side: 'own', zone: 'battle', selfOnly: true }
+  self: { side: 'own', zone: 'battle', selfOnly: true },
+  // pseudo-zones: cards as they are played, used by cost modifiers
+  anycard: { side: 'any', zone: 'played' },
+  owncard: { side: 'own', zone: 'played' },
+  oppcard: { side: 'opp', zone: 'played' },
+  target: { side: 'any', zone: 'target' }
 };
 
 function splitTop(text, sep) {
@@ -52,16 +60,19 @@ function splitTop(text, sep) {
 // "oppCreature[power<=2000,blocker]" -> { zone, filters }
 function parseSelector(raw) {
   if (!raw) return null;
+  let accessor = null;
+  const acc = raw.match(/^(.*)\.(topCard|count)$/);
+  if (acc) { raw = acc[1]; accessor = acc[2]; }
   const m = raw.match(/^([a-zA-Z]+)(?:\[(.*)\])?$/);
   if (!m) return null;
   const base = ZONES[m[1].toLowerCase()];
   if (!base) return null;
-  const sel = Object.assign({ name: m[1] }, base, { filters: [] });
+  const sel = Object.assign({ name: m[1] }, base, { filters: [], accessor });
   if (m[2]) {
     for (const f of splitTop(m[2], ',')) {
       const neg = f.startsWith('!');
       const body = neg ? f.slice(1) : f;
-      const cmp = body.match(/^([a-zA-Z]+)\s*(<=|>=|=|<|>)\s*(.+)$/);
+      const cmp = body.match(/^([a-zA-Z]+)\s*(<=|>=|~|=|<|>)\s*(.+)$/);
       if (cmp) sel.filters.push({ key: cmp[1].toLowerCase(), op: cmp[2], value: cmp[3].trim(), negate: neg });
       else sel.filters.push({ key: body.toLowerCase(), op: 'flag', value: true, negate: neg });
     }
@@ -75,9 +86,15 @@ function parseCount(words) {
   let m;
   if ((m = text.match(/^all\b/i))) return { count: 'all', rest: text.slice(m[0].length).trim() };
   if ((m = text.match(/^any number of\b/i))) return { count: 'all', optional: true, rest: text.slice(m[0].length).trim() };
-  if ((m = text.match(/^up to ([a-zA-Z][\w\[\]=,.]*\.count)\b/i))) {
-    return { count: { dynamic: m[1] }, optional: true, rest: text.slice(m[0].length).trim() };
+  if ((m = text.match(/^up to ([a-zA-Z][\w\[\]=,.!~ ]*?\.count)\s/i))) {
+    return { count: { dynamic: m[1].trim() }, optional: true, rest: text.slice(m[0].length).trim() };
   }
+  // a bare dynamic count, e.g. "tap ownMana[civ=Light,untapped].count oppCreature"
+  if ((m = text.match(/^([a-zA-Z][\w\[\]=,.!~ ]*?\.count)\s/i))) {
+    return { count: { dynamic: m[1].trim() }, rest: text.slice(m[0].length).trim() };
+  }
+  if ((m = text.match(/^any number of\b/i))) return { count: 'all', optional: true, rest: text.slice(m[0].length).trim() };
+  if ((m = text.match(/^any number\b/i))) return { count: 'all', optional: true, rest: text.slice(m[0].length).trim() };
   if ((m = text.match(/^up to (\d+)\b/i))) return { count: parseInt(m[1], 10), optional: true, rest: text.slice(m[0].length).trim() };
   if ((m = text.match(/^(\d+)\b/))) return { count: parseInt(m[1], 10), rest: text.slice(m[0].length).trim() };
   return { count: 1, rest: text };
@@ -100,9 +117,11 @@ function parseClause(raw, cardName) {
 
   // trailing modifiers: ", optional", ", oppChoice", ", reveal"
   const mods = {};
-  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn)\b/gi, (_, w) => {
+  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger)\b/gi, (_, w) => {
     mods[w.toLowerCase()] = true; return '';
   }).trim();
+  // ", min 2" puts a floor under a cost reduction
+  body = body.replace(/,\s*min\s+(\d+)\b/i, (_, n) => { mods.min = parseInt(n, 10); return ''; }).trim();
 
   // "... if <condition>"
   let condition = null;
@@ -206,6 +225,41 @@ function parseAction(body, mods) {
                pool: km[2] ? parseInt(km[2], 10) : null,
                selector: parseSelector(km[3]) || { name: km[3] },
                rest: km[4] ? km[4].toLowerCase() : 'hand' };
+    }
+    case 'costplus': case 'costminus': {
+      const amt = parseInt(rest[0], 10) || 1;
+      const sel = parseSelector(rest.slice(1).join(' '));
+      return { action: verb === 'costplus' ? 'costPlus' : 'costMinus',
+               amount: amt, selector: sel || { name: rest.slice(1).join(' ') },
+               min: mods.min != null ? mods.min : null };
+    }
+    case 'look': {
+      const c = parseCount(rest);
+      return { action: 'look', count: c.count, optional: !!c.optional,
+               selector: parseSelector(c.rest) || { name: c.rest } };
+    }
+    case 'discard': {
+      const c = parseCount(rest);
+      return { action: 'ownDiscard', count: c.count, optional: !!c.optional,
+               selector: parseSelector(c.rest) || { name: c.rest } };
+    }
+    case 'reshufflehand': {
+      return { action: 'reshuffleHand', selector: parseSelector(rest.join(' ')) || { name: rest.join(' ') } };
+    }
+    case 'tobattle': {
+      const c = parseCount(rest);
+      return { action: 'toBattle', count: c.count, optional: !!c.optional,
+               selector: parseSelector(c.rest) || { name: c.rest } };
+    }
+    case 'todeck': {
+      const c = parseCount(rest);
+      return { action: 'toDeck', count: c.count, shuffled: !!mods.shuffled,
+               selector: parseSelector(c.rest) || { name: c.rest } };
+    }
+    case 'break': case 'breakshield': {
+      const c = parseCount(rest);
+      return { action: 'breakShield', count: c.count,
+               selector: parseSelector(c.rest) || { name: c.rest } };
     }
     case 'namerace': return { action: 'nameRace' };
     case 'nameciv': return { action: 'nameCiv' };

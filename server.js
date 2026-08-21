@@ -398,6 +398,11 @@ function isBlocker(id) {
   const m = cardMeta(id);
   return !!(m && m.blocker);
 }
+// blocker, but including any granted by a static effect currently in play
+function isBlockerNow(state, ownerIdx, card) {
+  if (isBlocker(card.id)) return true;
+  return grantedKeywords(state, ownerIdx, card).has('blocker');
+}
 function removeBattleCard(owner, key) {
   const i = owner.battlezone.findIndex(c => c.key === key);
   return i === -1 ? null : owner.battlezone.splice(i, 1)[0];
@@ -405,6 +410,19 @@ function removeBattleCard(owner, key) {
 // Single funnel for battlezone -> graveyard so the Coiling Vines redirect can't be
 // missed by one of the several paths that destroy a creature.
 function battleCardToGrave(owner, card) {
+  // A sheet-described "onDestroy: -> hand/mana" replaces destruction entirely.
+  const dm = (cardMeta(card.id) || {}).parsedEffects || [];
+  const move = dm.find(e => e.trigger === 'ondestroy' && e.action === 'moveSelf');
+  if (move) {
+    dissolveStack(owner, card, null, move.to === 'mana' ? 'hand' : 'hand');
+    if (move.to === 'mana') {
+      const sl = manaSlot(owner);
+      owner.mana.push({ id: card.id, key: card.key, tapped: false, x: sl.x, y: sl.y });
+      return 'mana zone';
+    }
+    owner.hand.push({ id: card.id, key: card.key });
+    return 'hand';
+  }
   // destroyed: the whole stack goes to the graveyard together
   dissolveStack(owner, card, null, 'graveyard');
   const nm = normalizeCardKey(cardLabel(card.id));
@@ -470,6 +488,18 @@ function effectivePower(state, ownerIdx, card, attacking) {
   const selfKey = normalizeCardKey(cardLabel(card.id));
 
   if (attacking && m.powerAttacker) p += m.powerAttacker;
+
+  // continuous buffs described in the spreadsheet, plus any granted this turn
+  p += staticBuffTotal(state, ownerIdx, card, { attacking });
+  p += (card.tempBuff || 0);
+  // a Power Attacker bonus granted by another card
+  if (attacking) {
+    const kw = grantedKeywords(state, ownerIdx, card);
+    if (kw.has('powerattacker') && kw.args && kw.args['powerattacker']) {
+      const n = parseInt(String(kw.args['powerattacker']).replace(/[^0-9]/g, ''), 10);
+      if (Number.isFinite(n)) p += n;
+    }
+  }
 
   // Barkwhip, the Smasher: while TAPPED, your other Beast Folk get +2000
   const bark = namedCard(owner, 'barkwhip, the smasher');
@@ -541,6 +571,7 @@ function hasSummoningSickness(state, ownerIdx, card) {
   if (card.under && card.under.length) return false;   // evolved: never sick
   if (isEvolutionCard(card.id)) return false;          // evolution creatures can attack at once
   if (metaOf(card.id).speedAttacker) return false;
+  if (grantedKeywords(state, ownerIdx, card).has('speedattacker')) return false;
   if (owner.turboRushActive) return false;
   return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
 }
@@ -550,6 +581,8 @@ function hasSummoningSickness(state, ownerIdx, card) {
 function hasLegalBlocker(state, defender, atkCard) {
   if (atkCard.unblockableThisTurn) return false;
   if (ALWAYS_UNBLOCKABLE.has(normalizeCardKey(cardLabel(atkCard.id)))) return false;
+  const atkIdx = state.players.indexOf(defender) === 0 ? 1 : 0;
+  if (grantedKeywords(state, atkIdx, atkCard).has('unblockable')) return false;
   const m = metaOf(atkCard.id);
   if (m.lightStealth && defender.mana.some(x => civsOf(x.id).includes('Light'))) return false;
   return defender.battlezone.some(c => !c.tapped && metaOf(c.id).blocker);
@@ -566,6 +599,8 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
   me.brokeShieldThisTurn = true;
   if (attacker) attacker.brokeShieldThisTurn = true;
 
+  if (attacker) firePar(state, atkIdx, attacker, 'onbreak', logs);
+  fireBoardWide(state, 'onanycreaturebreak', logs, { onlySide: atkIdx });
   const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
   if (atkName === 'bolmeteus steel dragon') {
     opp.graveyard.push({ id: sh.id, key: sh.key });
@@ -651,6 +686,10 @@ function resolveBattle(state, aIdx, aCard, dIdx, dCard, logs) {
   if (!losers.some(l => l[1].key === dCard.key) && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(dName))) losers.push([D, dCard, dIdx]);
 
   logs.push('battle: ' + aName + ' (' + ap + ') vs ' + dName + ' (' + dp + ').');
+  firePar(state, aIdx, aCard, 'onbattle', logs);
+  firePar(state, dIdx, dCard, 'onbattle', logs);
+  if (!losers.some(l => l[1].key === aCard.key)) firePar(state, aIdx, aCard, 'onbattlewin', logs);
+  if (!losers.some(l => l[1].key === dCard.key)) firePar(state, dIdx, dCard, 'onbattlewin', logs);
   for (const [owner, card, ownerIdx] of losers) {
     if (!owner.battlezone.some(c => c.key === card.key)) continue;
     removeBattleCard(owner, card.key);
@@ -668,6 +707,13 @@ const QUIXOTIC_NAME = 'quixotic hero swine snout';
 // that were already out when Quixotic arrived never counted.
 function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
   if (isSpellCard(enteringId)) return;
+  // creatures that react to any creature arriving, or to the OPPONENT summoning
+  fireBoardWide(state, 'onanycreatureenter', logs || [], { exceptKey: enteringKey });
+  const enteringSide = state.players.findIndex(p => p.battlezone.some(c => c.key === enteringKey));
+  if (enteringSide !== -1) {
+    fireBoardWide(state, 'onoppsummon', logs || [], { onlySide: enteringSide === 0 ? 1 : 0 });
+    fireBoardWide(state, 'onoppplay', logs || [], { onlySide: enteringSide === 0 ? 1 : 0 });
+  }
   for (const p of state.players) {
     for (const c of p.battlezone) {
       if (c.key === enteringKey) continue;
@@ -728,6 +774,7 @@ function opponentOf(room, player) {
 // dying doesn't trigger itself.
 function creatureDestroyed(owner, _opp, card, logs, wentToGrave) {
   if (wentToGrave === false) return;
+  if (owner.__state) fireBoardWide(owner.__state, 'onanycreaturedestroyed', logs || [], { exceptKey: card.key });
   const name = cardLabel(card.id).toLowerCase();
   if (name === MONGREL_MAN_NAME) return;
   if (isSpellCard(card.id)) return;
@@ -780,6 +827,218 @@ const ATTACK_TRIGGERS = {
   'sniper mosquito':        { effect: 'ownManaToHand' },
   'trixo, wicked doll':     { effect: 'oppDestroysOwnCreature' }
 };
+
+// ---------------------------------------------------------------------------
+// Continuous ("static:") effects.
+//
+// These aren't fired once — they're recalculated from the board every time anything
+// is asked about a card, so a buff appears the moment its source lands and vanishes
+// the moment it leaves. Everything here is driven by the spreadsheet.
+// ---------------------------------------------------------------------------
+
+function staticClauses(card) {
+  const m = cardMeta(card.id) || {};
+  return (m.parsedEffects || []).filter(e => e.trigger === 'static');
+}
+
+// Does `card` (owned by cardOwnerIdx) match `sel`, as written on a source card
+// owned by srcOwnerIdx?
+function selectorMatches(state, srcOwnerIdx, srcCard, sel, cardOwnerIdx, card) {
+  if (!sel) return false;
+  if (sel.selfOnly) return card.key === srcCard.key;
+  if (sel.side === 'own' && cardOwnerIdx !== srcOwnerIdx) return false;
+  if (sel.side === 'opp' && cardOwnerIdx === srcOwnerIdx) return false;
+  if (sel.excludeSelf && card.key === srcCard.key) return false;
+  if (sel.zone && sel.zone !== 'battle' && sel.zone !== 'played') return false;
+
+  for (const f of sel.filters || []) {
+    let ok;
+    switch (f.key) {
+      case 'race': {
+        const want = (f.value === 'named')
+          ? (state.players[srcOwnerIdx].petrovaRace || srcCard.petrovaRace || '')
+          : f.value;
+        const races = racesOf(card.id);
+        ok = f.op === '~' ? races.some(r => r.includes(String(want).toLowerCase()))
+                          : races.includes(String(want).toLowerCase());
+        break;
+      }
+      case 'civ': ok = civsOf(card.id).includes(f.value); break;
+      case 'power': {
+        const p = powerOf(card.id);
+        if (p == null) { ok = true; break; }
+        ok = f.op === '<=' ? p <= +f.value : f.op === '>=' ? p >= +f.value
+           : f.op === '<' ? p < +f.value : f.op === '>' ? p > +f.value : p === +f.value;
+        break;
+      }
+      case 'tapped': ok = !!card.tapped; break;
+      case 'untapped': ok = !card.tapped; break;
+      case 'blocker': ok = isBlocker(card.id); break;
+      case 'evolution': ok = /evolution/i.test((cardMeta(card.id) || {}).type || ''); break;
+      case 'creature': ok = !isSpellCard(card.id); break;
+      case 'spell': ok = isSpellCard(card.id); break;
+      case 'name': ok = normalizeCardKey(cardLabel(card.id)) === normalizeCardKey(String(f.value)); break;
+      case 'cost': {
+        const c = (cardMeta(card.id) || {}).cost;
+        if (c == null) { ok = true; break; }
+        ok = f.op === '<=' ? c <= +f.value : f.op === '>=' ? c >= +f.value : c === +f.value;
+        break;
+      }
+      default: ok = true;
+    }
+    if (f.negate) ok = !ok;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// "if self.tapped", "if oppTurn", "if attacking", "if ownCreature[...].count>=2"
+function conditionHolds(state, srcOwnerIdx, srcCard, condition, ctx) {
+  if (!condition) return true;
+  const c = condition.toLowerCase();
+  // several conditions joined by "and"
+  if (c.includes(' and ')) {
+    return condition.split(/\s+and\s+/i).every(part => conditionHolds(state, srcOwnerIdx, srcCard, part, ctx));
+  }
+  if (/^self\.tapped$/.test(c)) return !!srcCard.tapped;
+  if (/^self\.untapped$/.test(c)) return !srcCard.tapped;
+  if (/^self\.brokeshieldthisturn$/.test(c)) return !!srcCard.brokeShieldThisTurn;
+  if (/^oppturn$/.test(c)) return state.activeTurn != null && state.activeTurn !== srcOwnerIdx;
+  if (/^ownturn$/.test(c)) return state.activeTurn === srcOwnerIdx;
+  if (/^attacking$/.test(c)) return !!(ctx && ctx.attacking);
+  if (/^blocking$/.test(c)) return !!(ctx && ctx.blocking);
+
+  // comparisons between two zone counts, e.g. "oppShield.count > ownShield.count"
+  const two = condition.match(/^(\S+)\.count\s*(>=|<=|=|>|<)\s*(\S+)\.count$/i);
+  if (two) {
+    const a = countSelector(state, srcOwnerIdx, srcCard, two[1]);
+    const b = countSelector(state, srcOwnerIdx, srcCard, two[3]);
+    switch (two[2]) {
+      case '>=': return a >= b; case '<=': return a <= b;
+      case '>': return a > b;   case '<': return a < b;
+      default: return a === b;
+    }
+  }
+
+  // "<selector>.count >= N"
+  const cm = condition.match(/^(\S+)\.count\s*(>=|<=|=|>|<)\s*(\d+)$/i);
+  if (cm) {
+    const n = countSelector(state, srcOwnerIdx, srcCard, cm[1]);
+    const v = parseInt(cm[3], 10);
+    switch (cm[2]) {
+      case '>=': return n >= v; case '<=': return n <= v;
+      case '>': return n > v;   case '<': return n < v;
+      default: return n === v;
+    }
+  }
+  return true;   // unknown condition: don't block the effect
+}
+
+// how many cards match a selector, used by "per" and count conditions
+function countSelector(state, srcOwnerIdx, srcCard, selText) {
+  const { parseSelector } = require('./effects-parser.js');
+  const sel = typeof selText === 'string' ? parseSelector(selText) : selText;
+  if (!sel) return 0;
+  const own = state.players[srcOwnerIdx], other = state.players[srcOwnerIdx === 0 ? 1 : 0];
+  const zoneList = (p) => ({
+    battle: p.battlezone, mana: p.mana, shield: p.shields, grave: p.graveyard, hand: p.hand
+  }[sel.zone] || []);
+  let list = [];
+  if (sel.side === 'own') list = zoneList(own);
+  else if (sel.side === 'opp') list = zoneList(other);
+  else list = zoneList(own).concat(zoneList(other));
+  return list.filter(c => {
+    if (sel.excludeSelf && c.key === srcCard.key) return false;
+    const ownerIdx = own.battlezone.includes(c) || own.mana.includes(c) ||
+                     own.graveyard.includes(c) || own.hand.includes(c) || own.shields.includes(c)
+                     ? srcOwnerIdx : (srcOwnerIdx === 0 ? 1 : 0);
+    return selectorMatches(state, srcOwnerIdx, srcCard, Object.assign({}, sel, { side: 'any' }), ownerIdx, c);
+  }).length;
+}
+
+// Total power granted to `card` by every static buff currently in play.
+function staticBuffTotal(state, cardOwnerIdx, card, ctx) {
+  let bonus = 0;
+  for (let si = 0; si < state.players.length; si++) {
+    for (const src of state.players[si].battlezone) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'buff') continue;
+        if (!selectorMatches(state, si, src, e.target, cardOwnerIdx, card)) continue;
+        if (!conditionHolds(state, si, src, e.condition, ctx)) continue;
+        const mult = e.per ? countSelector(state, si, src, e.per) : 1;
+        bonus += (e.amount || 0) * mult;
+      }
+    }
+  }
+  return bonus;
+}
+
+// Keywords granted to `card` by static effects (blocker, unblockable, slayer...).
+function grantedKeywords(state, cardOwnerIdx, card) {
+  const out = new Set();
+  const args = {};
+  // keywords granted to this card for the rest of the turn
+  for (const g of (card.tempGrants || [])) { out.add(g.keyword); if (g.arg) args[g.keyword] = g.arg; }
+  for (let si = 0; si < state.players.length; si++) {
+    for (const src of state.players[si].battlezone) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'grant') continue;
+        if (!selectorMatches(state, si, src, e.selector, cardOwnerIdx, card)) continue;
+        if (!conditionHolds(state, si, src, e.condition, null)) continue;
+        const kw = String(e.keyword || '').toLowerCase();
+        out.add(kw);
+        if (e.arg) args[kw] = e.arg;
+      }
+    }
+  }
+  out.args = args;
+  return out;
+}
+
+// Cost adjustment for a card about to be played, from costPlus / costMinus effects.
+function costAdjustment(state, playerIdx, cardId) {
+  let delta = 0, floor = 0;
+  const fake = { id: cardId, key: '__playing__' };
+  for (let si = 0; si < state.players.length; si++) {
+    for (const src of state.players[si].battlezone) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'costPlus' && e.action !== 'costMinus') continue;
+        const sel = e.selector;
+        if (!sel) continue;
+        // 'played' pseudo-zone: match side then filters against the card being played
+        if (sel.side === 'own' && playerIdx !== si) continue;
+        if (sel.side === 'opp' && playerIdx === si) continue;
+        const test = Object.assign({}, sel, { zone: 'battle', side: 'any' });
+        if (!selectorMatches(state, si, src, test, playerIdx, fake)) continue;
+        if (!conditionHolds(state, si, src, e.condition, null)) continue;
+        delta += (e.action === 'costPlus' ? 1 : -1) * (e.amount || 0);
+        if (e.min != null) floor = Math.max(floor, e.min);
+      }
+    }
+  }
+  return { delta, floor };
+}
+
+// Is this player prevented from casting this card? ("prevent anyCast spell[!civ=Light]")
+function castPrevented(state, playerIdx, cardId) {
+  for (let si = 0; si < state.players.length; si++) {
+    for (const src of state.players[si].battlezone) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'prevent') continue;
+        const what = String(e.what || '').toLowerCase();
+        if (what !== 'anycast' && what !== 'oppcast') continue;
+        if (what === 'oppcast' && playerIdx === si) continue;
+        if (!e.selector) continue;
+        const fake = { id: cardId, key: '__playing__' };
+        const test = Object.assign({}, e.selector, { zone: 'battle', side: 'any' });
+        if (selectorMatches(state, si, src, test, playerIdx, fake)) {
+          return cardLabel(src.id);
+        }
+      }
+    }
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Interpreter for sheet-described effects.
@@ -845,6 +1104,7 @@ function listForZone(me, opp, zoneName) {
 // Runs every clause of a card that fires on the given trigger.
 // Returns { defer, sfx } — defer means a prompt now owns the card.
 function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, notices) {
+  const _state = state;
   const meta = cardMeta(cardId) || {};
   const clauses = (meta.parsedEffects || []).filter(e => e.trigger === trigger);
   if (!clauses.length) return { defer: false, handled: false };
@@ -950,8 +1210,118 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         me.pendingTruce = { id: newKey(), source: cardLabel(cardId), spellKey: isSpellCard(cardId) ? cardKey : null };
         defer = true;
         break;
+      case 'moveSelf': {
+        // handled as a replacement when the card is destroyed; nothing to do here
+        break;
+      }
+      case 'grant': {
+        // a keyword granted for the rest of the turn, recorded on the affected cards
+        const zoneName = zoneNameOf(e.selector) || 'ownBattle';
+        const pool = listForZone(me, opp, zoneName);
+        const ex = filtersToEngine(e.selector);
+        let hit = pool.filter(c => matchesExtra(c.id, ex));
+        if (e.selector && e.selector.selfOnly) hit = pool.filter(c => c.key === cardKey);
+        const n = (e.count === 'all') ? hit.length : (typeof e.count === 'number' ? e.count : hit.length);
+        hit.slice(0, n).forEach(c => {
+          c.tempGrants = c.tempGrants || [];
+          c.tempGrants.push({ keyword: String(e.keyword || '').toLowerCase(), arg: e.arg || null });
+        });
+        if (hit.length) logs.push(cardLabel(cardId) + ' granted ' + e.keyword + ' this turn.');
+        break;
+      }
+      case 'buff': {
+        // a temporary power change for the rest of the turn
+        const zoneName = zoneNameOf(e.target) || 'ownBattle';
+        const pool = listForZone(me, opp, zoneName);
+        const ex = filtersToEngine(e.target);
+        const hit = (e.target && e.target.selfOnly)
+          ? pool.filter(c => c.key === cardKey)
+          : pool.filter(c => matchesExtra(c.id, ex));
+        hit.forEach(c => { c.tempBuff = (c.tempBuff || 0) + (e.amount || 0); });
+        if (hit.length) logs.push(cardLabel(cardId) + ' gave +' + e.amount + ' this turn.');
+        break;
+      }
+      case 'ownDiscard': {
+        if (!me.hand.length) break;
+        const count = (e.count === 'all') ? me.hand.length : (typeof e.count === 'number' ? e.count : 1);
+        me.pendingDiscards.push({ id: newKey(), kind: e.optional || e.count === 'all' ? 'choose' : 'choose',
+                                  count: Math.min(count, me.hand.length), source: cardLabel(cardId) });
+        break;
+      }
+      case 'toDeck': {
+        const zoneName = zoneNameOf(e.selector) || 'ownHand';
+        const list = listForZone(me, opp, zoneName);
+        const moved = list.length;
+        while (list.length) { const c = list.shift(); me.deck.push(c.id); }
+        if (e.shuffled) me.deck = shuffle(me.deck);
+        logs.push('put ' + moved + ' card' + (moved === 1 ? '' : 's') + ' back into their deck' + (e.shuffled ? ' and shuffled.' : '.'));
+        break;
+      }
+      case 'toBattle': {
+        // bring a card back from mana/graveyard into the battle zone
+        const zoneName = zoneNameOf(e.selector) || 'ownMana';
+        const ex = filtersToEngine(e.selector);
+        const nameFilter = (e.selector.filters || []).find(f => f.key === 'name');
+        const list = listForZone(me, opp, zoneName);
+        const idx = list.findIndex(c => {
+          if (nameFilter) {
+            const want = nameFilter.value === 'self' ? cardLabel(cardId) : nameFilter.value;
+            return normalizeCardKey(cardLabel(c.id)) === normalizeCardKey(String(want));
+          }
+          return matchesExtra(c.id, ex);
+        });
+        if (idx === -1) break;
+        const [card] = list.splice(idx, 1);
+        const slot = battlefieldSlot(me);
+        me.battlezone.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y,
+                             summonedTurn: state.turnNumber, brokeShieldThisTurn: false, under: [] });
+        onCreatureEnteredBattlezone(state, card.key, card.id, logs);
+        logs.push('put ' + cardLabel(card.id) + ' into the battle zone.');
+        break;
+      }
+      case 'breakShield': {
+        const n = typeof e.count === 'number' ? e.count : 1;
+        for (let i = 0; i < n; i++) {
+          if (!opp.shields.length) break;
+          const sh = opp.shields.shift();
+          opp.hand.push({ id: sh.id, key: sh.key });
+          logs.push('broke a shield with ' + cardLabel(cardId) + '.');
+        }
+        break;
+      }
+      case 'reshuffleHand': {
+        const zoneName = zoneNameOf(e.selector) || 'ownHand';
+        const who = zoneName === 'oppHand' ? opp : me;
+        const n = who.hand.length;
+        while (who.hand.length) { const c = who.hand.shift(); who.deck.push(c.id); }
+        who.deck = shuffle(who.deck);
+        for (let i = 0; i < n; i++) { const c = who.deck.shift(); if (c) who.hand.push({ id: c, key: newKey() }); }
+        logs.push('shuffled ' + n + ' card' + (n === 1 ? '' : 's') + ' back and redrew the same number.');
+        break;
+      }
+      case 'oppKeeps': {
+        // the opponent keeps N and the rest go elsewhere — they choose which
+        const zoneName = zoneNameOf(e.selector) || 'oppShield';
+        const pool = listForZone(me, opp, zoneName);
+        const keep = typeof e.keep === 'number' ? e.keep
+                   : countSelector(state, meIdx, { key: cardKey, id: cardId }, e.keep && e.keep.dynamic ? e.keep.dynamic : 'ownShield');
+        if (pool.length > keep) {
+          opp.pendingMulti = {
+            id: newKey(), source: cardLabel(cardId), zone: zoneName === 'oppShield' ? 'ownShield' : zoneName,
+            action: e.rest === 'destroy' ? 'destroy' : e.rest === 'grave' ? 'toGrave' : 'toHand',
+            max: pool.length - keep, keys: pool.map(c => c.key), spellKey: null,
+            prompt: 'Choose ' + (pool.length - keep) + ' to give up — you keep ' + keep + '.'
+          };
+        }
+        break;
+      }
+      case 'look': {
+        // reveal-to-self: recorded in the log, the peek itself is client-side
+        logs.push('looked at ' + (e.selector ? e.selector.name : 'cards') + '.');
+        break;
+      }
       default:
-        break;   // statics, grants and preventions are handled elsewhere
+        break;   // preventions and oppKeeps are handled elsewhere
     }
   }
   return { defer, handled: true };
@@ -976,6 +1346,46 @@ function applyImmediate(state, owner, card, action, logs) {
     case 'tap': card.tapped = true; break;
     case 'untap': card.tapped = false; break;
     default: break;
+  }
+}
+
+// A discarded card that says "onDiscard: -> battle" enters play instead of the
+// graveyard. Returns true if it was redirected.
+function discardRedirect(state, ownerIdx, card, logs) {
+  const eff = ((cardMeta(card.id) || {}).parsedEffects || [])
+    .find(e => e.trigger === 'ondiscard' && e.action === 'moveSelf');
+  if (!eff) return false;
+  const me = state.players[ownerIdx];
+  if (eff.condition && !conditionHolds(state, ownerIdx, card, eff.condition, null)) return false;
+  if (eff.to === 'battle') {
+    const slot = battlefieldSlot(me);
+    me.battlezone.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y,
+                         summonedTurn: state.turnNumber, brokeShieldThisTurn: false, under: [] });
+    onCreatureEnteredBattlezone(state, card.key, card.id, logs);
+    logs.push(cardLabel(card.id) + ' entered the battle zone instead of being discarded.');
+    return true;
+  }
+  return false;
+}
+
+// Fires a card's own sheet-described effects for a given trigger.
+function firePar(state, ownerIdx, card, trigger, logs) {
+  if (!card) return { defer: false };
+  const oppIdx = ownerIdx === 0 ? 1 : 0;
+  return runParsedEffects(state, ownerIdx, oppIdx, card.id, card.key, trigger, logs || [], []);
+}
+
+// Fires a trigger on every creature in play that listens for it (e.g. a creature that
+// reacts whenever ANY creature enters, or whenever the opponent casts a spell).
+function fireBoardWide(state, trigger, logs, opts) {
+  for (let i = 0; i < state.players.length; i++) {
+    for (const c of state.players[i].battlezone.slice()) {
+      const m = cardMeta(c.id) || {};
+      if (!(m.parsedEffects || []).some(e => e.trigger === trigger)) continue;
+      if (opts && opts.onlySide != null && i !== opts.onlySide) continue;
+      if (opts && opts.exceptKey && c.key === opts.exceptKey) continue;
+      firePar(state, i, c, trigger, logs);
+    }
   }
 }
 
@@ -1559,7 +1969,7 @@ function dealPlayer(room, idx) {
 }
 
 function freshMatchState() {
-  return {
+  const st = {
     gameOver: null, endGameRequestBy: null, surrenderBy: null, rematch: [false, false],
     soundMap: Math.random() < 0.5 ? [0, 1] : [1, 0], // which chat-tone index (0 or 1) each player idx uses
     // Purely advisory — nothing is actually locked to turns, this just tracks
@@ -1570,6 +1980,10 @@ function freshMatchState() {
     combat: null,          // the in-progress attack, if any
     players: [emptyPlayerState(), emptyPlayerState()]
   };
+  // players carry a back-reference so destruction hooks can fire board-wide triggers
+  // non-enumerable so it can never be serialised into a state broadcast
+  st.players.forEach(p => Object.defineProperty(p, '__state', { value: st, enumerable: false, writable: true }));
+  return st;
 }
 
 function cleanupRoom(room) {
@@ -1738,6 +2152,11 @@ wss.on('connection', (ws) => {
             extraLogs.push('returned ' + cardLabel(c.id) + ' to their hand (it broke a shield this turn).');
           }
         }
+        // sheet-described end-of-turn effects for this player's creatures
+        for (const c of me.battlezone.slice()) firePar(s, idx, c, 'endturn', extraLogs);
+        // temporary buffs and granted keywords expire now
+        for (const p of s.players) for (const c of p.battlezone) { c.tempBuff = 0; c.tempGrants = []; }
+
         // per-turn counters reset as the turn passes
         me.spellsCastThisTurn = 0; me.turboRushActive = false; me.brokeShieldThisTurn = false; me.diamondCutterActive = false;
         for (const c of me.battlezone) { c.brokeShieldThisTurn = false; c.attackedThisTurn = false; }
@@ -1775,20 +2194,43 @@ wss.on('connection', (ws) => {
         const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const cardId = me.hand[i].id;
-        // Alcadeias locks out non-light spells for BOTH players, including its controller
+        // "cast: if ..." on the card itself — a condition that must hold to play it
+        {
+          const cm = cardMeta(cardId) || {};
+          const castCond = (cm.parsedEffects || []).find(e => e.trigger === 'cast');
+          if (castCond && castCond.condition) {
+            const fake = { id: cardId, key: '__playing__' };
+            if (!conditionHolds(s, idx, fake, castCond.condition, null)) {
+              send(ws, { type: 'summonRejected', reason: cardLabel(cardId) + " can't be cast right now — its condition isn't met (" + castCond.condition + ")." });
+              return;
+            }
+          }
+        }
+
+        // Casting restrictions, driven by whatever is on the table (Alcadeias etc.)
+        const blockedBy = castPrevented(s, idx, cardId);
+        if (blockedBy) {
+          send(ws, { type: 'summonRejected', reason: blockedBy + ' prevents you from casting that.' });
+          return;
+        }
+        // fallback for Alcadeias if its Effect text hasn't been filled in
         if (isSpellCard(cardId) && !civsOf(cardId).includes('Light')) {
-          const holder = [me, opp].find(p => p.battlezone.some(c => cardLabel(c.id).toLowerCase() === ALCADEIAS_NAME));
+          const holder = [me, opp].find(p => p.battlezone.some(c => {
+            const cm = cardMeta(c.id) || {};
+            return normalizeCardKey(cardLabel(c.id)) === ALCADEIAS_NAME && !(cm.parsedEffects || []).length;
+          }));
           if (holder) {
             send(ws, { type: 'summonRejected', reason: 'Alcadeias, Lord of Spirits is in the battle zone — only light spells can be cast.' });
             return;
           }
         }
         const metaRaw = cardMeta(cardId);
-        // Volcano Smog, Deceptive Shade taxes Light cards by 2 while it's in play
-        const smog = [me, opp].some(p => p.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'volcano smog, deceptive shade'));
-        const meta = (metaRaw && smog && civsOf(cardId).includes('Light') && metaRaw.cost != null)
-          ? Object.assign({}, metaRaw, { cost: metaRaw.cost + 2 })
-          : metaRaw;
+        // cost changes from anything in play (Volcano Smog, Cocco Lupia, Elf-X...)
+        let meta = metaRaw;
+        if (metaRaw && metaRaw.cost != null) {
+          const adj = costAdjustment(s, idx, cardId);
+          if (adj.delta) meta = Object.assign({}, metaRaw, { cost: Math.max(adj.floor || 0, metaRaw.cost + adj.delta) });
+        }
         // A card the database doesn't recognise would silently bypass the mana cost AND
         // never be treated as a spell, so it would sit on the battlefield forever.
         // Refuse it outright and name it, so the mismatch is obvious and fixable.
@@ -1854,8 +2296,10 @@ wss.on('connection', (ws) => {
                              brokeShieldThisTurn: false, under: stack });
         onCreatureEnteredBattlezone(s, c.key, c.id, extraLogs);
         if (evoBase) extraLogs.push('evolved ' + cardLabel(c.id) + ' from ' + cardLabel(evoBase.id) + '.');
-        if (isSpellCard(c.id)) me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
-        else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
+        if (isSpellCard(c.id)) {
+          me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
+          fireBoardWide(s, 'onoppcast', extraLogs, { onlySide: oppIdx });
+        } else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
         // Turbo Rush: if one of your creatures already broke a shield this turn, your
         // creatures gain Speed Attacker for the rest of it
         if (metaOf(c.id).turboRush && me.brokeShieldThisTurn) {
@@ -2045,6 +2489,7 @@ wss.on('connection', (ws) => {
                                      filter: null, requireBlocker: !!ability.requireBlocker,
                                      source: cardLabel(c.id), spellKey: null });
           }
+          firePar(s, idx, c, 'tapability', extraLogs);
           logText = 'used ' + cardLabel(c.id) + "'s tap ability instead of attacking.";
           break;
         }
@@ -2360,6 +2805,9 @@ wss.on('connection', (ws) => {
           case 'toGrave':
             list.splice(ci, 1);
             owner.graveyard.push({ id: card.id, key: card.key });
+            // a creature that reacts to the opponent's mana being destroyed
+            if (eff.zone === 'ownMana' && owner !== me) fireBoardWide(s, 'onoppmanatograve', extraLogs, { onlySide: idx });
+            if (eff.zone === 'oppMana') fireBoardWide(s, 'onoppmanatograve', extraLogs, { onlySide: idx });
             logText = 'used ' + eff.source + ' to put ' + label + ' into the graveyard.';
             break;
           case 'toTopOfDeck':
@@ -2614,6 +3062,8 @@ wss.on('connection', (ws) => {
         atk.tapped = true;
         atk.attackedThisTurn = true;
         fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'declare');
+        firePar(s, idx, atk, 'onattack', extraLogs);
+        if (target.type === 'shield') firePar(s, idx, atk, 'onplayerattack', extraLogs);
 
         const canBlock = hasLegalBlocker(s, opp, atk);
         s.combat = {
@@ -2667,6 +3117,8 @@ wss.on('connection', (ws) => {
           }
           blk.tapped = true;
           logText = 'blocked with ' + cardLabel(blk.id) + '.';
+          firePar(s, idx, blk, 'onblock', extraLogs);
+          firePar(s, cb.attackerIdx, atk, 'onblocked', extraLogs);
           const res = resolveBattle(s, cb.attackerIdx, atk, idx, blk, extraLogs);
           s.combat = null;
           if (res.needsManual) manualBattle = res.needsManual;
@@ -2675,6 +3127,10 @@ wss.on('connection', (ws) => {
 
         // no block: the attack lands
         logText = 'chose not to block.';
+        {
+          const atkC = attacker.battlezone.find(c => c.key === cb.attackerKey);
+          if (atkC) firePar(s, cb.attackerIdx, atkC, 'onunblockedattack', extraLogs);
+        }
         if (cb.target.type === 'creature') {
           const victim = me.battlezone.find(c => c.key === cb.target.key);
           if (victim) {
@@ -2810,6 +3266,8 @@ wss.on('connection', (ws) => {
       logMsg(room, w, 'won the game — the final attack connected with no shields left to defend.');
     }
     if (shieldTriggerFor) {
+      // creatures that react when the OPPONENT uses a shield trigger
+      fireBoardWide(s, 'onoppshieldtrigger', extraLogs, { onlySide: shieldTriggerFor.idx === 0 ? 1 : 0 });
       const target = s.players[shieldTriggerFor.idx];
       target.pendingShieldTriggers = target.pendingShieldTriggers || [];
       target.pendingShieldTriggers.push(shieldTriggerFor.key);
