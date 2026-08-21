@@ -405,6 +405,11 @@ const Bot = (() => {
       }[pm.zone] || [];
       let cands = pm.keys.map(k => pool.find(c => c.key === k)).filter(Boolean);
       const takingBack = (pm.action === 'toHand' || pm.action === 'toOwnMana');
+      const harmful = (pm.action === 'destroy' || pm.action === 'toGrave' || pm.action === 'returnToHand');
+      if (pm.zone === 'anyBattle' && harmful) {
+        const enemy = cands.filter(c => opp.battlezone.some(o => o.key === c.key));
+        if (enemy.length) cands = enemy;
+      }
       cands.sort((a, b) => takingBack ? (powerOf(b.id) - powerOf(a.id)) : (isThreat(b) - isThreat(a)));
       const max = pm.max && pm.max < 90 ? pm.max : cands.length;
       const keys = cands.slice(0, max).map(c => c.key);
@@ -434,6 +439,14 @@ const Bot = (() => {
       if (!cands.length) { act(() => send({ type: 'effectTargetSkip', effectId: eff.id }), DELAY.fast); return true; }
       // hitting the opponent: take their best. Choosing its own: give up the weakest.
       const ownZone = (eff.zone === 'ownBattle' || eff.zone === 'ownHand' || eff.zone === 'ownMana' || eff.zone === 'ownShield');
+      // "anyBattle" lets an effect hit either side. For anything destructive that
+      // should mean the OPPONENT — blowing up its own creature was a real blunder.
+      const destructive = (eff.action === 'destroy' || eff.action === 'toGrave' ||
+                           eff.action === 'toOwnerMana' || eff.action === 'toTopOfDeck');
+      if (eff.zone === 'anyBattle' && destructive) {
+        const enemy = cands.filter(c => opp.battlezone.some(o => o.key === c.key));
+        if (enemy.length) cands = enemy;
+      }
       if (ownZone) {
         // giving something up: pick the least valuable thing it owns
         cands.sort((a, b) => (isThreat(a) || powerOf(a.id)) - (isThreat(b) || powerOf(b.id)));
