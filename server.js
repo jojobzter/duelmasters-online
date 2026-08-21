@@ -1159,6 +1159,16 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
   const me = state.players[meIdx], opp = state.players[oppIdx];
   let defer = false;
 
+  const selfRef = { key: cardKey, id: cardId };
+  // "up to ownCreature[civ=Light].count" is a number that depends on the board —
+  // work it out now, otherwise it stays an object and every count check fails.
+  const resolveCount = (c) => {
+    if (c && typeof c === 'object' && c.dynamic) {
+      return countSelector(state, meIdx, selfRef, c.dynamic);
+    }
+    return c;
+  };
+
   for (const e of clauses) {
     // a clause only fires when its own condition holds — "if self.brokeShieldThisTurn"
     // and friends were previously ignored outside static effects
@@ -1168,7 +1178,8 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
     }
     switch (e.action) {
       case 'draw': {
-        const n = typeof e.count === 'number' ? e.count : 1;
+        const rc = resolveCount(e.count);
+        const n = typeof rc === 'number' ? rc : 1;
         let drawn = 0;
         for (let i = 0; i < n; i++) { const c = me.deck.shift(); if (!c) break; me.hand.push({ id: c, key: newKey() }); drawn++; }
         logs.push('drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + ' with ' + cardLabel(cardId) + '.');
@@ -1204,11 +1215,13 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       case 'toShield': case 'toDeckTop': case 'tap': case 'untap': {
         const zoneName = zoneNameOf(e.selector);
         if (!zoneName) break;
+        const wantCount = resolveCount(e.count);
+        if (wantCount === 0) { logs.push(cardLabel(cardId) + ': nothing to choose (count is zero).'); break; }
         const ex = filtersToEngine(e.selector);
         const engineAction = PARSED_ACTION_MAP[e.action];
 
         // "all" resolves immediately with no choice
-        if (e.count === 'all' && !e.optional) {
+        if (wantCount === 'all' && !e.optional) {
           const pool = listForZone(me, opp, zoneName).slice();
           const hit = [];
           for (const card of pool) {
@@ -1237,7 +1250,7 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           source: cardLabel(cardId), sourceKey: cardKey,
           spellKey: isSpellCard(cardId) ? cardKey : null
         };
-        const wantsMany = (e.count === 'all') || (typeof e.count === 'number' && e.count > 1);
+        const wantsMany = (wantCount === 'all') || (typeof wantCount === 'number' && wantCount > 1);
         if (wantsMany) {
           const pool = listForZone(me, opp, zoneName)
             .filter(c => c.key !== cardKey)
@@ -1252,9 +1265,9 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
             .filter(c => !(zoneName === 'oppBattle' && isUnchoosable(c.id)));
           if (pool.length) {
             me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: zoneName,
-                                action: engineAction, max: e.count === 'all' ? 99 : e.count,
+                                action: engineAction, max: wantCount === 'all' ? 99 : wantCount,
                                 keys: pool.map(c => c.key), spellKey: base.spellKey,
-                                prompt: 'Choose up to ' + (e.count === 'all' ? 'any number of' : e.count) + ' card(s).' };
+                                prompt: 'Choose up to ' + (wantCount === 'all' ? 'any number of' : wantCount) + ' card(s).' };
             defer = true;
           } else logs.push(cardLabel(cardId) + ': no legal target.');
         } else if (legalTargetCount(me, opp, base) > 0) {
@@ -1298,13 +1311,14 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         break;
       }
       case 'grant': {
+        const grantCount = resolveCount(e.count);
         // a keyword granted for the rest of the turn, recorded on the affected cards
         const selfKw = !!(e.selector && e.selector.selfOnly);
         const zoneName = selfKw ? 'ownBattle' : (zoneNameOf(e.selector) || 'ownBattle');
         const pool = listForZone(me, opp, zoneName);
         const ex = filtersToEngine(e.selector);
         let hit = selfKw ? pool.filter(c => c.key === cardKey) : pool.filter(c => matchesExtra(c.id, ex));
-        const n = (e.count === 'all') ? hit.length : (typeof e.count === 'number' ? e.count : hit.length);
+        const n = (grantCount === 'all') ? hit.length : (typeof grantCount === 'number' ? grantCount : hit.length);
         hit.slice(0, n).forEach(c => {
           c.tempGrants = c.tempGrants || [];
           c.tempGrants.push({ keyword: String(e.keyword || '').toLowerCase(), arg: e.arg || null });
