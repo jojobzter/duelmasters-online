@@ -1140,6 +1140,12 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
   let defer = false;
 
   for (const e of clauses) {
+    // a clause only fires when its own condition holds — "if self.brokeShieldThisTurn"
+    // and friends were previously ignored outside static effects
+    if (e.condition) {
+      const selfCard = me.battlezone.find(c => c.key === cardKey) || { key: cardKey, id: cardId };
+      if (!conditionHolds(state, meIdx, selfCard, e.condition, null)) continue;
+    }
     switch (e.action) {
       case 'draw': {
         const n = typeof e.count === 'number' ? e.count : 1;
@@ -1248,7 +1254,27 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         defer = true;
         break;
       case 'moveSelf': {
-        // handled as a replacement when the card is destroyed; nothing to do here
+        // On destruction this is a replacement handled in battleCardToGrave. For any
+        // other trigger (endTurn: -> hand, and so on) it moves the card right now.
+        if (trigger === 'ondestroy' || trigger === 'ondiscard') break;
+        const i = me.battlezone.findIndex(c => c.key === cardKey);
+        if (i === -1) break;
+        const [self] = me.battlezone.splice(i, 1);
+        const dest = (e.to || 'hand').toLowerCase();
+        if (dest === 'mana') {
+          dissolveStack(me, self, logs, 'hand');
+          const sl = manaSlot(me);
+          me.mana.push({ id: self.id, key: self.key, tapped: false, x: sl.x, y: sl.y });
+          logs.push('returned ' + cardLabel(self.id) + ' to their mana zone.');
+        } else if (dest === 'grave') {
+          dissolveStack(me, self, logs, 'graveyard');
+          me.graveyard.push({ id: self.id, key: self.key });
+          logs.push('put ' + cardLabel(self.id) + ' into the graveyard.');
+        } else {
+          dissolveStack(me, self, logs, 'hand');
+          me.hand.push({ id: self.id, key: self.key });
+          logs.push('returned ' + cardLabel(self.id) + ' to their hand.');
+        }
         break;
       }
       case 'grant': {
