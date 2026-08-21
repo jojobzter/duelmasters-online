@@ -509,6 +509,7 @@ function effectivePower(state, ownerIdx, card, attacking) {
   // Every Petrova names its own race, and each one grants +4000 independently.
   for (const pet of owner.battlezone) {
     if (normalizeCardKey(cardLabel(pet.id)) !== PETROVA_NAME) continue;
+    if (hasSheetEffects(pet.id)) continue;        // the sheet already applies this
     if (!pet.petrovaRace || pet.key === card.key) continue;
     if (racesOf(card.id).includes(pet.petrovaRace.toLowerCase())) p += 4000;
   }
