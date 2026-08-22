@@ -1912,14 +1912,18 @@ function applySelectableHighlights(state, me, opp) {
   activeSelection = selectableKeysFor(state, me, opp);
   document.querySelectorAll('.card.selectable-target, .card.chosen-target')
     .forEach(el => el.classList.remove('selectable-target', 'chosen-target'));
+  // the DOM is about to be re-keyed below, so any previous hover no longer applies —
+  // the player just needs to nudge the mouse to bring the arrow back
+  hoverTargetKey = null;
   const bar = document.getElementById('select-bar');
   if (!activeSelection || !activeSelection.keys.size) {
-    if (!activeSelection) { bar.style.display = 'none'; return; }
+    if (!activeSelection) { bar.style.display = 'none'; updateIntentArrow(state, me, opp); return; }
     // a prompt with no clickable cards can still be actionable (e.g. the winning attack)
     document.getElementById('select-bar-text').textContent =
       activeSelection.banner + (activeSelection.showConfirm ? '' : ' (nothing valid)');
     bar.style.display = 'flex';
     wireSelectBarButtons();
+    updateIntentArrow(state, me, opp);
     return;
   }
   activeSelection.keys.forEach(key => {
@@ -1930,11 +1934,89 @@ function applySelectableHighlights(state, me, opp) {
         e.stopPropagation();
         activeSelection.onClick(key);
       };
+      // faint preview arrow: whoever's picking a target sees, live, where a creature
+      // is lined up to strike before they commit to the click
+      el.addEventListener('mouseenter', () => { hoverTargetKey = key; updateIntentArrow(state, me, opp); });
+      el.addEventListener('mouseleave', () => {
+        if (hoverTargetKey === key) { hoverTargetKey = null; updateIntentArrow(state, me, opp); }
+      });
     });
   });
   document.getElementById('select-bar-text').textContent = activeSelection.banner;
   bar.style.display = 'flex';
   wireSelectBarButtons();
+  updateIntentArrow(state, me, opp);
+}
+
+// ---- faint intent arrow: attacker -> target, live while choosing / fixed once declared ----
+let hoverTargetKey = null;
+function cardCenterInTable(key) {
+  const tableEl = document.getElementById('table');
+  const el = document.querySelector('.card[data-key="' + key + '"]');
+  if (!tableEl || !el) return null;
+  const t = tableEl.getBoundingClientRect(), c = el.getBoundingClientRect();
+  if (!c.width || !c.height) return null;
+  return { x: c.left + c.width / 2 - t.left, y: c.top + c.height / 2 - t.top };
+}
+function zoneCenterInTable(elId) {
+  const tableEl = document.getElementById('table');
+  const el = document.getElementById(elId);
+  if (!tableEl || !el) return null;
+  const t = tableEl.getBoundingClientRect(), c = el.getBoundingClientRect();
+  return { x: c.left + c.width / 2 - t.left, y: c.top + c.height / 2 - t.top };
+}
+function computeIntentArrow(state, me, opp) {
+  const cb = state.combat;
+  if (cb) {
+    // an attack has been declared: show attacker -> target for both players, since
+    // the defender needs to see it too while deciding whether to block
+    const iAmAttacker = cb.attackerIdx === state.you;
+    const source = cardCenterInTable(cb.attackerKey);
+    if (!source) return null;
+    let target = null;
+    if (cb.phase === 'breaking' && iAmAttacker) {
+      // double/triple breakers pick shields one at a time — point at whichever
+      // shield the attacker is currently hovering, or the shield row in general
+      if (hoverTargetKey && opp.shields.some(sh => sh.key === hoverTargetKey)) {
+        target = cardCenterInTable(hoverTargetKey);
+      }
+      if (!target) target = zoneCenterInTable('opp-shields');
+    } else if (cb.target && cb.target.type === 'creature') {
+      target = cardCenterInTable(cb.target.key);
+    } else if (cb.target && cb.target.type === 'shield') {
+      target = zoneCenterInTable(iAmAttacker ? 'opp-shields' : 'my-shields');
+    }
+    if (!target) return null;
+    return { source, target, committed: true };
+  }
+  // nothing declared yet: preview where an attack would land while the attacking
+  // player is still choosing (hovering a legal creature or shield to attack)
+  if (attackMode && hoverTargetKey && activeSelection && activeSelection.keys.has(hoverTargetKey)) {
+    const source = cardCenterInTable(attackMode.key);
+    const target = cardCenterInTable(hoverTargetKey);
+    if (source && target) return { source, target, committed: false };
+  }
+  return null;
+}
+window.addEventListener('resize', () => {
+  if (window.__lastState) updateIntentArrow(window.__lastState, window.__lastMe, window.__lastOpp);
+});
+function updateIntentArrow(state, me, opp) {
+  const layer = document.getElementById('intent-arrow-layer');
+  if (!layer) return;
+  const arrow = computeIntentArrow(state, me, opp);
+  if (!arrow) { layer.classList.remove('showing', 'committed'); return; }
+  const line = document.getElementById('intent-arrow-line');
+  // pull the head back off the target card a little so it doesn't vanish under it
+  const dx = arrow.target.x - arrow.source.x, dy = arrow.target.y - arrow.source.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const pullBack = Math.min(38, dist * 0.28);
+  line.setAttribute('x1', arrow.source.x);
+  line.setAttribute('y1', arrow.source.y);
+  line.setAttribute('x2', arrow.target.x - (dx / dist) * pullBack);
+  line.setAttribute('y2', arrow.target.y - (dy / dist) * pullBack);
+  layer.classList.add('showing');
+  layer.classList.toggle('committed', arrow.committed);
 }
 function wireSelectBarButtons() {
   const sk = document.getElementById('btn-select-skip');
@@ -2295,7 +2377,7 @@ function renderState(state) {
   applySelectionClasses();
   applySelectableHighlights(state, me, opp);
   flashMovedCards(state);
-  window.__lastMe = me; window.__lastOpp = opp;
+  window.__lastMe = me; window.__lastOpp = opp; window.__lastState = state;
 }
 
 function renderManaZone(elId, mana, isMine, ownerIdx, pendingManaDiscards) {

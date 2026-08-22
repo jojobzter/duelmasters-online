@@ -160,7 +160,25 @@ input {
 
 /* ---- Table ---- */
 .table-screen { display: flex; gap: 12px; align-items: flex-start; font-size: 1.05em; max-width: min(2100px, 100%); margin: 0 auto; }
-#table { flex: 1; min-width: 0; max-width: 100%; overflow: visible; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
+#table { position: relative; flex: 1; min-width: 0; max-width: 100%; overflow: visible; box-sizing: border-box; background: #0d3b24; border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 5px; }
+
+/* faint intent arrow: shows what a creature is about to attack, or which
+   shield it's lining up to break, while the player is choosing a target */
+#intent-arrow-layer {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 45; overflow: visible;
+  opacity: 0; transition: opacity .12s ease-out;
+}
+#intent-arrow-layer.showing { opacity: 1; }
+#intent-arrow-layer.committed { opacity: .85; }
+#intent-arrow-line {
+  stroke: #ffcc55; stroke-width: 3; stroke-linecap: round; stroke-dasharray: 2 9;
+  animation: intent-arrow-flow 0.9s linear infinite;
+}
+#intent-arrow-layer.committed #intent-arrow-line { stroke: #ff6b57; stroke-dasharray: 3 8; }
+#intent-arrowhead polygon { fill: #ffcc55; }
+#intent-arrow-layer.committed #intent-arrowhead polygon { fill: #ff6b57; }
+@keyframes intent-arrow-flow { to { stroke-dashoffset: -22; } }
 .mana-count { color: #7fd4a0; font-weight: 600; letter-spacing: 0; }
 .mana-count.none-left { color: #d08a8a; }
 .zone-label { font-size: 0.68em; color: #bcd; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; }
