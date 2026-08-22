@@ -589,14 +589,33 @@ function breakerCount(state, ownerIdx, card) {
 }
 
 function restrictionOf(id) { return (metaOf(id).attackRestriction || 'none').toLowerCase(); }
-function canAttackAtAll(id) { return !restrictionOf(id).includes('cannot attack'); }
+// Only true for the bare, unconditional "cannot attack" restriction — a creature that
+// can't attack at all, full stop. Restrictions that only limit WHAT it can attack
+// ("cannot attack creatures", "not players") or that depend on the board state
+// ("...while...", "...if hand empty") are handled separately below, not lumped in here —
+// a loose substring match on "cannot attack" previously caught all of those too and
+// wrongly blocked shield attacks for cards like Vile Mulder.
+function canAttackAtAll(id) { return restrictionOf(id) !== 'cannot attack'; }
 function canAttackShields(id) {
   const r = restrictionOf(id);
-  return !r.includes('cannot attack') && !r.includes('not players') && !r.includes('blocker only');
+  return r !== 'cannot attack' && !r.includes('not players') && !r.includes('blocker only');
 }
 function canAttackUntapped(id) { return restrictionOf(id).includes('untapped ok'); }
 function mustAttackIfAble(id) { return restrictionOf(id).includes('if able'); }
 function blockerOnly(id) { return restrictionOf(id).includes('blocker only'); }
+// Board-state-dependent restrictions (Cliffcrush Giant, Headlong Giant). Returns a
+// reason string if this specific creature currently can't attack at all, else null.
+function conditionalAttackBlock(card, me) {
+  const r = restrictionOf(card.id);
+  if (r === 'cannot attack while other own creature untapped') {
+    if (me.battlezone.some(c => c.key !== card.key && !c.tapped)) {
+      return cardLabel(card.id) + " can't attack while you have another untapped creature.";
+    }
+  } else if (r === 'cannot attack if hand empty') {
+    if (!me.hand.length) return cardLabel(card.id) + " can't attack — your hand is empty.";
+  }
+  return null;
+}
 
 // Summoning sickness, unless the creature has Speed Attacker or Turbo Rush is active.
 function hasSummoningSickness(state, ownerIdx, card) {
@@ -3299,6 +3318,10 @@ wss.on('connection', (ws) => {
         const dc = !!me.diamondCutterActive;
         const dcShieldRun = dc && (msg.target || {}).type === 'shield';
         if (!dcShieldRun && !canAttackAtAll(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack." }); return; }
+        if (!dcShieldRun) {
+          const condReason = conditionalAttackBlock(atk, me);
+          if (condReason) { send(ws, { type: 'summonRejected', reason: condReason }); return; }
+        }
         if (!dc && hasSummoningSickness(s, idx, atk)) {
           send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' has summoning sickness — it can\'t attack the turn it was summoned.' });
           return;
