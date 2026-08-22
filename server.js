@@ -3572,6 +3572,20 @@ wss.on('connection', (ws) => {
 
       default: return;
     }
+    // Register a shield-trigger offer BEFORE the state broadcast below, not after.
+    // broadcastState() is the only thing that puts pendingShieldTriggers on the
+    // wire (as pendingPromptCount), so if we broadcast first and register second,
+    // both players briefly see a state where nobody is waiting on anything — and
+    // an opponent (especially the bot, which reacts the instant a state arrives)
+    // can act into an attack whose trigger hasn't been offered yet. Registering
+    // first means the one broadcastState() below already reflects it.
+    if (shieldTriggerFor) {
+      // creatures that react when the OPPONENT uses a shield trigger
+      fireBoardWide(s, 'onoppshieldtrigger', extraLogs, { onlySide: shieldTriggerFor.idx === 0 ? 1 : 0 });
+      const target = s.players[shieldTriggerFor.idx];
+      target.pendingShieldTriggers = target.pendingShieldTriggers || [];
+      target.pendingShieldTriggers.push(shieldTriggerFor.key);
+    }
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
     extraLogs.forEach(t => logMsg(room, idx, t));
@@ -3587,14 +3601,8 @@ wss.on('connection', (ws) => {
       logMsg(room, w, 'won the game — the final attack connected with no shields left to defend.');
     }
     if (shieldTriggerFor) {
-      // creatures that react when the OPPONENT uses a shield trigger
-      fireBoardWide(s, 'onoppshieldtrigger', extraLogs, { onlySide: shieldTriggerFor.idx === 0 ? 1 : 0 });
-      const target = s.players[shieldTriggerFor.idx];
-      target.pendingShieldTriggers = target.pendingShieldTriggers || [];
-      target.pendingShieldTriggers.push(shieldTriggerFor.key);
       const tws = room.sockets[shieldTriggerFor.idx];
       if (tws) send(tws, { type: 'shieldTriggerOffer', key: shieldTriggerFor.key, id: shieldTriggerFor.id });
-      broadcastState(room);
     }
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
     if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, costEquals: me.pendingSearch.costEquals != null ? me.pendingSearch.costEquals : null, source: me.pendingSearch.source });
