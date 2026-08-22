@@ -1529,12 +1529,28 @@ function isSummoningSick(state, card) {
   return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
 }
 function restrictionFor(id) { return (cardMetaFor(id).attackRestriction || 'none').toLowerCase(); }
+// Only the bare "cannot attack" fully blocks shields — "cannot attack creatures" (Vile
+// Mulder, Avalanche Giant, Nocturnal Giant) still allows shield attacks; a loose
+// substring match previously caught that phrase too and hid the shield-attack button.
 function canAttackShieldsC(id) {
   const r = restrictionFor(id);
-  return !r.includes('cannot attack') && !r.includes('not players') && !r.includes('blocker only');
+  return r !== 'cannot attack' && !r.includes('not players') && !r.includes('blocker only');
 }
 function canAttackUntappedC(id) { return restrictionFor(id).includes('untapped ok'); }
 function blockerOnlyC(id) { return restrictionFor(id).includes('blocker only'); }
+// Board-state-dependent restrictions (Cliffcrush Giant, Headlong Giant). Returns a
+// reason string if this specific creature currently can't attack at all, else null.
+function conditionalAttackBlockC(card, me) {
+  const r = restrictionFor(card.id);
+  if (r === 'cannot attack while other own creature untapped') {
+    if (me.battlezone.some(c => c.key !== card.key && !c.tapped)) {
+      return displayName(card.id) + " can't attack while you have another untapped creature.";
+    }
+  } else if (r === 'cannot attack if hand empty') {
+    if (!me.hand.length) return displayName(card.id) + " can't attack — your hand is empty.";
+  }
+  return null;
+}
 
 // Step 1 — pick what this creature is attacking.
 function openAttackTargetModal(card, state) {
@@ -2586,10 +2602,11 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
         // Diamond Cutter lets anything swing at shields this turn, so the option stays live
         const dcActive = !!(st && st.players[st.you] && st.players[st.you].diamondCutterActive);
         let attackBlockedBy = null;
-        if (restr.includes('cannot attack') && !dcActive) attackBlockedBy = "This creature can't attack.";
+        if (restr === 'cannot attack' && !dcActive) attackBlockedBy = "This creature can't attack.";
         else if (!myTurn) attackBlockedBy = 'You can only attack on your own turn.';
         else if (st && st.combat) attackBlockedBy = 'An attack is already being resolved.';
         else if (isSummoningSick(st, c) && !dcActive) attackBlockedBy = 'Summoning sickness — it can\'t attack the turn it arrived.';
+        else if (!dcActive && st) attackBlockedBy = conditionalAttackBlockC(c, st.players[st.you]);
         if (!c.tapped) {
           items.push(['\u2694 Attack', () => { attackMode = { key: c.key }; renderState(st); }, attackBlockedBy]);
           if (meta.tapAbility) items.push(['Use tap ability', () => sendMsg({ type: 'battleTap', key: c.key, mode: 'ability' })]);
