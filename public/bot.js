@@ -26,6 +26,8 @@ const Bot = (() => {
   let heartbeat = null;
   let lastProgressAt = Date.now();
   let votedRematch = false;
+  let answeredEndGameBy = null;   // which requester's ask we've already answered, so we don't resend every heartbeat
+  let answeredSurrenderBy = null;
 
   const DELAY = { fast: 420, normal: 700, slow: 950 };
 
@@ -589,6 +591,23 @@ const Bot = (() => {
       repeatCount = 0;
       lastProgressAt = Date.now();
     }
+
+    // There's no human on the other end to ask, so the bot always agrees to leave —
+    // otherwise "End Game" or "Surrender" against the computer waits forever on a
+    // reply that's never coming.
+    if (state.endGameRequestBy !== null && state.endGameRequestBy !== state.you && answeredEndGameBy !== state.endGameRequestBy) {
+      answeredEndGameBy = state.endGameRequestBy;
+      act(() => send({ type: 'respondEndGame', accept: true }), DELAY.fast);
+      return;
+    }
+    if (state.endGameRequestBy === null) answeredEndGameBy = null;
+    if (state.surrenderBy !== null && state.surrenderBy !== state.you && answeredSurrenderBy !== state.surrenderBy) {
+      answeredSurrenderBy = state.surrenderBy;
+      act(() => send({ type: 'acceptSurrender' }), DELAY.fast);
+      return;
+    }
+    if (state.surrenderBy === null) answeredSurrenderBy = null;
+
     if (thinkingTimer) return;                    // an action is already queued
 
     // Outstanding prompts are ALWAYS answered first, before any stall protection.
