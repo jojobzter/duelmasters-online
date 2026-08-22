@@ -50,7 +50,11 @@ function findCardDataFile() {
 function loadCardDatabase(filePath) {
   try {
     const wb = XLSX.readFile(filePath);
-    const sheet = wb.Sheets[wb.SheetNames[0]];
+    // The workbook may have multiple tabs (e.g. "Export Summary", "Cards", "Notes").
+    // Always use the one actually named "Cards" if present, instead of assuming
+    // it's first — falls back to the first sheet only if no "Cards" tab exists.
+    const cardsSheetName = wb.SheetNames.find(n => n.trim().toLowerCase() === 'cards') || wb.SheetNames[0];
+    const sheet = wb.Sheets[cardsSheetName];
     const rows = XLSX.utils.sheet_to_json(sheet);
     const db = new Map();
     const parseProblems = [];
