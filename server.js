@@ -249,6 +249,9 @@ function buildEffectIndex() {
     if (c.effectProps && c.effectProps.resolvesTo) {
       put(key, { resolvesTo: c.effectProps.resolvesTo.to, resolvesTapped: !!c.effectProps.resolvesTo.tapped });
     }
+    if (c.effectProps && c.effectProps.noAutoUntap) {
+      put(key, { noAutoUntap: true });
+    }
   }
   return idx;
 }
@@ -1581,6 +1584,13 @@ function hasSheetEffects(cardId) {
   return (m.parsedEffects || []).length > 0;
 }
 function hasSheetStatic(cardId) { return hasSheetEffects(cardId); }
+// A card described with the "noAutoUntap" property (e.g. Venom Capsule) sits out
+// the automatic untap step — it only untaps via a manual right-click or an
+// effect that explicitly untaps it.
+function skipsAutoUntap(cardId) {
+  const m = cardMeta(cardId) || {};
+  return !!(m.effectProps && m.effectProps.noAutoUntap);
+}
 
 // Fires a card's own sheet-described effects for a given trigger.
 function firePar(state, ownerIdx, card, trigger, logs) {
@@ -2396,13 +2406,20 @@ wss.on('connection', (ws) => {
 
         s.activeTurn = oppIdx;
         s.turnNumber = (s.turnNumber || 0) + 1;
-        // start-of-turn effects for the player whose turn is beginning
+        // start-of-turn effects for the player whose turn is beginning — these fire
+        // BEFORE the untap step below, so "if self.tapped" still sees last turn's
+        // tapped state (needed for cards like Venom Capsule).
         for (const c of opp.battlezone.slice()) firePar(s, oppIdx, c, 'startturn', extraLogs);
         for (const c of me.battlezone.slice()) firePar(s, idx, c, 'oppstartturn', extraLogs);
-        // untap step: the player whose turn is starting untaps their mana and creatures
+        // untap step: the player whose turn is starting untaps their mana and creatures —
+        // except a creature marked noAutoUntap (e.g. Venom Capsule), which stays tapped
+        // until manually untapped or untapped by an effect.
         let untapped = 0;
         for (const m of opp.mana) { if (m.tapped) { m.tapped = false; untapped++; } }
-        for (const c of opp.battlezone) { if (c.tapped) { c.tapped = false; untapped++; } c.atkResolved = false; }
+        for (const c of opp.battlezone) {
+          if (c.tapped && !skipsAutoUntap(c.id)) { c.tapped = false; untapped++; }
+          c.atkResolved = false;
+        }
         // Miraculous Truce expires at the start of its caster's next turn
         if (opp.truceUntilTurn != null && s.turnNumber >= opp.truceUntilTurn) { opp.truceCiv = null; opp.truceUntilTurn = null; }
         logText = 'ended their turn.' + (untapped ? " (Opponent's cards untapped.)" : '');

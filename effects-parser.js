@@ -112,6 +112,10 @@ function parseClause(raw, cardName) {
   let m = clause.match(/^resolvesTo\s+(mana|grave|hand)(\s+tapped)?$/i);
   if (m) return { kind: 'property', property: 'resolvesTo', to: m[1].toLowerCase(), tapped: !!m[2] };
 
+  // "noAutoUntap" — this card is skipped by the automatic untap step and stays
+  // tapped until something (a player's manual untap, or a card effect) untaps it.
+  if (/^noAutoUntap$/i.test(clause)) return { kind: 'property', property: 'noAutoUntap', value: true };
+
   m = clause.match(/^([a-zA-Z]+)\s*:\s*(.+)$/);
   if (!m) return { kind: 'error', reason: 'no trigger prefix', text: clause };
   const trigger = m[1].toLowerCase();
