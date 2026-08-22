@@ -226,10 +226,27 @@ const Bot = (() => {
     if (!me.hand.length) return null;
     const basePool = untappedMana(state);
 
+    function isPlayableNow(c) {
+      return (!isEvolution(c.id) || evolutionBaseFor(state, c)) && canAffordWith(basePool, c.id);
+    }
+    // Best value playable RIGHT NOW (no charge needed), optionally pretending one
+    // card isn't in hand — used below to see whether charging away a specific
+    // candidate would actually cost us anything.
+    function bestPlayableNow(excludeKey) {
+      return me.hand
+        .filter(c => c.key !== excludeKey && isPlayableNow(c))
+        .reduce((mx, c) => Math.max(mx, cardValue(state, c)), 0);
+    }
+    const bestNow = bestPlayableNow(null);
+
     let best = null;
     for (const cand of me.hand) {
-      // pretend this card is in the mana zone: the pool grows by one and gains its civ
-      const pool = basePool.concat([{ key: 'hypothetical', id: cand.id }]);
+      // Pretend this card is in the mana zone: the pool grows by one and gains its civ —
+      // UNLESS it's a card that actually enters the mana zone tapped (Gonta, the Warrior
+      // Savage; Miraculous Snare), in which case charging it doesn't unlock anything this
+      // turn, and pretending otherwise made the bot overvalue charging those specific cards.
+      const entersTapped = !!effectOf(cand.id).entersManaTapped;
+      const pool = entersTapped ? basePool : basePool.concat([{ key: 'hypothetical', id: cand.id }]);
       const rest = me.hand.filter(h => h.key !== cand.key);
 
       let bestPlay = 0;
@@ -240,11 +257,25 @@ const Bot = (() => {
         if (v > bestPlay) bestPlay = v;
       }
 
-      // charging a strong card costs something, so weigh what's being given up
-      const score = bestPlay - cardValue(state, cand) * 0.45;
-      if (!best || score > best.score) best = { c: cand, score };
+      // Charging cand only actually costs us something if cand itself was needed for
+      // the best play available right now — i.e. if losing it from hand lowers what
+      // we could otherwise play this turn. Charging some OTHER card that doesn't
+      // touch that play is free, and shouldn't be penalized just because a good play
+      // happens to exist. Without this, a thin hand (1-2 cards) had nothing in `rest`
+      // to ever unlock, bestPlay stayed 0, and the card got charged away regardless —
+      // even when it was itself an affordable, worthwhile summon.
+      const lossFromCharging = Math.max(0, bestNow - bestPlayableNow(cand.key));
+      const netScore = bestPlay - lossFromCharging;
+      // A light discount for giving up a strong card only breaks ties among viable
+      // candidates — it must NOT be what decides whether to charge at all, or a
+      // hand with nothing else playable (netScore legitimately 0, pure free ramp)
+      // would look "negative" and wrongly skip charging for no reason.
+      const rankScore = netScore - cardValue(state, cand) * 0.45;
+      if (!best || rankScore > best.rankScore) best = { c: cand, netScore, rankScore };
     }
-    return best ? best.c : me.hand[0];
+    if (!best) return me.hand[0];
+    if (best.netScore < 0) return null;   // charging this would cost more than it gains — play instead
+    return best.c;
   }
 
   // ---- what to play this turn ----------------------------------------------
