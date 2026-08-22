@@ -643,6 +643,17 @@ function hasLegalBlocker(state, defender, atkCard) {
 // One shield breaking, shared by the "declare and break in one click" path and the
 // extra clicks a double/triple breaker makes. Calls back with a shield-trigger offer
 // if that shield can fire one.
+//
+// Shield Trigger Resolution: with a double/triple breaker, the defender doesn't get
+// to reveal and resolve a Shield Trigger the instant the first shield breaks — every
+// shield the attack breaks has to be broken and checked first. So while state.combat
+// is still active (more shields left to break this attack), a would-be trigger is
+// only queued on the combat object; onTrigger only actually fires once the whole
+// break is done (state.combat about to go null), at which point every queued trigger
+// from this attack fires together. Resolving one mid-break — e.g. letting the
+// defender cast Aqua Surfer to bounce the attacker back to hand before the second
+// shield breaks — would rip the attacking creature out from under a combat that's
+// still waiting on it.
 function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrigger) {
   const me = state.players[atkIdx], opp = state.players[defIdx];
   const i = opp.shields.findIndex(sh => sh.key === shieldKey);
@@ -655,6 +666,7 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
   fireBoardWide(state, 'onownshieldbreak', logs, { onlySide: defIdx });
   fireBoardWide(state, 'onanycreaturebreak', logs, { onlySide: atkIdx });
   const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
+  const cb = state.combat;
   if (atkName === 'bolmeteus steel dragon') {
     opp.graveyard.push({ id: sh.id, key: sh.key });
     logs.push('broke a shield with Bolmeteus Steel Dragon — it went straight to the graveyard.');
@@ -663,14 +675,24 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
     logs.push('broke a shield.');
     // Cryptic Totem switches the defender's shield triggers off while it is tapped
     const crypticOff = me.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'cryptic totem' && c.tapped);
-    if (!crypticOff && hasShieldTrigger(sh.id) && onTrigger) {
-      onTrigger({ idx: defIdx, key: sh.key, id: sh.id });
+    if (!crypticOff && hasShieldTrigger(sh.id)) {
+      const offer = { idx: defIdx, key: sh.key, id: sh.id };
+      if (cb) {
+        cb.triggerQueue = cb.triggerQueue || [];
+        cb.triggerQueue.push(offer);
+      } else if (onTrigger) {
+        onTrigger(offer);
+      }
     }
   }
-  const cb = state.combat;
   if (cb) {
     cb.shieldsToBreak -= 1;
-    if (cb.shieldsToBreak <= 0 || !opp.shields.length) state.combat = null;
+    if (cb.shieldsToBreak <= 0 || !opp.shields.length) {
+      state.combat = null;
+      // The whole break is done — now, and only now, reveal every Shield Trigger
+      // that was queued across all the shields this attack broke.
+      if (onTrigger && cb.triggerQueue) cb.triggerQueue.forEach(onTrigger);
+    }
   }
   return true;
 }
@@ -2379,7 +2401,7 @@ wss.on('connection', (ws) => {
     const endTurnPrompts = []; // end-of-turn questions only the player can answer
     let revealPayload = null; // a hand shown to the caster (Rain of Arrows)
     let manualBattle = null;    // set when a battle can't be judged from the sheet
-    let shieldTriggerFor = null; // a broken shield that may fire its trigger
+    let shieldTriggerOffers = []; // shields that may fire a trigger, revealed once the whole break is done
     let winCheck = false, winnerIdx = null;  // an unblocked attack landed on a shieldless opponent
     const searchAlreadyOpen = !!me.pendingSearch; // so an auto-search only opens once
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
@@ -3408,7 +3430,7 @@ wss.on('connection', (ws) => {
               winCheck = true;
             } else if (target.key) {
               // the attack connects: break the shield they clicked, in the same click
-              breakOneShield(s, idx, oppIdx, atk, target.key, extraLogs, out => { shieldTriggerFor = out; });
+              breakOneShield(s, idx, oppIdx, atk, target.key, extraLogs, out => { shieldTriggerOffers.push(out); });
             }
             fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'hit');
           }
@@ -3467,7 +3489,7 @@ wss.on('connection', (ws) => {
             winnerIdx = cb.attackerIdx;
           } else {
             cb.phase = 'breaking';
-            if (cb.target.key) breakOneShield(s, cb.attackerIdx, idx, attackerCard, cb.target.key, extraLogs, out => { shieldTriggerFor = out; });
+            if (cb.target.key) breakOneShield(s, cb.attackerIdx, idx, attackerCard, cb.target.key, extraLogs, out => { shieldTriggerOffers.push(out); });
           }
           fireAttackTriggers(s, cb.attackerIdx, idx, attackerCard, extraLogs, 'hit');
         }
@@ -3478,7 +3500,7 @@ wss.on('connection', (ws) => {
         const cb = s.combat;
         if (!cb || cb.phase !== 'breaking' || cb.attackerIdx !== idx) return;
         const attacker = me.battlezone.find(c => c.key === cb.attackerKey);
-        const ok = breakOneShield(s, idx, oppIdx, attacker, msg.key, extraLogs, out => { shieldTriggerFor = out; });
+        const ok = breakOneShield(s, idx, oppIdx, attacker, msg.key, extraLogs, out => { shieldTriggerOffers.push(out); });
         if (!ok) return;
         if (!s.combat) {
           const atkNameNorm = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
@@ -3579,12 +3601,12 @@ wss.on('connection', (ws) => {
     // an opponent (especially the bot, which reacts the instant a state arrives)
     // can act into an attack whose trigger hasn't been offered yet. Registering
     // first means the one broadcastState() below already reflects it.
-    if (shieldTriggerFor) {
+    for (const offer of shieldTriggerOffers) {
       // creatures that react when the OPPONENT uses a shield trigger
-      fireBoardWide(s, 'onoppshieldtrigger', extraLogs, { onlySide: shieldTriggerFor.idx === 0 ? 1 : 0 });
-      const target = s.players[shieldTriggerFor.idx];
+      fireBoardWide(s, 'onoppshieldtrigger', extraLogs, { onlySide: offer.idx === 0 ? 1 : 0 });
+      const target = s.players[offer.idx];
       target.pendingShieldTriggers = target.pendingShieldTriggers || [];
-      target.pendingShieldTriggers.push(shieldTriggerFor.key);
+      target.pendingShieldTriggers.push(offer.key);
     }
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
@@ -3600,9 +3622,9 @@ wss.on('connection', (ws) => {
       broadcastState(room);
       logMsg(room, w, 'won the game — the final attack connected with no shields left to defend.');
     }
-    if (shieldTriggerFor) {
-      const tws = room.sockets[shieldTriggerFor.idx];
-      if (tws) send(tws, { type: 'shieldTriggerOffer', key: shieldTriggerFor.key, id: shieldTriggerFor.id });
+    for (const offer of shieldTriggerOffers) {
+      const tws = room.sockets[offer.idx];
+      if (tws) send(tws, { type: 'shieldTriggerOffer', key: offer.key, id: offer.id });
     }
     if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
     if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, costEquals: me.pendingSearch.costEquals != null ? me.pendingSearch.costEquals : null, source: me.pendingSearch.source });
