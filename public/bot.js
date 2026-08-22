@@ -87,7 +87,19 @@ const Bot = (() => {
     const r = meta(id).attackRestriction || '';
     return !/cannot attack/.test(r) && !/not players/.test(r) && !/blocker only/.test(r);
   }
-  function canAttackUntapped(id) { return /untapped ok/.test(meta(id).attackRestriction || ''); }
+  // "untapped ok" may be scoped to one civilization, e.g. "not players/untapped ok:darkness"
+  // (Aeris, Flight Elemental can only attack untapped Darkness creatures).
+  function untappedAttackCiv(id) {
+    const m = (meta(id).attackRestriction || '').match(/untapped ok(?::(\w+))?/);
+    if (!m) return null;
+    return m[1] || true;
+  }
+  function canAttackUntappedTarget(id, targetId) {
+    const c = untappedAttackCiv(id);
+    if (!c) return false;
+    if (c === true) return true;
+    return (meta(targetId).civs || []).some(v => v.toLowerCase() === c);
+  }
   function isSummoningSick(state, card) {
     if (card.under && card.under.length) return false;
     if (isEvolution(card.id)) return false;
@@ -350,7 +362,7 @@ const Bot = (() => {
 
       // a clean kill on a creature it beats
       const targets = opp.battlezone.filter(v => {
-        if (!v.tapped && !canAttackUntapped(atk.id)) return false;
+        if (!v.tapped && !canAttackUntappedTarget(atk.id, v.id)) return false;
         if (/blocker only/.test(meta(atk.id).attackRestriction || '') && !meta(v.id).blocker) return false;
         return true;
       });

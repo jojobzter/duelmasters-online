@@ -1536,7 +1536,20 @@ function canAttackShieldsC(id) {
   const r = restrictionFor(id);
   return r !== 'cannot attack' && !r.includes('not players') && !r.includes('blocker only');
 }
-function canAttackUntappedC(id) { return restrictionFor(id).includes('untapped ok'); }
+// "untapped ok" may be scoped to one civilization, e.g. "not players/untapped ok:darkness"
+// (Aeris, Flight Elemental can only attack untapped Darkness creatures, not any untapped
+// creature). A bare "untapped ok" with no civ suffix still means "any civilization".
+function untappedAttackCivC(id) {
+  const m = restrictionFor(id).match(/untapped ok(?::(\w+))?/);
+  if (!m) return null;
+  return m[1] || true;
+}
+function canAttackUntappedTargetC(id, targetId) {
+  const c = untappedAttackCivC(id);
+  if (!c) return false;
+  if (c === true) return true;
+  return (cardMetaFor(targetId).civs || []).some(v => v.toLowerCase() === c);
+}
 function blockerOnlyC(id) { return restrictionFor(id).includes('blocker only'); }
 // Board-state-dependent restrictions (Cliffcrush Giant, Headlong Giant). Returns a
 // reason string if this specific creature currently can't attack at all, else null.
@@ -1559,7 +1572,7 @@ function openAttackTargetModal(card, state) {
   const name = displayName(card.id);
   document.getElementById('attack-target-title').textContent = 'Attack with ' + name;
   const legal = opp.battlezone.filter(c => {
-    if (!c.tapped && !canAttackUntappedC(card.id)) return false;
+    if (!c.tapped && !canAttackUntappedTargetC(card.id, c.id)) return false;
     if (blockerOnlyC(card.id) && !cardMetaFor(c.id).blocker) return false;
     return true;
   });
@@ -1819,7 +1832,7 @@ function selectableKeysFor(state, me, opp) {
     if (!card) { attackMode = null; return null; }
     const keys = new Set();
     opp.battlezone.forEach(c => {
-      if (!c.tapped && !canAttackUntappedC(card.id)) return;
+      if (!c.tapped && !canAttackUntappedTargetC(card.id, c.id)) return;
       if (blockerOnlyC(card.id) && !isBlockerById(c.id)) return;
       keys.add(c.key);
     });
