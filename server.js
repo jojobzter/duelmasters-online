@@ -1284,6 +1284,19 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const ex = filtersToEngine(e.selector);
         const engineAction = PARSED_ACTION_MAP[e.action];
 
+        // "self" (destroy self, untap self, ...) isn't a zone to search for a target
+        // in — it IS the target, and it resolves immediately with no prompt.
+        if (zoneName === 'self') {
+          const selfCard = me.battlezone.find(c => c.key === cardKey);
+          if (selfCard) {
+            applyImmediate(state, me, selfCard, engineAction, logs);
+            const verb = { destroy: 'destroyed', returnToHand: 'returned', tap: 'tapped', untap: 'untapped' }[engineAction];
+            if (verb === 'returned') logs.push('returned ' + cardLabel(cardId) + ' to their hand.');
+            else if (verb) logs.push(verb + ' ' + cardLabel(cardId) + '.');
+          }
+          break;
+        }
+
         // "all" resolves immediately with no choice
         if (wantCount === 'all' && !e.optional) {
           const pool = listForZone(me, opp, zoneName).slice();
