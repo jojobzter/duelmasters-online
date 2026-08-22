@@ -600,7 +600,21 @@ function canAttackShields(id) {
   const r = restrictionOf(id);
   return r !== 'cannot attack' && !r.includes('not players') && !r.includes('blocker only');
 }
-function canAttackUntapped(id) { return restrictionOf(id).includes('untapped ok'); }
+// "untapped ok" may be scoped to one civilization, e.g. "not players/untapped ok:darkness"
+// (Aeris, Flight Elemental can attack untapped creatures, but only Darkness ones — a
+// plain "untapped ok" substring match let it attack ANY untapped creature). A bare
+// "untapped ok" with no civ suffix still means "any civilization", same as before.
+function untappedAttackCiv(id) {
+  const m = restrictionOf(id).match(/untapped ok(?::(\w+))?/);
+  if (!m) return null;
+  return m[1] || true;
+}
+function canAttackUntappedTarget(id, targetId) {
+  const c = untappedAttackCiv(id);
+  if (!c) return false;
+  if (c === true) return true;
+  return civsOf(targetId).some(v => v.toLowerCase() === c);
+}
 function mustAttackIfAble(id) { return restrictionOf(id).includes('if able'); }
 function blockerOnly(id) { return restrictionOf(id).includes('blocker only'); }
 // Board-state-dependent restrictions (Cliffcrush Giant, Headlong Giant). Returns a
@@ -3373,7 +3387,7 @@ wss.on('connection', (ws) => {
         } else if (target.type === 'creature') {
           const victim = opp.battlezone.find(c => c.key === target.key);
           if (!victim) return;
-          if (!victim.tapped && !canAttackUntapped(atk.id)) {
+          if (!victim.tapped && !canAttackUntappedTarget(atk.id, victim.id)) {
             send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' can only attack TAPPED creatures.' });
             return;
           }
