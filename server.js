@@ -2617,6 +2617,19 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'castFreeFromHand': {
+        // "Players can't cast spells other than Light" (Alcadeias etc.) applies to a
+        // shield-trigger free-cast exactly like any other cast — check it before doing
+        // anything else, so a blocked attempt doesn't fire Glena Vuele or consume the trigger.
+        {
+          const hc = me.hand.find(c => c.key === msg.key);
+          if (hc && hasShieldTrigger(hc.id)) {
+            const blockedBy = castPrevented(s, idx, hc.id);
+            if (blockedBy) {
+              send(ws, { type: 'summonRejected', reason: blockedBy + ' prevents you from casting that — decline to keep it in your hand instead.' });
+              return;
+            }
+          }
+        }
         me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
         // Glena Vuele watches for the opponent casting a shield trigger
         if (opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === 'glena vuele, the hypnotic' && !hasSheetEffects(c.id))) {
