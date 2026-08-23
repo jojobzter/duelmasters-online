@@ -2121,6 +2121,10 @@ function renderState(state) {
         : oppName + ' wins — your shields were gone and the attack connected.';
     } else if (g.reason === 'surrender') {
       title = g.by === meIdx ? 'You surrendered.' : oppName + ' surrendered — you win!';
+    } else if (g.reason === 'decked') {
+      title = g.by === meIdx
+        ? '\u{1F3C6} You win! ' + oppName + ' ran out of cards in their deck.'
+        : 'You ran out of cards in your deck — ' + oppName + ' wins.';
     } else {
       title = 'Game ended by agreement.';
     }
