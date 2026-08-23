@@ -2417,6 +2417,7 @@ wss.on('connection', (ws) => {
     let manualBattle = null;    // set when a battle can't be judged from the sheet
     let shieldTriggerOffers = []; // shields that may fire a trigger, revealed once the whole break is done
     let winCheck = false, winnerIdx = null;  // an unblocked attack landed on a shieldless opponent
+    let deckedOutIdx = null; // set when a player has to lose to decking out — either a draw attempt against an empty deck, or a turn starting for a player whose deck is already empty
     const searchAlreadyOpen = !!me.pendingSearch; // so an auto-search only opens once
     let shieldTriggerOfferKey = null, shieldTriggerOfferId = null; // set when a shield-trigger card is returned to hand
     let sfxToPlay = null; // set by a case below to broadcast a sound-effect cue
@@ -2431,6 +2432,11 @@ wss.on('connection', (ws) => {
           const offTurn = (s.activeTurn !== null && s.activeTurn !== undefined && s.activeTurn !== idx);
           logText = offTurn ? 'drew a card OUT OF TURN.' : 'drew a card.';
           sfxToPlay = 'draw';
+        } else {
+          // The deck was already empty when this draw was attempted — that's the
+          // decking-out loss condition. Drawing the last card successfully (deck
+          // going from 1 to 0) is not; only a draw attempt that comes up empty is.
+          deckedOutIdx = idx;
         }
         break;
       }
@@ -2478,6 +2484,9 @@ wss.on('connection', (ws) => {
 
         s.activeTurn = oppIdx;
         s.turnNumber = (s.turnNumber || 0) + 1;
+        // A turn starting for a player whose deck is already empty is a loss right
+        // there — they don't get a free pass by just not clicking "Draw a Card".
+        if (opp.deck.length === 0) { deckedOutIdx = oppIdx; break; }
         // start-of-turn effects for the player whose turn is beginning — these fire
         // BEFORE the untap step below, so "if self.tapped" still sees last turn's
         // tapped state (needed for cards like Venom Capsule).
@@ -3635,6 +3644,16 @@ wss.on('connection', (ws) => {
       s.gameOver = { reason: 'shields', by: w };
       broadcastState(room);
       logMsg(room, w, 'won the game — the final attack connected with no shields left to defend.');
+    }
+    // Win condition: decking out. Drawing the deck's last card (1 -> 0) is a normal
+    // successful draw and does NOT end the game by itself — the loss only happens on
+    // the *next* attempt to draw, when the deck is already empty and there's nothing
+    // to give. That failed-draw moment is flagged as deckedOutIdx below.
+    if (deckedOutIdx !== null && !s.gameOver) {
+      const w = deckedOutIdx === 0 ? 1 : 0;
+      s.gameOver = { reason: 'decked', by: w };
+      broadcastState(room);
+      logMsg(room, w, "won the game — the opponent tried to draw from an empty deck.");
     }
     for (const offer of shieldTriggerOffers) {
       const tws = room.sockets[offer.idx];
