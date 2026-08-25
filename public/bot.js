@@ -256,10 +256,12 @@ const Bot = (() => {
     let best = null;
     for (const cand of me.hand) {
       // Pretend this card is in the mana zone: the pool grows by one and gains its civ —
-      // UNLESS it's a card that actually enters the mana zone tapped (Gonta, the Warrior
-      // Savage; Miraculous Snare), in which case charging it doesn't unlock anything this
-      // turn, and pretending otherwise made the bot overvalue charging those specific cards.
-      const entersTapped = !!effectOf(cand.id).entersManaTapped;
+      // UNLESS it's a card that actually enters the mana zone tapped: any multicolor
+      // card (a general rule), plus a couple of specific mono-civ cards (Gonta, the
+      // Warrior Savage; Miraculous Snare) that are tapped as a printed ability. Either
+      // way charging it doesn't unlock anything this turn, and pretending otherwise
+      // made the bot overvalue charging those cards.
+      const entersTapped = !!effectOf(cand.id).entersManaTapped || (meta(cand.id).civs || []).length > 1;
       const pool = entersTapped ? basePool : basePool.concat([{ key: 'hypothetical', id: cand.id }]);
       const rest = me.hand.filter(h => h.key !== cand.key);
 
