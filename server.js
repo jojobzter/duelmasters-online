@@ -2518,7 +2518,11 @@ wss.on('connection', (ws) => {
         if (i === -1) return;
         const [c] = me.hand.splice(i, 1);
         const mSlot = manaSlot(me);
-        const arrivesTapped = ENTERS_MANA_TAPPED.has(cardLabel(c.id).toLowerCase());
+        // Multicolor cards are put into the mana zone tapped — a general rule, not a
+        // per-card ability — so they can't be tapped for mana the same turn they're
+        // charged. A few specific mono-civ cards (Gonta, Miraculous Snare) also enter
+        // tapped as a printed ability of their own.
+        const arrivesTapped = civsOf(c.id).length > 1 || ENTERS_MANA_TAPPED.has(cardLabel(c.id).toLowerCase());
         me.mana.push({ id: c.id, key: c.key, tapped: arrivesTapped, x: mSlot.x, y: mSlot.y });
         logText = 'charged ' + cardLabel(c.id) + ' to their mana zone' + (arrivesTapped ? ' (tapped).' : '.');
         break;
