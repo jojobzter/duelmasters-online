@@ -7,6 +7,8 @@ const MENU_MUSIC_VOLUME = 0.32;
 let menuMusic = null;
 let menuMusicFade = null;
 let menuMusicMuted = localStorage.getItem('dm_music_muted') === '1';
+const SOUND_VOLUME = 0.55;
+const SOUND_POOL_SIZE = 3;   // primed copies per sound, so overlapping plays still work
 let cardDB = new Map();      // id ("DM-1/Name.png") -> {url, name, set}
 let cardBackUrl = null;      // from a "card back" folder, if present
 const IMG_EXT = /\.(png|jpg|jpeg|webp|gif)$/i;
@@ -1061,36 +1063,53 @@ function unlockAudio() {
       document.getElementById('screen-setup').style.display !== 'none') startMenuMusic();
   if (audioUnlocked) return;
   audioUnlocked = true;
+  // Mobile browsers only allow an audio element to play if THAT element was started
+  // during a user gesture. A clone counts as a different element and stays blocked,
+  // so prime a small pool per sound here and replay those instead of cloning later.
   for (const path of allSoundPaths()) {
-    try {
-      const a = new Audio(path);
-      a.preload = 'auto';
-      a.volume = 0;
-      const p = a.play();
-      if (p && p.then) {
-        p.then(() => { a.pause(); a.currentTime = 0; a.volume = 0.55; audioCache[path] = a; })
-         .catch(() => { a.volume = 0.55; audioCache[path] = a; });
-      } else { a.volume = 0.55; audioCache[path] = a; }
-    } catch (e) { /* ignore */ }
+    const pool = [];
+    for (let i = 0; i < SOUND_POOL_SIZE; i++) {
+      try {
+        const a = new Audio(path);
+        a.preload = 'auto';
+        a.volume = 0;
+        const p = a.play();
+        const settle = () => { try { a.pause(); a.currentTime = 0; } catch (e) {} a.volume = SOUND_VOLUME; };
+        if (p && p.then) p.then(settle).catch(settle); else settle();
+        pool.push(a);
+      } catch (e) { /* ignore */ }
+    }
+    if (pool.length) audioCache[path] = pool;
   }
 }
 ['touchstart', 'pointerdown', 'click', 'keydown'].forEach(ev =>
   document.addEventListener(ev, unlockAudio, { passive: true })
 );
+// coming back to the tab on a phone can leave the primed elements suspended
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) audioUnlocked = false;
+});
 
 function playSound(path) {
   try {
-    const primed = audioCache[path];
-    if (primed) {
-      // clone so overlapping sounds don't cut each other off
-      const a = primed.cloneNode();
-      a.volume = 0.55;
-      a.play().catch(() => {});
+    const pool = audioCache[path];
+    if (pool && pool.length) {
+      // reuse a primed element that isn't currently playing; fall back to the oldest
+      let a = pool.find(x => x.paused || x.ended);
+      if (!a) { a = pool[0]; pool.push(pool.shift()); }
+      try { a.currentTime = 0; } catch (e) {}
+      a.volume = SOUND_VOLUME;
+      const p = a.play();
+      // If the browser still refuses, the pool is stale (this happens on mobile after
+      // the tab is backgrounded). Allow the next tap to prime it again.
+      if (p && p.catch) p.catch(() => { audioUnlocked = false; });
       return;
     }
+    // not primed yet (no gesture has happened) — try anyway, it works on desktop
     const audio = new Audio(path);
-    audio.volume = 0.55;
-    audio.play().catch(() => {});
+    audio.volume = SOUND_VOLUME;
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => {});
   } catch (e) { /* ignore */ }
 }
 function playChatTone(fromIdx, soundMap) {
