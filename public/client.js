@@ -1,4 +1,12 @@
 // ====================== Card image loading ======================
+
+// Menu music state. Declared first: code further down runs at load time and reads
+// these, and a `let` below its first use throws, taking every later handler with it.
+const MENU_MUSIC_FILE = 'sounds/dark-angel.mp3';
+const MENU_MUSIC_VOLUME = 0.32;
+let menuMusic = null;
+let menuMusicFade = null;
+let menuMusicMuted = localStorage.getItem('dm_music_muted') === '1';
 let cardDB = new Map();      // id ("DM-1/Name.png") -> {url, name, set}
 let cardBackUrl = null;      // from a "card back" folder, if present
 const IMG_EXT = /\.(png|jpg|jpeg|webp|gif)$/i;
@@ -748,13 +756,15 @@ document.getElementById('btn-vs-computer').addEventListener('click', () => {
 });
 
 // music toggle, remembered between sessions
-(function () {
+function wireMusicToggle() {
   const btn = document.getElementById('btn-music');
   if (!btn) return;
   btn.textContent = menuMusicMuted ? 'Music: off' : 'Music: on';
   btn.classList.toggle('muted', menuMusicMuted);
   btn.addEventListener('click', (e) => { e.stopPropagation(); setMusicMuted(!menuMusicMuted); });
-})();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireMusicToggle);
+else wireMusicToggle();
 
 document.getElementById('btn-practice').addEventListener('click', () => {
   const decks = getSavedDecks();
@@ -971,11 +981,7 @@ function allSoundPaths() { return CHAT_TONE_FILES.concat(Object.values(SFX_FILES
 // plays over a game. Browsers block autoplay until the person interacts with the
 // page, so it starts on the first tap/click/keypress rather than on load.
 // ---------------------------------------------------------------------------
-const MENU_MUSIC_FILE = 'sounds/dark-angel.mp3';
-const MENU_MUSIC_VOLUME = 0.32;
-let menuMusic = null;
-let menuMusicFade = null;
-let menuMusicMuted = localStorage.getItem('dm_music_muted') === '1';
+
 
 function startMenuMusic() {
   if (menuMusicMuted) return;
@@ -985,8 +991,14 @@ function startMenuMusic() {
       menuMusic = new Audio(MENU_MUSIC_FILE);
       menuMusic.loop = true;
       menuMusic.preload = 'auto';
-      // a missing file shouldn't produce console noise or break anything else
-      menuMusic.addEventListener('error', () => { menuMusic = null; }, { once: true });
+      // If the track isn't there, say so on the button rather than failing silently —
+      // "no music" and "music file missing" look identical otherwise.
+      menuMusic.addEventListener('error', () => {
+        menuMusic = null;
+        const btn = document.getElementById('btn-music');
+        if (btn) { btn.textContent = 'Music: file missing'; btn.classList.add('muted'); btn.title = MENU_MUSIC_FILE + ' was not found'; }
+        console.warn('Menu music not found at ' + MENU_MUSIC_FILE + ' — drop the file into public/sounds/.');
+      }, { once: true });
     }
     if (menuMusicFade) { clearInterval(menuMusicFade); menuMusicFade = null; }
     menuMusic.volume = MENU_MUSIC_VOLUME;
@@ -1523,9 +1535,19 @@ function candidatesFor(eff, me, opp) {
     oppMana:   opp.mana,
     ownGrave:  me.graveyard,
     ownShield: me.shields,
-    anyBattle: me.battlezone.concat(opp.battlezone)
+    anyBattle: me.battlezone.concat(opp.battlezone),
+    oppShield: opp.shields,
+    oppGrave:  opp.graveyard,
+    oppHand:   opp.hand,
+    anyMana:   me.mana.concat(opp.mana),
+    anyShield: me.shields.concat(opp.shields),
+    anyGrave:  me.graveyard.concat(opp.graveyard)
   };
-  let list = zones[eff.zone] || [];
+  // an effect may allow a choice between zones, e.g. "(oppCreature or oppShield)"
+  let list = [];
+  for (const zn of (eff.altZones && eff.altZones.length ? eff.altZones : [eff.zone])) {
+    list = list.concat(zones[zn] || []);
+  }
   if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
   if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
   if (eff.filter === 'spell') list = list.filter(c => isSpellById(c.id));
