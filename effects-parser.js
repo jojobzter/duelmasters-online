@@ -21,7 +21,10 @@ const TRIGGERS = new Set([
   'onoppmanatograve', 'onoppsummon', 'onoppplay', 'ondiscard',
   'startturn', 'onownshieldbreak', 'onattacked', 'onowncreaturedestroyed',
   'onownsummon', 'oncreatureattack', 'oppstartturn', 'onoppcreaturedestroyed',
-  'silentskill'
+  'silentskill',
+  // added with DM-08
+  'onowncreatureenter', 'onowncreatureattacked', 'onshieldwouldbreak', 'onturnstart',
+  'onoppturnstart', 'onowncreatureattack', 'onanycast', 'onownshieldtriggercast'
 ]);
 
 // Zones the selectors may refer to
@@ -86,8 +89,10 @@ function parseSelector(raw) {
 
 // "up to 2", "all", "any number of", "2", or a dynamic count expression
 function parseCount(words) {
-  const text = words.join(' ');
+  let text = words.join(' ');
   let m;
+  // "choose 1 oppCreature" / "choose up to 2 ownShield" — the player picks
+  if ((m = text.match(/^choose\s+/i))) text = text.slice(m[0].length);
   if ((m = text.match(/^all\b/i))) return { count: 'all', rest: text.slice(m[0].length).trim() };
   if ((m = text.match(/^any number of\b/i))) return { count: 'all', optional: true, rest: text.slice(m[0].length).trim() };
   if ((m = text.match(/^up to ([a-zA-Z][\w\[\]=,.!~ ]*?\.count)\s/i))) {
@@ -104,7 +109,29 @@ function parseCount(words) {
   return { count: 1, rest: text };
 }
 
-function parseClause(raw, cardName) {
+// Strips the trailing modifiers, the "if" condition and any "orElse" chain off a
+// clause body. Shared by triggered clauses and ones that inherit their trigger.
+function processBody(bodyIn) {
+  const mods = {};
+  let body = bodyIn;
+  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder|permanent)\b/gi,
+    (_, w) => { mods[w.toLowerCase()] = true; return ''; }).trim();
+  body = body.replace(/,\s*min\s+(\d+)\b/i, (_, n) => { mods.min = parseInt(n, 10); return ''; }).trim();
+  body = body.replace(/\s+(tapped|free|endOfTurn|endOfExtraTurn)\s*$/i, (_, w) => { mods[w.toLowerCase()] = true; return ''; }).trim();
+  body = body.replace(/,\s*(choice|prevents break)\s*(?=$|\s+if\s)/i, (_, w) => { mods[w.toLowerCase().replace(/\s+/g,'')] = true; return ''; }).trim();
+
+  let condition = null;
+  const ifIdx = body.toLowerCase().lastIndexOf(' if ');
+  if (ifIdx > -1) { condition = body.slice(ifIdx + 4).trim(); body = body.slice(0, ifIdx).trim(); }
+  if (/^if\s+/i.test(body)) { condition = body.replace(/^if\s+/i, '').trim(); body = ''; }
+
+  let orElse = null;
+  const oe = body.split(/\s+orElse\s+/i);
+  if (oe.length > 1) { body = oe[0].trim(); orElse = oe.slice(1).map(x => x.trim()); }
+  return { body, mods, condition, orElse };
+}
+
+function parseClause(raw, cardName, inheritedTrigger) {
   const clause = raw.trim();
   if (!clause) return null;
 
@@ -116,12 +143,26 @@ function parseClause(raw, cardName) {
   // tapped until something (a player's manual untap, or a card effect) untaps it.
   if (/^noAutoUntap$/i.test(clause)) return { kind: 'property', property: 'noAutoUntap', value: true };
 
-  m = clause.match(/^([a-zA-Z]+)\s*:\s*(.+)$/);
-  if (!m) return { kind: 'error', reason: 'no trigger prefix', text: clause };
+  m = clause.match(/^([a-zA-Z]+)(?:\[([^\]]*)\])?\s*:\s*(.+)$/);
+  if (!m) {
+    // A clause with no trigger of its own continues the previous one, e.g.
+    // "onSummon: draw 1; extraTurn" — the second clause is part of the same trigger.
+    if (inheritedTrigger) {
+      // run it through the same body processing a triggered clause gets, so trailing
+      // modifiers like "tapped" are handled identically
+      const r0 = processBody(clause.trim());
+      const action0 = parseAction(r0.body, r0.mods);
+      if (action0) return Object.assign({ kind: 'effect', trigger: inheritedTrigger, triggerFilter: null,
+        condition: r0.condition, orElse: r0.orElse, card: cardName }, action0, { mods: r0.mods });
+    }
+    return { kind: 'error', reason: 'no trigger prefix', text: clause };
+  }
   const trigger = m[1].toLowerCase();
   if (!TRIGGERS.has(trigger)) return { kind: 'error', reason: 'unknown trigger "' + m[1] + '"', text: clause };
+  // the bracketed part restricts WHICH event fires this clause
+  const triggerFilter = m[2] ? parseTriggerFilter(m[2]) : null;
 
-  let body = m[2].trim();
+  let body = m[3].trim();
 
   // trailing modifiers: ", optional", ", oppChoice", ", reveal"
   const mods = {};
@@ -130,6 +171,9 @@ function parseClause(raw, cardName) {
   }).trim();
   // ", min 2" puts a floor under a cost reduction
   body = body.replace(/,\s*min\s+(\d+)\b/i, (_, n) => { mods.min = parseInt(n, 10); return ''; }).trim();
+  // some clauses end in a bare word that qualifies the action rather than naming a card
+  body = body.replace(/\s+(tapped|free|endOfTurn|endOfExtraTurn)\s*$/i, (_, w) => { mods[w.toLowerCase()] = true; return ''; }).trim();
+  body = body.replace(/,\s*(choice|prevents break)\s*(?=$|\s+if\s)/i, (_, w) => { mods[w.toLowerCase().replace(/\s+/g,'')] = true; return ''; }).trim();
 
   // "... if <condition>"
   let condition = null;
@@ -143,12 +187,12 @@ function parseClause(raw, cardName) {
   // "... orElse <action>"
   let orElse = null;
   const oe = body.split(/\s+orElse\s+/i);
-  if (oe.length === 2) { body = oe[0].trim(); orElse = oe[1].trim(); }
+  if (oe.length > 1) { body = oe[0].trim(); orElse = oe.slice(1).map(x => x.trim()); }
 
   const action = parseAction(body, mods);
   if (!action) return { kind: 'error', reason: 'unrecognised action', text: clause };
 
-  return Object.assign({ kind: 'effect', trigger, condition, orElse, card: cardName }, action, { mods });
+  return Object.assign({ kind: 'effect', trigger, triggerFilter, condition, orElse, card: cardName }, action, { mods });
 }
 
 function parseAction(body, mods) {
@@ -169,7 +213,14 @@ function parseAction(body, mods) {
              per: plus[3] ? (parseSelector(plus[3]) || { name: plus[3] }) : null };
   }
 
-  const rest = words.slice(1);
+  let rest = words.slice(1);
+  // "choose up to 1 ownHand[...] -> battle" puts the chosen card somewhere specific
+  let destination = null;
+  const arrowAt = rest.indexOf('->');
+  if (arrowAt > -1 && !['fromdeck','search','ownkeeps','oppkeeps'].includes(verb)) {
+    destination = (rest[arrowAt + 1] || '').toLowerCase();
+    rest = rest.slice(0, arrowAt);
+  }
 
   switch (verb) {
     case 'draw': {
@@ -190,6 +241,10 @@ function parseAction(body, mods) {
       const c = parseCount(rest);
       const sel = parseSelector(c.rest);
       if (!sel) return null;
+      if (destination === 'battle') {
+        const c2 = parseCount(rest);
+        return { action: 'toBattle', count: c2.count, optional: !!c2.optional, selector: parseSelector(c2.rest) || { name: c2.rest } };
+      }
       return { action: verb === 'todecktop' ? 'toDeckTop'
                      : verb === 'tomana' ? 'toMana' : verb === 'tograve' ? 'toGrave'
                      : verb === 'tohand' ? 'toHand' : verb === 'toshield' ? 'toShield' : verb,
@@ -224,17 +279,6 @@ function parseAction(body, mods) {
       // card-filter parser rather than parseSelector (which only knows zones).
       const sel = rest.length > 1 ? parseCardFilter(rest.slice(1).join(' ')) : null;
       return { action: 'prevent', what, cardFilter: sel };
-    }
-    case 'oppkeeps': {
-      // "oppKeeps 1 of 2 oppCreature, rest -> destroy"
-      const restStr = rest.join(' ');
-      const km = restStr.match(/^(\S+)(?:\s+of\s+(\d+))?\s+(\S+?)(?:,\s*rest\s*->\s*(\w+))?$/i);
-      if (!km) return null;
-      return { action: 'oppKeeps',
-               keep: /^\d+$/.test(km[1]) ? parseInt(km[1], 10) : { dynamic: km[1] },
-               pool: km[2] ? parseInt(km[2], 10) : null,
-               selector: parseSelector(km[3]) || { name: km[3] },
-               rest: km[4] ? km[4].toLowerCase() : 'hand' };
     }
     case 'costplus': case 'costminus': {
       const amt = parseInt(rest[0], 10) || 1;
@@ -281,6 +325,39 @@ function parseAction(body, mods) {
       return { action: 'oppDraw', count: c.count, optional: !!c.optional };
     }
     case 'namecost': return { action: 'nameCost' };
+    case 'choose': {
+      // a bare "choose N X -> dest": the movement is carried by the destination
+      const c = parseCount(rest);
+      return { action: destination === 'battle' ? 'toBattle' : destination === 'hand' ? 'toHand' : 'choose',
+               count: c.count, optional: !!c.optional,
+               selector: parseSelector(c.rest) || { name: c.rest }, to: destination };
+    }
+    case 'faceup': return { action: 'faceUp', selector: parseSelector(rest.join(' ')) || { name: rest.join(' ') } };
+    case 'peek':   return { action: 'peek',   selector: parseSelector(rest.join(' ')) || { name: rest.join(' ') } };
+    case 'reveal': return { action: 'reveal', selector: parseSelector(rest.join(' ')) || { name: rest.join(' ') } };
+    case 'arrangedecktop': return { action: 'arrangeDeckTop', count: parseInt(rest[0], 10) || 1 };
+    case 'extraturn': return { action: 'extraTurn' };
+    case 'losegame': return { action: 'loseGame', when: (rest[0] || '').toLowerCase() || null };
+    case 'cast': {
+      return { action: 'castTarget', free: !!(mods && mods.free),
+               selector: parseSelector(rest[0]) || { name: rest[0] } };
+    }
+    case 'eachdiscard': {
+      const kindWord = (rest[0] || 'random').toLowerCase();
+      const c = parseCount(rest.slice(1));
+      return { action: 'eachDiscard', mode: kindWord, count: c.count };
+    }
+    case 'namecard': return { action: 'nameCard', selector: parseSelector(rest.join(' ')) || { name: rest.join(' ') } };
+    case 'ownkeeps': case 'oppkeeps': {
+      const restStr = rest.join(' ');
+      const km = restStr.match(/^(\S+)(?:\s+of\s+(\d+))?\s+([^,]+?)(?:\s*,\s*rest\s*->\s*(\w+))?$/i);
+      if (!km) return null;
+      return { action: verb === 'ownkeeps' ? 'ownKeeps' : 'oppKeeps',
+               keep: /^\d+$/.test(km[1]) ? parseInt(km[1], 10) : { dynamic: km[1] },
+               pool: km[2] ? parseInt(km[2], 10) : null,
+               selector: parseSelector(km[3].trim()) || { name: km[3].trim() },
+               rest: km[4] ? km[4].toLowerCase() : 'hand' };
+    }
     case 'namerace': return { action: 'nameRace' };
     case 'nameciv': return { action: 'nameCiv' };
     default:
@@ -307,11 +384,28 @@ function parseCardFilter(raw) {
   return out;
 }
 
+// The bracket on a trigger, e.g. onAnyCreatureEnter[own,race=Ghost]
+function parseTriggerFilter(raw) {
+  const out = { side: null, filters: [] };
+  for (const part of splitTop(raw, ',')) {
+    const t = part.trim();
+    const low = t.toLowerCase();
+    if (low === 'own' || low === 'owncreature') { out.side = 'own'; continue; }
+    if (low === 'opp' || low === 'oppcreature') { out.side = 'opp'; continue; }
+    const cmp = t.match(/^([a-zA-Z]+)\s*(?:contains|~|=)\s*(.+)$/i);
+    if (cmp) { out.filters.push({ key: cmp[1].toLowerCase(), op: /contains|~/i.test(t) ? '~' : '=', value: cmp[2].trim() }); continue; }
+    out.filters.push({ key: low, op: 'flag', value: true });
+  }
+  return out;
+}
+
 function parseEffect(text, cardName) {
   const clauses = splitTop(String(text || ''), ';');
   const out = { effects: [], properties: {}, errors: [] };
+  let lastTrigger = null;
   for (const c of clauses) {
-    const parsed = parseClause(c, cardName);
+    const parsed = parseClause(c, cardName, lastTrigger);
+    if (parsed && parsed.kind === 'effect' && parsed.trigger) lastTrigger = parsed.trigger;
     if (!parsed) continue;
     if (parsed.kind === 'error') out.errors.push(parsed);
     else if (parsed.kind === 'property') out.properties[parsed.property] = parsed;

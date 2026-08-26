@@ -15,6 +15,7 @@ const { parseEffect, parseSelector } = require('./effects-parser.js');
 // runs during module start-up, so a `let` further down the file would still be in its
 // temporal dead zone and throw — silently leaving the card database empty.
 let SELECTOR_CACHE = new Map();
+const POWER_IN_PROGRESS = new Set();   // re-entry guard for power-dependent conditions
 let META_CACHE = new Map();
 let STATIC_CACHE = new Map();
 
@@ -225,6 +226,7 @@ function buildEffectIndex() {
   AUTO_MANA_FROM_DECK.forEach(n => put(n, { manaRamp: 1 }));
   TAP_ALL_OPP.forEach(n => put(n, { tapAllOpponents: true }));
   ENTERS_MANA_TAPPED.forEach(n => put(n, { entersManaTapped: true }));
+  for (const [k, c] of CARD_DB) if (entersManaTapped(k)) put(k, { entersManaTapped: true });
   END_TURN_RETURN_TO_HAND.forEach(n => put(n, { returnsAtEndOfTurn: true }));
   SPELL_RESOLVES_TO_MANA.forEach(n => put(n, { resolvesToMana: true }));
   RETURN_INSTEAD_OF_DESTROY.forEach(n => put(n, { survivesDestruction: true }));
@@ -513,6 +515,15 @@ function namedCard(player, normName) {
 // Effective power, including every static buff currently applying to this creature.
 // `attacking` adds bonuses that only count while it is the one attacking.
 function effectivePower(state, ownerIdx, card, attacking) {
+  if (card && card.key) POWER_IN_PROGRESS.add(card.key);
+  try {
+    return effectivePowerInner(state, ownerIdx, card, attacking);
+  } finally {
+    if (card && card.key) POWER_IN_PROGRESS.delete(card.key);
+  }
+}
+
+function effectivePowerInner(state, ownerIdx, card, attacking) {
   const owner = state.players[ownerIdx];
   const m = metaOf(card.id);
   if (m.power == null) return null;              // unknown — caller must ask the players
@@ -577,14 +588,18 @@ function effectivePower(state, ownerIdx, card, attacking) {
 // breaker count depends on its current power rather than a fixed flag.
 function breakerCount(state, ownerIdx, card) {
   const m = metaOf(card.id);
-  if (normalizeCardKey(cardLabel(card.id)) === 'magmadragon ogrist vhal') {
+  // A breaker granted by a static clause counts as much as a printed one. The sheet
+  // writes these as power thresholds, with the double range stopping where the triple
+  // range starts so a card can never claim both.
+  const kw = grantedKeywords(state, ownerIdx, card);
+  if (m.tripleBreaker || kw.has('triplebreaker')) return 3;
+  if (m.doubleBreaker || kw.has('doublebreaker')) return 2;
+  // fallback for a card whose Effect text hasn't been filled in yet
+  if (!hasSheetEffects(card.id) && normalizeCardKey(cardLabel(card.id)) === 'magmadragon ogrist vhal') {
     const p = effectivePower(state, ownerIdx, card, true) || 0;
     if (p >= 15000) return 3;
     if (p >= 6000) return 2;
-    return 1;
   }
-  if (m.tripleBreaker) return 3;
-  if (m.doubleBreaker) return 2;
   return 1;
 }
 
@@ -668,6 +683,14 @@ function hasLegalBlocker(state, defender, atkCard) {
 // defender cast Aqua Surfer to bounce the attacker back to hand before the second
 // shield breaks — would rip the attacking creature out from under a combat that's
 // still waiting on it.
+// the socket belonging to a seat in the room that owns this match state
+function roomSocketFor(state, idx) {
+  for (const room of rooms.values()) {
+    if (room.state === state) return room.sockets[idx] || null;
+  }
+  return null;
+}
+
 function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrigger) {
   const me = state.players[atkIdx], opp = state.players[defIdx];
   const i = opp.shields.findIndex(sh => sh.key === shieldKey);
@@ -676,9 +699,29 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
   me.brokeShieldThisTurn = true;
   if (attacker) attacker.brokeShieldThisTurn = true;
 
-  if (attacker) firePar(state, atkIdx, attacker, 'onbreak', logs);
+  // The attacker's onBreak clauses see the shield that was just broken, so a card
+  // like Bluum Erkis can reveal it and decide what happens to it INSTEAD of the
+  // normal "goes to the defender's hand".
+  const breakCtx = { targetCard: { id: sh.id, key: sh.key } };
+  const replacesBreak = attacker &&
+    ((cardMeta(attacker.id) || {}).parsedEffects || []).some(e => e.trigger === 'onbreak' &&
+      (e.action === 'reveal' || e.action === 'castTarget'));
+  if (attacker) firePar(state, atkIdx, attacker, 'onbreak', logs, breakCtx);
   fireBoardWide(state, 'onownshieldbreak', logs, { onlySide: defIdx });
   fireBoardWide(state, 'onanycreaturebreak', logs, { onlySide: atkIdx });
+
+  if (replacesBreak) {
+    // the card decided the shield's fate itself; nothing further happens here
+    if (breakCtx.castOffered) {
+      const tws = roomSocketFor(state, defIdx);
+      if (tws) send(tws, { type: 'shieldTriggerOffer', key: sh.key, id: sh.id });
+    } else {
+      opp.hand.push({ id: sh.id, key: sh.key });
+      logs.push('it had no Shield Trigger, so it went to their hand.');
+    }
+    return true;
+  }
+
   const atkName = attacker ? normalizeCardKey(cardLabel(attacker.id)) : '';
   const cb = state.combat;
   if (atkName === 'bolmeteus steel dragon') {
@@ -801,9 +844,13 @@ const QUIXOTIC_NAME = 'quixotic hero swine snout';
 function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
   if (isSpellCard(enteringId)) return;
   // creatures that react to any creature arriving, or to the OPPONENT summoning
-  fireBoardWide(state, 'onanycreatureenter', logs || [], { exceptKey: enteringKey });
   const side0 = state.players.findIndex(p => p.battlezone.some(c => c.key === enteringKey));
-  if (side0 !== -1) fireBoardWide(state, 'onownsummon', logs || [], { onlySide: side0, exceptKey: enteringKey });
+  const ev = { cardId: enteringId, key: enteringKey, ownerIdx: side0 };
+  fireBoardWide(state, 'onanycreatureenter', logs || [], { exceptKey: enteringKey, event: ev });
+  if (side0 !== -1) {
+    fireBoardWide(state, 'onownsummon', logs || [], { onlySide: side0, exceptKey: enteringKey, event: ev });
+    fireBoardWide(state, 'onowncreatureenter', logs || [], { onlySide: side0, exceptKey: enteringKey, event: ev });
+  }
   const enteringSide = state.players.findIndex(p => p.battlezone.some(c => c.key === enteringKey));
   if (enteringSide !== -1) {
     fireBoardWide(state, 'onoppsummon', logs || [], { onlySide: enteringSide === 0 ? 1 : 0 });
@@ -1039,6 +1086,31 @@ function conditionHolds(state, srcOwnerIdx, srcCard, condition, ctx) {
   if (c.includes(' and ')) {
     return condition.split(/\s+and\s+/i).every(part => conditionHolds(state, srcOwnerIdx, srcCard, part, ctx));
   }
+  // "self.power>=6000" — measured on CURRENT power, since these cards buff themselves.
+  // The double-breaker range excludes the triple range so the two never overlap.
+  const pw = condition.match(/^self\.power\s*(>=|<=|>|<|=)\s*(\d+)$/i);
+  if (pw) {
+    // Guard against recursion: effectivePower asks for granted keywords, which can ask
+    // about power. If we're already computing this card's power, use the base value.
+    if (POWER_IN_PROGRESS.has(srcCard.key)) {
+      const base = powerOf(srcCard.id);
+      if (base == null) return false;
+      const v0 = parseInt(pw[2], 10);
+      switch (pw[1]) {
+        case '>=': return base >= v0; case '<=': return base <= v0;
+        case '>': return base > v0;   case '<': return base < v0;
+        default: return base === v0;
+      }
+    }
+    const cur = effectivePower(state, srcOwnerIdx, srcCard, false);
+    if (cur == null) return false;
+    const v = parseInt(pw[2], 10);
+    switch (pw[1]) {
+      case '>=': return cur >= v; case '<=': return cur <= v;
+      case '>': return cur > v;   case '<': return cur < v;
+      default: return cur === v;
+    }
+  }
   if (/^self\.tapped$/.test(c)) return !!srcCard.tapped;
   if (/^self\.untapped$/.test(c)) return !srcCard.tapped;
   if (/^self\.brokeshieldthisturn$/.test(c)) return !!srcCard.brokeShieldThisTurn;
@@ -1116,6 +1188,25 @@ function staticBuffTotal(state, cardOwnerIdx, card, ctx) {
 }
 
 // Keywords granted to `card` by static effects (blocker, unblockable, slayer...).
+// A card's granted keywords can be asked for without a board position, e.g. when it
+// is about to enter the mana zone. Only self-granted statics apply there.
+function selfGrantedKeywords(cardId) {
+  const out = new Set();
+  for (const e of ((cardMeta(cardId) || {}).parsedEffects || [])) {
+    if (e.trigger !== 'static' || e.action !== 'grant') continue;
+    if (e.selector && !e.selector.selfOnly) continue;
+    out.add(String(e.keyword || '').toLowerCase());
+  }
+  return out;
+}
+// "entersManaTapped" is the canonical spelling; "manaTapped" is an older alias kept
+// working so previously-filled rows don't need rewriting.
+function entersManaTapped(cardId) {
+  const kw = selfGrantedKeywords(cardId);
+  if (kw.has('entersmanatapped') || kw.has('manatapped')) return true;
+  return ENTERS_MANA_TAPPED.has(normalizeCardKey(cardLabel(cardId)));
+}
+
 function grantedKeywords(state, cardOwnerIdx, card) {
   const out = new Set();
   const args = {};
@@ -1270,11 +1361,16 @@ function listForZone(me, opp, zoneName) {
 
 // Runs every clause of a card that fires on the given trigger.
 // Returns { defer, sfx } — defer means a prompt now owns the card.
-function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, notices) {
+function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, notices, ctx) {
   const _state = state;
   const meta = cardMeta(cardId) || {};
-  const clauses = (meta.parsedEffects || []).filter(e => e.trigger === trigger);
+  let clauses = (meta.parsedEffects || []).filter(e => e.trigger === trigger);
+  // a clause with a bracket filter only fires for a matching event
+  if (ctx && ctx.event) {
+    clauses = clauses.filter(e => triggerFilterMatches(state, meIdx, e.triggerFilter, ctx.event));
+  }
   if (!clauses.length) return { defer: false, handled: false };
+  const targetCard = ctx && ctx.targetCard ? ctx.targetCard : null;
   const me = state.players[meIdx], opp = state.players[oppIdx];
   let defer = false;
 
@@ -1292,8 +1388,22 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
     // a clause only fires when its own condition holds — "if self.brokeShieldThisTurn"
     // and friends were previously ignored outside static effects
     if (e.condition) {
-      const selfCard = me.battlezone.find(c => c.key === cardKey) || { key: cardKey, id: cardId };
-      if (!conditionHolds(state, meIdx, selfCard, e.condition, null)) continue;
+      const cond = e.condition.trim();
+      // conditions about the card this effect is currently looking at
+      const tm = cond.match(/^(!?)target\.([a-zA-Z]+)$/);
+      if (tm) {
+        if (!targetCard) continue;
+        const want = tm[2].toLowerCase();
+        let val = false;
+        if (want === 'shieldtrigger') val = hasShieldTrigger(targetCard.id);
+        else if (want === 'creature') val = !isSpellCard(targetCard.id);
+        else if (want === 'spell') val = isSpellCard(targetCard.id);
+        if (tm[1] === '!') val = !val;
+        if (!val) continue;
+      } else {
+        const selfCard = me.battlezone.find(c => c.key === cardKey) || { key: cardKey, id: cardId };
+        if (!conditionHolds(state, meIdx, selfCard, e.condition, null)) continue;
+      }
     }
     switch (e.action) {
       case 'draw': {
@@ -1587,6 +1697,82 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         logs.push('named a mana cost with ' + cardLabel(cardId) + '.');
         break;
       }
+      case 'reveal': {
+        // show a card to both players; used by Bluum Erkis on the shield it breaks
+        if (targetCard) {
+          logs.push('revealed ' + cardLabel(targetCard.id) + '.');
+          if (notices) notices.push({ self: 'Revealed ' + cardLabel(targetCard.id) + '.',
+                                      other: "%p revealed " + cardLabel(targetCard.id) + '.' });
+        }
+        break;
+      }
+      case 'castTarget': {
+        // cast the revealed card for free on its owner's behalf, then retire it
+        if (!targetCard) break;
+        const owner = state.players[oppIdx];
+        owner.hand.push({ id: targetCard.id, key: targetCard.key });
+        owner.pendingShieldTriggers = owner.pendingShieldTriggers || [];
+        owner.pendingShieldTriggers.push(targetCard.key);
+        if (ctx) ctx.castOffered = true;
+        logs.push(cardLabel(targetCard.id) + ' has Shield Trigger — it may be cast for free.');
+        break;
+      }
+      case 'faceUp': {
+        // flip one of the opponent's shields face up, so both players can see it
+        const sh = opp.shields.find(x => !x.faceUp);
+        if (sh) { sh.faceUp = true; logs.push('turned one of their shields face up: ' + cardLabel(sh.id) + '.'); }
+        break;
+      }
+      case 'peek': {
+        logs.push('looked at their opponent\'s shields.');
+        if (notices) notices.push({ self: 'You looked at their shields.', other: "%p looked at your shields." });
+        break;
+      }
+      case 'arrangeDeckTop': {
+        const n = typeof e.count === 'number' ? e.count : 1;
+        logs.push('looked at the top ' + n + ' cards of their deck and rearranged them.');
+        break;
+      }
+      case 'eachDiscard': {
+        // both players discard, starting with the opponent
+        for (const pl of [opp, me]) {
+          if (!pl.hand.length) continue;
+          pl.pendingDiscards.push({ id: newKey(), kind: e.mode === 'choose' ? 'choose' : 'random',
+                                    count: typeof e.count === 'number' ? e.count : 1,
+                                    source: cardLabel(cardId) });
+        }
+        break;
+      }
+      case 'ownKeeps': {
+        // you keep N of your own and the rest suffer something
+        const zoneName = zoneNameOf(e.selector) || 'ownBattle';
+        const pool = listForZone(me, opp, zoneName);
+        const keep = typeof e.keep === 'number' ? e.keep : 1;
+        if (pool.length > keep) {
+          me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: zoneName,
+                              action: e.rest === 'destroy' ? 'destroy' : e.rest === 'grave' ? 'toGrave'
+                                    : e.rest === 'hand' ? 'returnToHand' : 'tap',
+                              max: pool.length - keep, keys: pool.map(c => c.key), spellKey: null,
+                              prompt: 'Choose ' + (pool.length - keep) + ' — you keep ' + keep + '.' };
+          defer = true;
+        }
+        break;
+      }
+      case 'nameCard': {
+        logs.push('named a card with ' + cardLabel(cardId) + '.');
+        break;
+      }
+      case 'extraTurn': {
+        state.pendingExtraTurn = { forIdx: meIdx, source: cardLabel(cardId) };
+        logs.push('will take an extra turn after this one (' + cardLabel(cardId) + ').');
+        break;
+      }
+      case 'loseGame': {
+        // Bombazar: the extra turn is borrowed, and the bill comes due
+        state.pendingLoseGame = { forIdx: meIdx, when: e.when || 'endofextraturn', source: cardLabel(cardId) };
+        logs.push(cardLabel(cardId) + ': they lose the game at the end of that extra turn.');
+        break;
+      }
       case 'look': {
         // reveal-to-self: recorded in the log, the peek itself is client-side
         logs.push('looked at ' + (e.selector ? e.selector.name : 'cards') + '.');
@@ -1665,22 +1851,52 @@ function skipsAutoUntap(cardId) {
 }
 
 // Fires a card's own sheet-described effects for a given trigger.
-function firePar(state, ownerIdx, card, trigger, logs) {
+function firePar(state, ownerIdx, card, trigger, logs, ctx) {
   if (!card) return { defer: false };
   const oppIdx = ownerIdx === 0 ? 1 : 0;
-  return runParsedEffects(state, ownerIdx, oppIdx, card.id, card.key, trigger, logs || [], []);
+  return runParsedEffects(state, ownerIdx, oppIdx, card.id, card.key, trigger, logs || [], [], ctx);
+}
+
+// Does the event that just happened satisfy a trigger's bracket filter?
+// onAnyCreatureEnter[own,race=Ghost] only fires for your own Ghost creatures.
+function triggerFilterMatches(state, listenerIdx, filter, ev) {
+  if (!filter) return true;
+  if (!ev) return true;
+  if (filter.side === 'own' && ev.ownerIdx !== listenerIdx) return false;
+  if (filter.side === 'opp' && ev.ownerIdx === listenerIdx) return false;
+  for (const f of filter.filters || []) {
+    let ok = true;
+    switch (f.key) {
+      case 'race': {
+        const races = racesOf(ev.cardId || '');
+        ok = f.op === '~' ? races.some(r => r.includes(String(f.value).toLowerCase()))
+                          : races.includes(String(f.value).toLowerCase());
+        break;
+      }
+      case 'civ': ok = civsOf(ev.cardId || '').includes(f.value); break;
+      case 'creature': ok = !isSpellCard(ev.cardId || ''); break;
+      case 'spell': ok = isSpellCard(ev.cardId || ''); break;
+      default: ok = true;
+    }
+    if (!ok) return false;
+  }
+  return true;
 }
 
 // Fires a trigger on every creature in play that listens for it (e.g. a creature that
 // reacts whenever ANY creature enters, or whenever the opponent casts a spell).
 function fireBoardWide(state, trigger, logs, opts) {
+  const ev = (opts && opts.event) || null;
   for (let i = 0; i < state.players.length; i++) {
     for (const c of state.players[i].battlezone.slice()) {
       const m = cardMeta(c.id) || {};
-      if (!(m.parsedEffects || []).some(e => e.trigger === trigger)) continue;
+      const clauses = (m.parsedEffects || []).filter(e => e.trigger === trigger);
+      if (!clauses.length) continue;
       if (opts && opts.onlySide != null && i !== opts.onlySide) continue;
       if (opts && opts.exceptKey && c.key === opts.exceptKey) continue;
-      firePar(state, i, c, trigger, logs);
+      // a clause whose bracket filter doesn't match this event stays silent
+      if (!clauses.some(e => triggerFilterMatches(state, i, e.triggerFilter, ev))) continue;
+      firePar(state, i, c, trigger, logs, { event: ev });
     }
   }
 }
@@ -2482,6 +2698,31 @@ wss.on('connection', (ws) => {
         for (const c of me.battlezone) { c.brokeShieldThisTurn = false; c.attackedThisTurn = false; }
         s.creaturesEnteredThisTurn = 0;
 
+        // Bombazar's bill comes due at the end of the extra turn it granted
+        if (s.pendingLoseGame && s.extraTurnActiveFor === idx) {
+          const { forIdx: loser, source } = s.pendingLoseGame;
+          s.pendingLoseGame = null; s.extraTurnActiveFor = null;
+          s.gameOver = { reason: 'effect', by: loser === 0 ? 1 : 0,
+                         detail: 'lost to their own ' + source };
+          extraLogs.push('lost the game to their own ' + source + '.');
+          logMsg(room, idx, 'lost the game to their own ' + source + '.');
+          broadcastState(room);
+          return;
+        }
+        // an extra turn means the same player goes again
+        if (s.pendingExtraTurn && s.pendingExtraTurn.forIdx === idx) {
+          const src = s.pendingExtraTurn.source;
+          s.pendingExtraTurn = null;
+          s.extraTurnActiveFor = idx;
+          s.turnNumber = (s.turnNumber || 0) + 1;
+          extraLogs.push('takes an extra turn (' + src + ').');
+          for (const c of me.battlezone) c.tapped = false;
+          for (const m of me.mana) m.tapped = false;
+          logMsg(room, idx, (logText || 'ended their turn.') + ' Extra turn from ' + src + '.');
+          broadcastState(room);
+          return;
+        }
+        s.extraTurnActiveFor = null;
         s.activeTurn = oppIdx;
         s.turnNumber = (s.turnNumber || 0) + 1;
         // A turn starting for a player whose deck is already empty is a loss right
@@ -2490,8 +2731,14 @@ wss.on('connection', (ws) => {
         // start-of-turn effects for the player whose turn is beginning — these fire
         // BEFORE the untap step below, so "if self.tapped" still sees last turn's
         // tapped state (needed for cards like Venom Capsule).
-        for (const c of opp.battlezone.slice()) firePar(s, oppIdx, c, 'startturn', extraLogs);
-        for (const c of me.battlezone.slice()) firePar(s, idx, c, 'oppstartturn', extraLogs);
+        for (const c of opp.battlezone.slice()) {
+          firePar(s, oppIdx, c, 'startturn', extraLogs);
+          firePar(s, oppIdx, c, 'onturnstart', extraLogs);
+        }
+        for (const c of me.battlezone.slice()) {
+          firePar(s, idx, c, 'oppstartturn', extraLogs);
+          firePar(s, idx, c, 'onoppturnstart', extraLogs);
+        }
         // untap step: the player whose turn is starting untaps their mana and creatures —
         // except a creature marked noAutoUntap (e.g. Venom Capsule), which stays tapped
         // until manually untapped or untapped by an effect.
@@ -2522,7 +2769,7 @@ wss.on('connection', (ws) => {
         // per-card ability — so they can't be tapped for mana the same turn they're
         // charged. A few specific mono-civ cards (Gonta, Miraculous Snare) also enter
         // tapped as a printed ability of their own.
-        const arrivesTapped = civsOf(c.id).length > 1 || ENTERS_MANA_TAPPED.has(cardLabel(c.id).toLowerCase());
+        const arrivesTapped = civsOf(c.id).length > 1 || entersManaTapped(c.id);
         me.mana.push({ id: c.id, key: c.key, tapped: arrivesTapped, x: mSlot.x, y: mSlot.y });
         logText = 'charged ' + cardLabel(c.id) + ' to their mana zone' + (arrivesTapped ? ' (tapped).' : '.');
         break;
@@ -2635,7 +2882,9 @@ wss.on('connection', (ws) => {
         if (evoBase) extraLogs.push('evolved ' + cardLabel(c.id) + ' from ' + cardLabel(evoBase.id) + '.');
         if (isSpellCard(c.id)) {
           me.spellsCastThisTurn = (me.spellsCastThisTurn || 0) + 1;
-          fireBoardWide(s, 'onoppcast', extraLogs, { onlySide: oppIdx });
+          const castEv = { cardId: c.id, key: c.key, ownerIdx: idx };
+          fireBoardWide(s, 'onoppcast', extraLogs, { onlySide: oppIdx, event: castEv });
+          fireBoardWide(s, 'onanycast', extraLogs, { event: castEv });
         } else s.creaturesEnteredThisTurn = (s.creaturesEnteredThisTurn || 0) + 1;
         // Turbo Rush: if one of your creatures already broke a shield this turn, your
         // creatures gain Speed Attacker for the rest of it
@@ -2809,6 +3058,8 @@ wss.on('connection', (ws) => {
           }
           // Gigazald lets your other Darkness creatures tap for an ability instead of attacking
           const gigazald = me.battlezone.some(g => normalizeCardKey(cardLabel(g.id)) === GIGAZALD_NAME);
+          // Silent Skill: the ability is used INSTEAD of attacking, so it only makes
+          // sense on your own turn with the creature still untapped.
           const grantsChoice = hasSheetTrigger(c.id, 'tapability') || TAP_ABILITIES[name] ||
             (gigazald && name !== GIGAZALD_NAME && civsOf(c.id).includes('Darkness'));
           if (grantsChoice && !msg.mode) {
@@ -3423,10 +3674,16 @@ wss.on('connection', (ws) => {
         atk.attackedThisTurn = true;
         fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'declare');
         firePar(s, idx, atk, 'onattack', extraLogs);
-        fireBoardWide(s, 'oncreatureattack', extraLogs, { onlySide: idx, exceptKey: atk.key });
+        const atkEv = { cardId: atk.id, key: atk.key, ownerIdx: idx };
+        fireBoardWide(s, 'oncreatureattack', extraLogs, { onlySide: idx, exceptKey: atk.key, event: atkEv });
+        fireBoardWide(s, 'onowncreatureattack', extraLogs, { onlySide: idx, exceptKey: atk.key, event: atkEv });
         if (target.type === 'creature') {
           const victim = opp.battlezone.find(c => c.key === target.key);
-          if (victim) firePar(s, oppIdx, victim, 'onattacked', extraLogs);
+          if (victim) {
+            firePar(s, oppIdx, victim, 'onattacked', extraLogs);
+            fireBoardWide(s, 'onowncreatureattacked', extraLogs,
+              { onlySide: oppIdx, exceptKey: victim.key, event: { cardId: victim.id, key: victim.key, ownerIdx: oppIdx } });
+          }
         }
         if (target.type === 'shield') firePar(s, idx, atk, 'onplayerattack', extraLogs);
 
