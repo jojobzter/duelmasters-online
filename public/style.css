@@ -565,24 +565,6 @@ input {
 }
 
 
-/* Attack targeting arrow — shows the defender exactly what is being attacked, so a
-   block decision can be made on the facts rather than by reading the log. */
-#attack-arrow {
-  position: fixed; inset: 0; width: 100%; height: 100%;
-  pointer-events: none; z-index: 60; display: none;
-}
-#attack-arrow.visible { display: block; }
-#attack-arrow .arrow-line {
-  stroke: #ff6b6b; stroke-width: 3; fill: none; opacity: 0.75;
-  stroke-linecap: round; filter: drop-shadow(0 0 4px rgba(0,0,0,0.6));
-}
-#attack-arrow .arrow-head { fill: #ff6b6b; opacity: 0.85; }
-#attack-arrow .arrow-glow {
-  stroke: #ff6b6b; stroke-width: 9; fill: none; opacity: 0.18;
-  stroke-linecap: round;
-}
-
-
 /* Menu music toggle */
 .title-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .title-row h1 { margin: 0; }

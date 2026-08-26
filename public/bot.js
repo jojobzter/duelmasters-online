@@ -423,6 +423,26 @@ const Bot = (() => {
   function handlePrompts(state) {
     const me = myState(state), opp = oppState(state);
 
+    // Shield triggers are normally answered from the offer message, but that is a
+    // single event — if it is missed the game deadlocks, because an unresolved
+    // trigger also blocks the opponent. The state carries the pending keys, so the
+    // bot can always recover from here.
+    if ((me.pendingShieldTriggers || []).length) {
+      const key = me.pendingShieldTriggers[0];
+      let cast = true;
+      try {
+        const card = me.hand.find(c => c.key === key);
+        if (card) {
+          const v = cardValue(state, card);
+          cast = v > 0 || me.shields.length <= 1;
+        }
+      } catch (e) { /* if in doubt, cast it */ }
+      lastAttemptKey = 'trigger:' + key;
+      act(() => send(cast ? { type: 'castFreeFromHand', key }
+                          : { type: 'shieldTriggerDecline', key }), DELAY.normal);
+      return true;
+    }
+
     // forced discards — pitch the least useful cards
     if (me.pendingDiscards && me.pendingDiscards.length) {
       const eff = me.pendingDiscards[0];
@@ -707,6 +727,7 @@ const Bot = (() => {
         }
       }
     } catch (e) { /* fall back to casting */ }
+    lastAttemptKey = 'trigger:' + key;
     act(() => send(worthCasting
       ? { type: 'castFreeFromHand', key }
       : { type: 'shieldTriggerDecline', key }), DELAY.normal);
@@ -732,6 +753,17 @@ const Bot = (() => {
   // update, so without this the bot would simply stop mid-turn.
   function onRejected() {
     if (!active) return;
+    // A refused free cast means the trigger can't be used at all. Decline it, or the
+    // prompt stays pending and blocks the human as well as the bot.
+    if (lastState) {
+      const pend = (myState(lastState).pendingShieldTriggers || [])[0];
+      if (pend && lastAttemptKey === 'trigger:' + pend) {
+        lastAttemptKey = null;
+        if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
+        act(() => send({ type: 'shieldTriggerDecline', key: pend }), DELAY.fast);
+        return;
+      }
+    }
     if (lastAttemptKey && lastAttemptKey.startsWith('target:')) {
       // don't offer this target for this effect again — otherwise it loops forever
       rejectedTargets.add(lastAttemptKey.slice('target:'.length));

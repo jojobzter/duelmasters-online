@@ -879,6 +879,17 @@ function handleSeatMessage(seatIndex, msg) {
   }
   if (msg.type === 'summonRejected') {
     if (isBotGame && seatIndex === 1) { Bot.onRejected(); return; }
+    // If a free cast was refused, the trigger can't be used — decline it rather than
+    // leaving the prompt pending, which would block the opponent too.
+    if (shieldTriggerPendingKey) {
+      sendMsg({ type: 'shieldTriggerDecline', key: shieldTriggerPendingKey });
+      const m = document.getElementById('shield-trigger-modal');
+      if (m) m.style.display = 'none';
+      shieldTriggerPendingKey = null;
+      deliverPrompt(seatIndex, () => alert(msg.reason));
+      processNextShieldTrigger();
+      return;
+    }
     deliverPrompt(seatIndex, () => alert(msg.reason));
     return;
   }
@@ -1275,11 +1286,6 @@ function closeMagnify() { magnifyOverlay.style.display = 'none'; }
 magnifyOverlay.addEventListener('click', (e) => { if (e.target === magnifyOverlay) closeMagnify(); });
 magnifyCard.addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMagnify(); });
-// keep the arrow attached to its cards when the view moves
-['resize', 'scroll'].forEach(ev => window.addEventListener(ev, () => {
-  const st = seats[activeSeat] && seats[activeSeat].state;
-  if (st) drawAttackArrow(st);
-}, { passive: true }));
 function makeMagnifiable(el, id) { el.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); openMagnify(id); }); }
 
 // ====================== Flash (ctrl/cmd+click indicate) ======================
@@ -1366,6 +1372,15 @@ function powerById(id) {
 function isBlockerById(id) {
   const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   return !!(meta && meta.blocker);
+}
+function civsById(id) {
+  const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
+  return (meta && meta.civs) || [];
+}
+function racesById(id) {
+  const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
+  const r = (meta && meta.race) || '';
+  return String(r).toLowerCase().split('/').map(x => x.trim()).filter(Boolean);
 }
 
 // card type comes from the shared card database loaded at startup
@@ -1552,6 +1567,16 @@ function candidatesFor(eff, me, opp) {
   if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
   if (eff.filter === 'spell') list = list.filter(c => isSpellById(c.id));
   if (eff.filter === 'creature') list = list.filter(c => !isSpellById(c.id));
+  // "civ=Darkness/Fire" lists alternatives — match any of them, as the server does
+  const anyOf = (have, spec) => {
+    if (spec == null) return true;
+    const wants = String(spec).split('/').map(x => x.trim().toLowerCase()).filter(Boolean);
+    const got = (have || []).map(x => String(x).toLowerCase());
+    return wants.some(w => got.includes(w));
+  };
+  if (eff.civ) list = list.filter(c => anyOf(civsById(c.id), eff.civ));
+  if (eff.negCiv) list = list.filter(c => !anyOf(civsById(c.id), eff.negCiv));
+  if (eff.race) list = list.filter(c => anyOf(racesById(c.id), eff.race));
   if (eff.maxPower != null) {
     // keep creatures with no recorded power — the player confirms those by hand
     list = list.filter(c => { const p = powerById(c.id); return p == null || p <= eff.maxPower; });
@@ -2201,69 +2226,6 @@ function flashMovedCards(state) {
 
 // ====================== Table rendering ======================
 
-// ---------------------------------------------------------------------------
-// Attack targeting arrow.
-//
-// Drawn for BOTH players while an attack is unresolved, from the attacking creature
-// to whatever it is aimed at. The defender can then see what is coming before
-// deciding whether to block, instead of having to read the move log.
-// ---------------------------------------------------------------------------
-function cardCentre(key) {
-  if (!key) return null;
-  const el = document.querySelector('.card[data-key="' + key + '"]');
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  if (!r.width && !r.height) return null;
-  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-}
-
-function zoneCentre(id) {
-  const el = document.getElementById(id);
-  if (!el) return null;
-  const r = el.getBoundingClientRect();
-  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-}
-
-function drawAttackArrow(st) {
-  const svg = document.getElementById('attack-arrow');
-  if (!svg) return;
-  const cb = st && st.combat;
-  if (!cb || !cb.attackerKey) { svg.classList.remove('visible'); svg.innerHTML = ''; return; }
-
-  const from = cardCentre(cb.attackerKey);
-  let to = null;
-  if (cb.target && cb.target.type === 'creature') to = cardCentre(cb.target.key);
-  if (!to && cb.target && cb.target.type === 'shield') {
-    to = (cb.target.key && cardCentre(cb.target.key)) ||
-         zoneCentre(cb.attackerIdx === st.you ? 'opp-shields' : 'my-shields');
-  }
-  if (!from || !to) { svg.classList.remove('visible'); svg.innerHTML = ''; return; }
-
-  // stop the line just short of the target so the arrowhead sits outside the card
-  const dx = to.x - from.x, dy = to.y - from.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len, uy = dy / len;
-  const endX = to.x - ux * 26, endY = to.y - uy * 26;
-  // a gentle curve reads better than a straight line across a busy table
-  const midX = (from.x + endX) / 2 - uy * len * 0.10;
-  const midY = (from.y + endY) / 2 + ux * len * 0.10;
-  const path = 'M ' + from.x + ' ' + from.y + ' Q ' + midX + ' ' + midY + ' ' + endX + ' ' + endY;
-
-  const ax = Math.atan2(endY - midY, endX - midX);
-  const head = [
-    [endX, endY],
-    [endX - 15 * Math.cos(ax - 0.4), endY - 15 * Math.sin(ax - 0.4)],
-    [endX - 15 * Math.cos(ax + 0.4), endY - 15 * Math.sin(ax + 0.4)]
-  ].map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
-
-  svg.setAttribute('viewBox', '0 0 ' + window.innerWidth + ' ' + window.innerHeight);
-  svg.innerHTML =
-    '<path class="arrow-glow" d="' + path + '"/>' +
-    '<path class="arrow-line" d="' + path + '"/>' +
-    '<polygon class="arrow-head" points="' + head + '"/>';
-  svg.classList.add('visible');
-}
-
 function renderState(state) {
   const meIdx = state.you;
   const oppIdx = meIdx === 0 ? 1 : 0;
@@ -2571,9 +2533,6 @@ function renderState(state) {
   manaLabel('my-mana-count', me.mana);
   manaLabel('opp-mana-count', opp.mana);
 
-  // the arrow is positioned from live element geometry, so draw it after the layout
-  // has settled rather than mid-render
-  requestAnimationFrame(() => drawAttackArrow(state));
 
   const ws = document.getElementById('whose-side');
   if (ws) {
