@@ -550,11 +550,15 @@ function effectivePowerInner(state, ownerIdx, card, attacking) {
 
   // Petrova: +4000 to your OTHER creatures of the named race, while Petrova is out
   // Every Petrova names its own race, and each one grants +4000 independently.
-  for (const pet of owner.battlezone) {
-    if (normalizeCardKey(cardLabel(pet.id)) !== PETROVA_NAME) continue;
-    if (hasSheetEffects(pet.id)) continue;        // the sheet already applies this
-    if (!pet.petrovaRace || pet.key === card.key) continue;
-    if (racesOf(card.id).includes(pet.petrovaRace.toLowerCase())) p += 4000;
+  // Petrova buffs EVERY creature of the named race, on both sides of the table.
+  // (Fallback only — the sheet drives this whenever its Effect text is filled in.)
+  for (const pl of state.players) {
+    for (const pet of pl.battlezone) {
+      if (normalizeCardKey(cardLabel(pet.id)) !== PETROVA_NAME) continue;
+      if (hasSheetEffects(pet.id)) continue;
+      if (!pet.petrovaRace || pet.key === card.key) continue;
+      if (racesOf(card.id).includes(pet.petrovaRace.toLowerCase())) p += 4000;
+    }
   }
 
   // Pala Olesis: during the OPPONENT's turn, your other creatures get +2000
@@ -3575,7 +3579,7 @@ wss.on('connection', (ws) => {
         const petCard = me.battlezone.find(c => c.key === pending.cardKey);
         if (petCard) petCard.petrovaRace = race;
         me.pendingRaceChoices.shift();
-        logText = 'named ' + race + ' with Petrova — their other ' + race + ' creatures get +4000.';
+        logText = 'named ' + race + ' with Petrova — EVERY ' + race + ' creature gets +4000, on both sides.';
         break;
       }
       case 'chooseTruceCiv': {
