@@ -747,6 +747,15 @@ document.getElementById('btn-vs-computer').addEventListener('click', () => {
   openSeat(0, { type: 'create', name: myName() });
 });
 
+// music toggle, remembered between sessions
+(function () {
+  const btn = document.getElementById('btn-music');
+  if (!btn) return;
+  btn.textContent = menuMusicMuted ? 'Music: off' : 'Music: on';
+  btn.classList.toggle('muted', menuMusicMuted);
+  btn.addEventListener('click', (e) => { e.stopPropagation(); setMusicMuted(!menuMusicMuted); });
+})();
+
 document.getElementById('btn-practice').addEventListener('click', () => {
   const decks = getSavedDecks();
   if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
@@ -954,7 +963,75 @@ let audioUnlocked = false;
 
 function allSoundPaths() { return CHAT_TONE_FILES.concat(Object.values(SFX_FILES)); }
 
+
+// ---------------------------------------------------------------------------
+// Menu music.
+//
+// Loops quietly on the setup screen and fades out when the table opens, so it never
+// plays over a game. Browsers block autoplay until the person interacts with the
+// page, so it starts on the first tap/click/keypress rather than on load.
+// ---------------------------------------------------------------------------
+const MENU_MUSIC_FILE = 'sounds/dark-angel.mp3';
+const MENU_MUSIC_VOLUME = 0.32;
+let menuMusic = null;
+let menuMusicFade = null;
+let menuMusicMuted = localStorage.getItem('dm_music_muted') === '1';
+
+function startMenuMusic() {
+  if (menuMusicMuted) return;
+  if (menuMusic && !menuMusic.paused) return;
+  try {
+    if (!menuMusic) {
+      menuMusic = new Audio(MENU_MUSIC_FILE);
+      menuMusic.loop = true;
+      menuMusic.preload = 'auto';
+      // a missing file shouldn't produce console noise or break anything else
+      menuMusic.addEventListener('error', () => { menuMusic = null; }, { once: true });
+    }
+    if (menuMusicFade) { clearInterval(menuMusicFade); menuMusicFade = null; }
+    menuMusic.volume = MENU_MUSIC_VOLUME;
+    const p = menuMusic.play();
+    if (p && p.catch) p.catch(() => { /* still blocked; the next interaction retries */ });
+  } catch (e) { /* no music is not an error worth surfacing */ }
+}
+
+function fadeOutMenuMusic(ms) {
+  if (!menuMusic || menuMusic.paused) return;
+  if (menuMusicFade) clearInterval(menuMusicFade);
+  const steps = 24;
+  const step = menuMusic.volume / steps;
+  const tick = Math.max(16, (ms || 1200) / steps);
+  menuMusicFade = setInterval(() => {
+    if (!menuMusic) { clearInterval(menuMusicFade); menuMusicFade = null; return; }
+    const v = menuMusic.volume - step;
+    if (v <= 0.01) {
+      menuMusic.pause();
+      menuMusic.currentTime = 0;
+      menuMusic.volume = MENU_MUSIC_VOLUME;
+      clearInterval(menuMusicFade);
+      menuMusicFade = null;
+    } else {
+      menuMusic.volume = v;
+    }
+  }, tick);
+}
+
+function setMusicMuted(muted) {
+  menuMusicMuted = muted;
+  localStorage.setItem('dm_music_muted', muted ? '1' : '0');
+  const btn = document.getElementById('btn-music');
+  if (btn) {
+    btn.textContent = muted ? 'Music: off' : 'Music: on';
+    btn.classList.toggle('muted', muted);
+  }
+  if (muted) { if (menuMusic) { menuMusic.pause(); menuMusic.currentTime = 0; } }
+  else if (document.getElementById('screen-setup').style.display !== 'none') startMenuMusic();
+}
+
 function unlockAudio() {
+  // the music needs a gesture too, and this fires on every interaction rather than once
+  if (document.getElementById('screen-setup') &&
+      document.getElementById('screen-setup').style.display !== 'none') startMenuMusic();
   if (audioUnlocked) return;
   audioUnlocked = true;
   for (const path of allSoundPaths()) {
@@ -971,7 +1048,7 @@ function unlockAudio() {
   }
 }
 ['touchstart', 'pointerdown', 'click', 'keydown'].forEach(ev =>
-  document.addEventListener(ev, unlockAudio, { once: true, passive: true })
+  document.addEventListener(ev, unlockAudio, { passive: true })
 );
 
 function playSound(path) {
@@ -1082,6 +1159,7 @@ function ensureTableVisible() {
   if (document.getElementById('screen-table').style.display !== 'flex') {
     document.getElementById('screen-setup').style.display = 'none';
     document.getElementById('screen-table').style.display = 'flex';
+    fadeOutMenuMusic(1400);
   }
 }
 
@@ -1185,6 +1263,11 @@ function closeMagnify() { magnifyOverlay.style.display = 'none'; }
 magnifyOverlay.addEventListener('click', (e) => { if (e.target === magnifyOverlay) closeMagnify(); });
 magnifyCard.addEventListener('click', (e) => e.stopPropagation());
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMagnify(); });
+// keep the arrow attached to its cards when the view moves
+['resize', 'scroll'].forEach(ev => window.addEventListener(ev, () => {
+  const st = seats[activeSeat] && seats[activeSeat].state;
+  if (st) drawAttackArrow(st);
+}, { passive: true }));
 function makeMagnifiable(el, id) { el.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); openMagnify(id); }); }
 
 // ====================== Flash (ctrl/cmd+click indicate) ======================
@@ -1333,6 +1416,7 @@ document.getElementById('btn-quit').addEventListener('click', () => {
   document.getElementById('chat-messages').innerHTML = '';
   document.getElementById('screen-table').style.display = 'none';
   document.getElementById('screen-setup').style.display = 'block';
+  startMenuMusic();
   document.getElementById('room-info').textContent = '';
   document.getElementById('join-request-banner').style.display = 'none';
 });
@@ -2094,6 +2178,70 @@ function flashMovedCards(state) {
 }
 
 // ====================== Table rendering ======================
+
+// ---------------------------------------------------------------------------
+// Attack targeting arrow.
+//
+// Drawn for BOTH players while an attack is unresolved, from the attacking creature
+// to whatever it is aimed at. The defender can then see what is coming before
+// deciding whether to block, instead of having to read the move log.
+// ---------------------------------------------------------------------------
+function cardCentre(key) {
+  if (!key) return null;
+  const el = document.querySelector('.card[data-key="' + key + '"]');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  if (!r.width && !r.height) return null;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function zoneCentre(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function drawAttackArrow(st) {
+  const svg = document.getElementById('attack-arrow');
+  if (!svg) return;
+  const cb = st && st.combat;
+  if (!cb || !cb.attackerKey) { svg.classList.remove('visible'); svg.innerHTML = ''; return; }
+
+  const from = cardCentre(cb.attackerKey);
+  let to = null;
+  if (cb.target && cb.target.type === 'creature') to = cardCentre(cb.target.key);
+  if (!to && cb.target && cb.target.type === 'shield') {
+    to = (cb.target.key && cardCentre(cb.target.key)) ||
+         zoneCentre(cb.attackerIdx === st.you ? 'opp-shields' : 'my-shields');
+  }
+  if (!from || !to) { svg.classList.remove('visible'); svg.innerHTML = ''; return; }
+
+  // stop the line just short of the target so the arrowhead sits outside the card
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  const endX = to.x - ux * 26, endY = to.y - uy * 26;
+  // a gentle curve reads better than a straight line across a busy table
+  const midX = (from.x + endX) / 2 - uy * len * 0.10;
+  const midY = (from.y + endY) / 2 + ux * len * 0.10;
+  const path = 'M ' + from.x + ' ' + from.y + ' Q ' + midX + ' ' + midY + ' ' + endX + ' ' + endY;
+
+  const ax = Math.atan2(endY - midY, endX - midX);
+  const head = [
+    [endX, endY],
+    [endX - 15 * Math.cos(ax - 0.4), endY - 15 * Math.sin(ax - 0.4)],
+    [endX - 15 * Math.cos(ax + 0.4), endY - 15 * Math.sin(ax + 0.4)]
+  ].map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+
+  svg.setAttribute('viewBox', '0 0 ' + window.innerWidth + ' ' + window.innerHeight);
+  svg.innerHTML =
+    '<path class="arrow-glow" d="' + path + '"/>' +
+    '<path class="arrow-line" d="' + path + '"/>' +
+    '<polygon class="arrow-head" points="' + head + '"/>';
+  svg.classList.add('visible');
+}
+
 function renderState(state) {
   const meIdx = state.you;
   const oppIdx = meIdx === 0 ? 1 : 0;
@@ -2400,6 +2548,10 @@ function renderState(state) {
   };
   manaLabel('my-mana-count', me.mana);
   manaLabel('opp-mana-count', opp.mana);
+
+  // the arrow is positioned from live element geometry, so draw it after the layout
+  // has settled rather than mid-render
+  requestAnimationFrame(() => drawAttackArrow(state));
 
   const ws = document.getElementById('whose-side');
   if (ws) {

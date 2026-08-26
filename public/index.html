@@ -9,7 +9,10 @@
 <body>
 
 <div id="screen-setup" class="screen">
-  <h1>Duel Masters Table</h1>
+  <div class="title-row">
+    <h1>Duel Masters Table</h1>
+    <button id="btn-music" class="music-toggle" title="Menu music">Music: on</button>
+  </div>
 
   <section class="panel">
     <h2>1. Load your card images</h2>
@@ -106,6 +109,7 @@
 
 
 <div id="screen-table" class="screen table-screen" style="display:none">
+  <svg id="attack-arrow" aria-hidden="true"></svg>
   <div id="table">
     <div class="zone-label">Opponent Hand</div>
     <div id="opp-hand" class="zone hand-zone opp-hand"></div>
