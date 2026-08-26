@@ -908,9 +908,9 @@ function legalTargetCount(me, opp, eff) {
     const p = currentPower(c, ownerIdx);
     return p == null || p <= eff.maxPower;
   });
-  if (eff.civ) list = list.filter(c => civsOf(c.id).includes(eff.civ));
-  if (eff.negCiv) list = list.filter(c => !civsOf(c.id).includes(eff.negCiv));
-  if (eff.race) list = list.filter(c => racesOf(c.id).includes(eff.race.toLowerCase()));
+  if (eff.civ) list = list.filter(c => civMatches(c.id, eff.civ));
+  if (eff.negCiv) list = list.filter(c => !civMatches(c.id, eff.negCiv));
+  if (eff.race) list = list.filter(c => raceMatchesAny(c.id, eff.race));
   // a card that can't be chosen by the opponent's effects (Petrova) isn't a target
   if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle') {
     list = list.filter(c => !(opp.battlezone.includes(c) && isUnchoosable(c.id)));
@@ -1049,10 +1049,10 @@ function selectorMatches(state, srcOwnerIdx, srcCard, sel, cardOwnerIdx, card) {
           : f.value;
         const races = racesOf(card.id);
         ok = f.op === '~' ? races.some(r => r.includes(String(want).toLowerCase()))
-                          : races.includes(String(want).toLowerCase());
+                          : valueMatchesAny(races, want);
         break;
       }
-      case 'civ': ok = civsOf(card.id).includes(f.value); break;
+      case 'civ': ok = civMatches(card.id, f.value); break;
       case 'power': {
         const p = powerOf(card.id);
         if (p == null) { ok = true; break; }
@@ -1272,6 +1272,18 @@ function castPrevented(state, playerIdx, cardId) {
 }
 
 // Does a card match a description like "spell[!civ=Light]" or "creature[race~Dragon]"?
+// A filter value may list alternatives with a slash: "civ=Darkness/Fire" means either.
+// Comparing it as one literal string matches nothing, which is how Mizoy's ability
+// silently did nothing.
+function valueMatchesAny(have, spec) {
+  if (spec == null) return true;
+  const wants = String(spec).split('/').map(x => x.trim().toLowerCase()).filter(Boolean);
+  const got = (have || []).map(x => String(x).toLowerCase());
+  return wants.some(w => got.includes(w));
+}
+function civMatches(cardId, spec) { return valueMatchesAny(civsOf(cardId), spec); }
+function raceMatchesAny(cardId, spec) { return valueMatchesAny(racesOf(cardId), spec); }
+
 function cardMatchesFilter(cardId, filter) {
   if (!filter) return false;
   const kind = filter.kind;
@@ -1280,7 +1292,7 @@ function cardMatchesFilter(cardId, filter) {
   for (const f of filter.filters || []) {
     let ok = true;
     switch (f.key) {
-      case 'civ': ok = civsOf(cardId).includes(f.value); break;
+      case 'civ': ok = civMatches(cardId, f.value); break;
       case 'race': {
         const races = racesOf(cardId);
         ok = f.op === '~' ? races.some(r => r.includes(String(f.value).toLowerCase()))
@@ -1348,9 +1360,9 @@ function filtersToEngine(sel) {
 
 // does a card match the extra filters the engine doesn't natively check?
 function matchesExtra(id, ex) {
-  if (ex.civ && !civsOf(id).includes(ex.civ)) return false;
-  if (ex.negCiv && civsOf(id).includes(ex.negCiv)) return false;
-  if (ex.race && !racesOf(id).includes(ex.race.toLowerCase())) return false;
+  if (ex.civ && !civMatches(id, ex.civ)) return false;
+  if (ex.negCiv && civMatches(id, ex.negCiv)) return false;
+  if (ex.race && !raceMatchesAny(id, ex.race)) return false;
   return true;
 }
 
@@ -1889,7 +1901,7 @@ function triggerFilterMatches(state, listenerIdx, filter, ev) {
                           : races.includes(String(f.value).toLowerCase());
         break;
       }
-      case 'civ': ok = civsOf(ev.cardId || '').includes(f.value); break;
+      case 'civ': ok = civMatches(ev.cardId || '', f.value); break;
       case 'creature': ok = !isSpellCard(ev.cardId || ''); break;
       case 'spell': ok = isSpellCard(ev.cardId || ''); break;
       default: ok = true;
@@ -2381,6 +2393,7 @@ function viewFor(room, viewerIdx) {
     pendingTruce: isSelf ? p.pendingTruce : undefined,
     pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
     pendingShieldTriggerCount: (p.pendingShieldTriggers || []).length,
+    pendingShieldTriggers: isSelf ? (p.pendingShieldTriggers || []) : undefined,
     // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
     pendingPromptCount: pendingPromptTotal(p),
     truceCiv: p.truceCiv || null,
@@ -3361,15 +3374,15 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a spell.' });
           return;
         }
-        if (eff.civ && !civsOf(card.id).includes(eff.civ)) {
+        if (eff.civ && !civMatches(card.id, eff.civ)) {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a ' + eff.civ + ' card.' });
           return;
         }
-        if (eff.negCiv && civsOf(card.id).includes(eff.negCiv)) {
+        if (eff.negCiv && civMatches(card.id, eff.negCiv)) {
           send(ws, { type: 'summonRejected', reason: eff.source + " can't choose a " + eff.negCiv + ' card.' });
           return;
         }
-        if (eff.race && !racesOf(card.id).includes(eff.race.toLowerCase())) {
+        if (eff.race && !raceMatchesAny(card.id, eff.race)) {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a ' + eff.race + '.' });
           return;
         }
@@ -3915,13 +3928,25 @@ wss.on('connection', (ws) => {
     // an opponent (especially the bot, which reacts the instant a state arrives)
     // can act into an attack whose trigger hasn't been offered yet. Registering
     // first means the one broadcastState() below already reflects it.
+    const offerable = [];
     for (const offer of shieldTriggerOffers) {
+      // Something on the table may forbid casting this card at all (Alcadeias
+      // locks out non-Light spells for BOTH players, including its own controller).
+      // Offering it anyway asks a question whose answer the server would refuse,
+      // and the unresolved prompt then blocks both players indefinitely.
+      const blockedBy = castPrevented(s, offer.idx, offer.id);
+      if (blockedBy) {
+        extraLogs.push(cardLabel(offer.id) + ' could not be cast (' + blockedBy + ') — it stays in hand.');
+        continue;
+      }
+      offerable.push(offer);
       // creatures that react when the OPPONENT uses a shield trigger
       fireBoardWide(s, 'onoppshieldtrigger', extraLogs, { onlySide: offer.idx === 0 ? 1 : 0 });
       const target = s.players[offer.idx];
       target.pendingShieldTriggers = target.pendingShieldTriggers || [];
       target.pendingShieldTriggers.push(offer.key);
     }
+    shieldTriggerOffers = offerable;
     broadcastState(room);
     if (logText) logMsg(room, idx, logText);
     extraLogs.forEach(t => logMsg(room, idx, t));
@@ -3950,7 +3975,9 @@ wss.on('connection', (ws) => {
       const tws = room.sockets[offer.idx];
       if (tws) send(tws, { type: 'shieldTriggerOffer', key: offer.key, id: offer.id });
     }
-    if (shieldTriggerOfferKey) send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
+    if (shieldTriggerOfferKey && !castPrevented(s, idx, shieldTriggerOfferId)) {
+      send(ws, { type: 'shieldTriggerOffer', key: shieldTriggerOfferKey, id: shieldTriggerOfferId });
+    }
     if (me.pendingSearch && !searchAlreadyOpen) send(ws, { type: 'searchDeckOffer', cards: me.deck.map((id, index) => ({ index, id })), filter: me.pendingSearch.filter, costEquals: me.pendingSearch.costEquals != null ? me.pendingSearch.costEquals : null, source: me.pendingSearch.source });
     if (sfxToPlay) broadcastRaw(room, { type: 'sfx', name: sfxToPlay });
   });
