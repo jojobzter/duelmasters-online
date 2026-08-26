@@ -263,6 +263,10 @@ let currentDeck = [];
 
 // ---- Card metadata (civilization/type/cost), loaded from the server's parsed spreadsheet ----
 let cardMetaDB = new Map(); // lowercase card name -> {name, cost, type, civs}
+// the engine's published ability index, so the client can mirror rules like
+// "this card can't be chosen by an opponent's effect" without hardcoding names
+let EFFECT_INDEX = {};
+fetch('/api/effects').then(r => r.json()).then(x => { EFFECT_INDEX = x || {}; }).catch(() => {});
 let activeCivFilters = new Set();
 let activeTypeFilters = new Set();
 const CIV_COLORS = { Fire: '#c0392b', Water: '#2980b9', Nature: '#27ae60', Light: '#c99a1e', Darkness: '#6a3f9e' };
@@ -1373,6 +1377,14 @@ function isBlockerById(id) {
   const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   return !!(meta && meta.blocker);
 }
+// a card the opponent's effects can't choose (Petrova, and anything the sheet grants
+// "unchoosable" to) — read from the published effect index rather than by name
+function isUnchoosableById(id) {
+  const name = normKeyClient(cardBaseName(id));
+  if (name === 'petrova, channeler of suns') return true;
+  const fx = (typeof EFFECT_INDEX !== 'undefined' && EFFECT_INDEX) ? EFFECT_INDEX[name] : null;
+  return !!(fx && fx.unchoosable);
+}
 function civsById(id) {
   const meta = cardMetaDB.get(normKeyClient(cardBaseName(id)));
   return (meta && meta.civs) || [];
@@ -1563,10 +1575,13 @@ function candidatesFor(eff, me, opp) {
   for (const zn of (eff.altZones && eff.altZones.length ? eff.altZones : [eff.zone])) {
     list = list.concat(zones[zn] || []);
   }
+  // an effect never targets the card that produced it
+  if (eff.sourceKey) list = list.filter(c => c.key !== eff.sourceKey);
   if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
   if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
   if (eff.filter === 'spell') list = list.filter(c => isSpellById(c.id));
   if (eff.filter === 'creature') list = list.filter(c => !isSpellById(c.id));
+  if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test((cardMetaFor(c.id) || {}).type || ''));
   // "civ=Darkness/Fire" lists alternatives — match any of them, as the server does
   const anyOf = (have, spec) => {
     if (spec == null) return true;
@@ -1582,8 +1597,8 @@ function candidatesFor(eff, me, opp) {
     list = list.filter(c => { const p = powerById(c.id); return p == null || p <= eff.maxPower; });
   }
   // Petrova can't be chosen by the opponent's effects
-  if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle') {
-    list = list.filter(c => !(opp.battlezone.includes(c) && cardBaseName(c.id).toLowerCase() === 'petrova, channeler of suns'));
+  if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle' || (eff.altZones || []).includes('oppBattle')) {
+    list = list.filter(c => !(opp.battlezone.includes(c) && isUnchoosableById(c.id)));
   }
   return list;
 }
@@ -2018,20 +2033,10 @@ function selectableKeysFor(state, me, opp) {
 
   const eff = (me.pendingTargets || [])[0];
   if (eff && eff.zone !== 'ownGrave') {
-    const pool = {
-      oppBattle: opp.battlezone, ownBattle: me.battlezone, ownHand: me.hand,
-      ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields,
-      anyBattle: me.battlezone.concat(opp.battlezone)
-    }[eff.zone] || [];
-    let list = pool.filter(c => c.key !== eff.sourceKey);
-    if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
-    if (eff.filter === 'spell') list = list.filter(c => isSpellById(c.id));
-    if (eff.filter === 'creature') list = list.filter(c => !isSpellById(c.id));
-    if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test(cardMetaFor(c.id).type || ''));
-    if (eff.requireBlocker) list = list.filter(c => isBlockerById(c.id));
-    if (eff.maxPower != null) list = list.filter(c => { const p = powerById(c.id); return p == null || p <= eff.maxPower; });
-    // Petrova can't be chosen by the opponent's effects
-    list = list.filter(c => !(opp.battlezone.includes(c) && normKeyClient(cardBaseName(c.id)) === 'petrova, channeler of suns'));
+    // One filter implementation, shared with the picker modal. A second copy here is
+    // exactly how Mizoy ended up highlighting creatures of every civilization while
+    // the modal filtered them correctly.
+    const list = candidatesFor(eff, me, opp);
     return {
       keys: new Set(list.map(c => c.key)),
       onClick: key => {

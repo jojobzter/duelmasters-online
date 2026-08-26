@@ -468,11 +468,14 @@ const Bot = (() => {
     }
 
     if (me.pendingRaceChoice) {
-      // name whichever race the bot itself fields most
+      // The buff applies to BOTH players' creatures of that race, so a race the
+      // opponent also fields would be handing them power. Score by net advantage.
       const counts = {};
       me.battlezone.forEach(c => racesOf(c.id).forEach(r => { counts[r] = (counts[r] || 0) + 1; }));
+      opp.battlezone.forEach(c => racesOf(c.id).forEach(r => { counts[r] = (counts[r] || 0) - 1; }));
       const ex = (me.pendingRaceChoice.excludeRace || '').toLowerCase();
-      const best = Object.keys(counts).filter(r => r !== ex).sort((a, b) => counts[b] - counts[a])[0];
+      const best = Object.keys(counts).filter(r => r !== ex && counts[r] > 0)
+        .sort((a, b) => counts[b] - counts[a])[0];
       const race = best ? best.replace(/\b\w/g, ch => ch.toUpperCase()) : 'Guardian';
       act(() => send({ type: 'choosePetrovaRace', race }), DELAY.normal);
       return true;
