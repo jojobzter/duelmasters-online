@@ -47,7 +47,18 @@ const ZONES = {
   owncard: { side: 'own', zone: 'played' },
   oppcard: { side: 'opp', zone: 'played' },
   target: { side: 'any', zone: 'target' },
-  otheranycreature: { side: 'any', zone: 'battle', excludeSelf: true }
+  otheranycreature: { side: 'any', zone: 'battle', excludeSelf: true },
+  // "other..." forms simply exclude the card doing the choosing
+  // either player's zone, used by effects that may reach across the table
+  anymana:   { side: 'any', zone: 'mana' },
+  anyshield: { side: 'any', zone: 'shield' },
+  anygrave:  { side: 'any', zone: 'grave' },
+  anyhand:   { side: 'any', zone: 'hand' },
+  anycreature2: { side: 'any', zone: 'battle' },
+  otherowngrave: { side: 'own', zone: 'grave', excludeSelf: true },
+  otherownmana:  { side: 'own', zone: 'mana',  excludeSelf: true },
+  otherownhand:  { side: 'own', zone: 'hand',  excludeSelf: true },
+  otherownshield:{ side: 'own', zone: 'shield',excludeSelf: true }
 };
 
 function splitTop(text, sep) {
@@ -67,6 +78,18 @@ function splitTop(text, sep) {
 // "oppCreature[power<=2000,blocker]" -> { zone, filters }
 function parseSelector(raw) {
   if (!raw) return null;
+  raw = raw.trim();
+  // "(oppCreature or oppShield)" — the player may pick from either zone
+  const alt = raw.match(/^\((.+)\)$/);
+  if (alt) {
+    const raws = alt[1].split(/\s+or\s+/i).map(x => x.trim());
+    const parts = raws.map(x => parseSelector(x));
+    // if any branch is unknown the whole thing is unknown — degrading to one option
+    // would quietly change what the card does
+    if (parts.some(x => !x)) return null;
+    if (parts.length > 1) return { name: raw, alternatives: parts, side: parts[0].side, zone: parts[0].zone, filters: [], accessor: null };
+    return parts[0];
+  }
   let accessor = null;
   const acc = raw.match(/^(.*)\.(topCard|count|evoBase|name)$/);
   if (acc) { raw = acc[1]; accessor = acc[2]; }
@@ -114,7 +137,7 @@ function parseCount(words) {
 function processBody(bodyIn) {
   const mods = {};
   let body = bodyIn;
-  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder|permanent)\b/gi,
+  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder|permanent|tapped|free|noTrigger)\b/gi,
     (_, w) => { mods[w.toLowerCase()] = true; return ''; }).trim();
   body = body.replace(/,\s*min\s+(\d+)\b/i, (_, n) => { mods.min = parseInt(n, 10); return ''; }).trim();
   body = body.replace(/\s+(tapped|free|endOfTurn|endOfExtraTurn)\s*$/i, (_, w) => { mods[w.toLowerCase()] = true; return ''; }).trim();
@@ -162,32 +185,10 @@ function parseClause(raw, cardName, inheritedTrigger) {
   // the bracketed part restricts WHICH event fires this clause
   const triggerFilter = m[2] ? parseTriggerFilter(m[2]) : null;
 
-  let body = m[3].trim();
-
-  // trailing modifiers: ", optional", ", oppChoice", ", reveal"
-  const mods = {};
-  body = body.replace(/,\s*(optional|oppChoice|reveal|untilNextTurn|shuffled|noShieldTrigger|loseShieldTrigger|reorder|permanent)\b/gi, (_, w) => {
-    mods[w.toLowerCase()] = true; return '';
-  }).trim();
-  // ", min 2" puts a floor under a cost reduction
-  body = body.replace(/,\s*min\s+(\d+)\b/i, (_, n) => { mods.min = parseInt(n, 10); return ''; }).trim();
-  // some clauses end in a bare word that qualifies the action rather than naming a card
-  body = body.replace(/\s+(tapped|free|endOfTurn|endOfExtraTurn)\s*$/i, (_, w) => { mods[w.toLowerCase()] = true; return ''; }).trim();
-  body = body.replace(/,\s*(choice|prevents break)\s*(?=$|\s+if\s)/i, (_, w) => { mods[w.toLowerCase().replace(/\s+/g,'')] = true; return ''; }).trim();
-
-  // "... if <condition>"
-  let condition = null;
-  const ifIdx = body.toLowerCase().lastIndexOf(' if ');
-  if (ifIdx > -1) {
-    condition = body.slice(ifIdx + 4).trim();
-    body = body.slice(0, ifIdx).trim();
-  }
-  if (/^if\s+/i.test(body)) { condition = body.replace(/^if\s+/i, '').trim(); body = ''; }
-
-  // "... orElse <action>"
-  let orElse = null;
-  const oe = body.split(/\s+orElse\s+/i);
-  if (oe.length > 1) { body = oe[0].trim(); orElse = oe.slice(1).map(x => x.trim()); }
+  // One shared body processor for both paths — a duplicated copy here is exactly how
+  // ", tapped" ended up working in one place and not the other.
+  const r = processBody(m[3].trim());
+  const body = r.body, mods = r.mods, condition = r.condition, orElse = r.orElse;
 
   const action = parseAction(body, mods);
   if (!action) return { kind: 'error', reason: 'unrecognised action', text: clause };
@@ -197,6 +198,22 @@ function parseClause(raw, cardName, inheritedTrigger) {
 
 function parseAction(body, mods) {
   if (!body) return { action: 'condition' };
+
+  // Some clauses lead with the quantity rather than a verb, e.g.
+  // "up to 2 ownHand -> mana" or "any number ownGrave[...] -> hand".
+  // The destination arrow carries the action.
+  const countFirst = body.match(/^(all|any number(?: of)?|up to\s+\S+|\d+)\s+(.+?)\s*->\s*(\w+)\s*$/i);
+  if (countFirst) {
+    const c = parseCount((countFirst[1] + ' x').split(/\s+/));
+    const dest = countFirst[3].toLowerCase();
+    const verbFor = { mana: 'toMana', hand: 'toHand', shield: 'toShield', grave: 'toGrave',
+                      battle: 'toBattle', deck: 'toDeck', decktop: 'toDeckTop' }[dest];
+    if (verbFor) {
+      return { action: verbFor, count: c.count, optional: !!c.optional,
+               selector: parseSelector(countFirst[2].trim()) || { name: countFirst[2].trim() } };
+    }
+  }
+
   const words = body.split(/\s+/);
   const verb = words[0].toLowerCase();
 
@@ -249,6 +266,15 @@ function parseAction(body, mods) {
                      : verb === 'tomana' ? 'toMana' : verb === 'tograve' ? 'toGrave'
                      : verb === 'tohand' ? 'toHand' : verb === 'toshield' ? 'toShield' : verb,
                count: c.count, optional: !!c.optional, selector: sel };
+    }
+    case 'fromhand': {
+      const n = parseInt(rest[0], 10) || 1;
+      const arrow = rest.indexOf('->');
+      const dest = arrow > -1 ? (rest[arrow + 1] || 'shield').toLowerCase() : 'shield';
+      const verbFor = { shield: 'toShield', mana: 'toMana', grave: 'toGrave',
+                        battle: 'toBattle', deck: 'toDeck' }[dest] || 'toShield';
+      return { action: verbFor, count: n, optional: !!(mods && mods.optional),
+               selector: { name: 'ownHand', side: 'own', zone: 'hand', filters: [], accessor: null } };
     }
     case 'fromdeck': {
       const n = parseInt(rest[0], 10) || 1;

@@ -45,3 +45,9 @@ if (tdz.length) {
   process.exit(1);
 }
 console.log('cache declaration order: OK');
+
+
+// Third check for client.js is load-test.js, which actually EXECUTES the file under a
+// DOM stub. Static analysis can't see a use inside a top-level IIFE, and that is
+// exactly the shape that broke the card preview button. Run: node load-test.js
+console.log('(run "node load-test.js public/client.js" for the client load check)');

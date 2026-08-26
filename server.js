@@ -893,7 +893,10 @@ function legalTargetCount(me, opp, eff) {
     ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields, ownGrave: me.graveyard,
     anyBattle: me.battlezone.concat(opp.battlezone)
   };
-  let list = zones[eff.zone] || [];
+  let list = [];
+  for (const z of (eff.altZones && eff.altZones.length ? eff.altZones : [eff.zone])) {
+    list = list.concat(zones[z] || []);
+  }
   list = list.filter(c => c.key !== eff.sourceKey);
   if (eff.filter === 'untapped') list = list.filter(c => !c.tapped);
   if (eff.filter === 'creature') list = list.filter(c => !isSpellCard(c.id));
@@ -1351,6 +1354,17 @@ function matchesExtra(id, ex) {
   return true;
 }
 
+// "(oppCreature or oppShield)" — the chooser may take from either zone, so both are
+// pooled and the target validation accepts a card from whichever it came from.
+function zonesForSelector(sel) {
+  if (!sel) return [];
+  if (sel.alternatives) {
+    return sel.alternatives.map(a => zoneNameOf(a)).filter(Boolean);
+  }
+  const z = zoneNameOf(sel);
+  return z ? [z] : [];
+}
+
 function listForZone(me, opp, zoneName) {
   return {
     oppBattle: opp.battlezone, ownBattle: me.battlezone, anyBattle: me.battlezone.concat(opp.battlezone),
@@ -1442,7 +1456,8 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       }
       case 'destroy': case 'bounce': case 'toMana': case 'toGrave': case 'toHand':
       case 'toShield': case 'toDeckTop': case 'tap': case 'untap': {
-        const zoneName = zoneNameOf(e.selector);
+        const zoneNames = zonesForSelector(e.selector);
+        const zoneName = zoneNames[0];
         if (!zoneName) break;
         const wantCount = resolveCount(e.count);
         if (wantCount === 0) { logs.push(cardLabel(cardId) + ': nothing to choose (count is zero).'); break; }
@@ -1490,6 +1505,7 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           filter: ex.filter, maxPower: ex.maxPower, requireBlocker: ex.requireBlocker,
           civ: ex.civ, negCiv: ex.negCiv, race: ex.race,
           source: cardLabel(cardId), sourceKey: cardKey,
+          altZones: zoneNames.length > 1 ? zoneNames : null,
           spellKey: isSpellCard(cardId) ? cardKey : null
         };
 
@@ -3300,6 +3316,20 @@ wss.on('connection', (ws) => {
         if (eff.zone === 'anyBattle') {
           owner = me.battlezone.some(c => c.key === msg.key) ? me : opp;
           list = owner.battlezone;
+        } else if (eff.altZones && eff.altZones.length) {
+          // the effect allows several zones — accept the card from whichever holds it
+          let found = null;
+          for (const zn of eff.altZones) {
+            if (zn === 'anyBattle') {
+              const o = me.battlezone.some(c => c.key === msg.key) ? me : opp;
+              if (o.battlezone.some(c => c.key === msg.key)) { found = { owner: o, list: o.battlezone }; break; }
+              continue;
+            }
+            const z = zones[zn];
+            if (z && z.list.some(c => c.key === msg.key)) { found = z; break; }
+          }
+          if (!found) return;
+          owner = found.owner; list = found.list;
         } else {
           const z = zones[eff.zone];
           if (!z) return;
