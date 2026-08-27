@@ -1249,7 +1249,11 @@ function countSelector(state, srcOwnerIdx, srcCard, selText) {
     const ownerIdx = own.battlezone.includes(c) || own.mana.includes(c) ||
                      own.graveyard.includes(c) || own.hand.includes(c) || own.shields.includes(c)
                      ? srcOwnerIdx : (srcOwnerIdx === 0 ? 1 : 0);
-    return selectorMatches(state, srcOwnerIdx, srcCard, Object.assign({}, sel, { side: 'any' }), ownerIdx, c);
+    // The list is already scoped to the right zone, and selectorMatches only reasons
+    // about the battle zone — so neutralise its zone/side guards here. Without this a
+    // count over shields, mana or the graveyard always came back as zero.
+    const test = Object.assign({}, sel, { side: 'any', zone: 'battle' });
+    return selectorMatches(state, srcOwnerIdx, srcCard, test, ownerIdx, c);
   }).length;
 }
 
@@ -1304,7 +1308,10 @@ function staticBuffTotal(state, cardOwnerIdx, card, ctx) {
                             : selectorMatches(state, si, src, e.target, cardOwnerIdx, card);
         if (!hits) continue;
         if (!conditionHolds(state, si, src, e.condition, ctx)) continue;
-        const mult = e.per ? countSelector(state, si, src, e.per) : 1;
+        // "per (ownShield.count+oppShield.count)" sums several counts
+        const mult = e.perSum
+          ? e.perSum.reduce((n, sel) => n + countSelector(state, si, src, sel), 0)
+          : (e.per ? countSelector(state, si, src, e.per) : 1);
         bonus += (e.amount || 0) * mult;
       }
     }
@@ -1741,6 +1748,18 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         break;
       }
       case 'buff': {
+        // "+4000 choose 1 ownCreature" — the player picks who gets it
+        if (e.chooses) {
+          const zn = zoneNameOf(e.target) || 'ownBattle';
+          const base = {
+            id: newKey(), zone: zn, action: 'buff', buffAmount: e.amount,
+            source: cardLabel(cardId), sourceKey: cardKey,
+            spellKey: isSpellCard(cardId) ? cardKey : null
+          };
+          if (legalTargetCount(me, opp, base) > 0) { me.pendingTargets.push(base); defer = true; }
+          else logs.push(cardLabel(cardId) + ': no creature to boost.');
+          break;
+        }
         // "self" isn't a zone — resolve it to this very card, which is why a
         // self-targeting buff previously found nothing and did nothing at all.
         const selfOnly = !!(e.target && e.target.selfOnly);
@@ -3634,6 +3653,10 @@ wss.on('connection', (ws) => {
           case 'untap':
             card.tapped = false;
             logText = 'used ' + eff.source + ' to untap ' + label + '.';
+            break;
+          case 'buff':
+            card.tempBuff = (card.tempBuff || 0) + (eff.buffAmount || 0);
+            logText = 'used ' + eff.source + ' to give ' + label + ' +' + (eff.buffAmount || 0) + ' this turn.';
             break;
           case 'returnToHand':
             list.splice(ci, 1);

@@ -250,18 +250,33 @@ function parseAction(body, mods) {
   // "+2000 X", "-1000 power X", each optionally "per <selector>"
   // The target may carry a count word ("all X"), and the "per" selector may end in
   // ".count" or be followed by a duration word — none of which change the amount.
+  // "+4000 choose 1 ownCreature", "-1000 self per (ownShield.count+oppShield.count)"
+  const COUNTWORD = '(?:choose\\s+)?(?:all|any number(?: of)?|up to \\d+|\\d+)';
+  const PER = '(?:\\([^)]*\\)|' + SEL + '(?:\\.count)?)';
   const plus = body.match(new RegExp(
-    '^([+-])(\\d+)\\s+(?:power\\s+)?(?:(all|any number(?: of)?|up to \\d+|\\d+)\\s+)?(' + SEL + ')' +
-    '(?:\\s+per\\s+(' + SEL + ')(?:\\.count)?)?' +
+    '^([+-])(\\d+)\\s+(?:power\\s+)?(?:(' + COUNTWORD + ')\\s+)?(' + SEL + ')' +
+    '(?:\\s+per\\s+(' + PER + '))?' +
     '(?:\\s+(untilEndOfTurn|thisTurn|permanently))?\\s*$', 'i'));
   if (plus) {
     const sign = plus[1] === '-' ? -1 : 1;
     const dur = (plus[6] || '').toLowerCase();
+    const countWord = plus[3] ? plus[3].replace(/^choose\s+/i, '') : null;
+    // a "per" may be a sum of several counts, written in brackets
+    let per = null, perSum = null;
+    if (plus[5]) {
+      const braced = plus[5].trim().match(/^\((.*)\)$/);
+      if (braced) {
+        perSum = braced[1].split('+').map(x => parseSelector(x.trim())).filter(Boolean);
+        if (!perSum.length) perSum = null;
+      } else {
+        per = parseSelector(plus[5]) || { name: plus[5] };
+      }
+    }
     return { action: 'buff', amount: sign * parseInt(plus[2], 10),
-             count: plus[3] ? parseCount([plus[3], 'x']).count : undefined,
+             count: countWord ? parseCount([countWord, 'x']).count : undefined,
+             chooses: !!(plus[3] && /^choose/i.test(plus[3])),
              target: parseSelector(plus[4]) || { name: plus[4] },
-             per: plus[5] ? (parseSelector(plus[5]) || { name: plus[5] }) : null,
-             duration: dur || null };
+             per, perSum, duration: dur || null };
   }
   // "x2 power crossedCreature" — a multiplier rather than a flat change
   const times = body.match(new RegExp('^x(\\d+(?:\\.\\d+)?)\\s+(?:power\\s+)?(' + SEL + ')\\s*$', 'i'));
