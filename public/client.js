@@ -1,5 +1,16 @@
 // ====================== Card image loading ======================
 
+// Cross Gear crossing state — declared up here because the selection resolver reads
+// it far earlier in the file, and a `let` below its first use throws at load.
+let crossingGearKey = null;
+// card names come from filenames, so escape before putting them in markup
+function escapeHtml(t) {
+  return String(t == null ? '' : t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+
 // Menu music state. Declared first: code further down runs at load time and reads
 // these, and a `let` below its first use throws, taking every later handler with it.
 const MENU_MUSIC_FILE = 'sounds/dark-angel.mp3';
@@ -2588,7 +2599,6 @@ function renderState(state) {
   };
   manaLabel('my-mana-count', me.mana);
   manaLabel('opp-mana-count', opp.mana);
-  renderGearZone(state, me, opp);
 
 
   const ws = document.getElementById('whose-side');
@@ -2748,59 +2758,9 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
 // ---------------------------------------------------------------------------
 // Cross Gear
 //
-// Gear is generated into the battle zone, then crossed onto one of your creatures by
-// paying its cost again. Clicking a piece of gear starts a crossing: pick the
-// creature to attach it to. Gear stays behind when its bearer leaves.
+// Gear lives in the battle zone alongside creatures rather than in a separate strip.
+// Click a piece of gear to start crossing it, then click the creature to attach it to.
 // ---------------------------------------------------------------------------
-let crossingGearKey = null;
-// card names come from filenames, so escape before putting them in markup
-function escapeHtml(t) {
-  return String(t == null ? '' : t)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-function renderGearZone(state, me, opp) {
-  const el = document.getElementById('gear-zone');
-  const hint = document.getElementById('gear-hint');
-  if (!el) return;
-  const mine = me.crossGear || [];
-  const theirs = opp.crossGear || [];
-  if (!mine.length && !theirs.length) { el.innerHTML = ''; if (hint) hint.textContent = ''; return; }
-
-  const nameOfCreature = (player, key) => {
-    const c = (player.battlezone || []).find(x => x.key === key);
-    return c ? cardBaseName(c.id) : null;
-  };
-
-  const item = (g, isMine, player) => {
-    const on = g.crossedTo ? nameOfCreature(player, g.crossedTo) : null;
-    const cls = 'gear-item ' + (isMine ? '' : 'opp ') + (on ? 'crossed' : 'unattached') +
-                (crossingGearKey === g.key ? ' selected' : '');
-    const where = on ? '<span class="gear-to">on ' + escapeHtml(on) + '</span>'
-                     : '<span class="gear-to">not crossed</span>';
-    const cost = g.cost != null ? ' <span class="gear-to">(' + g.cost + ')</span>' : '';
-    return '<div class="' + cls + '" data-gear="' + g.key + '" data-mine="' + (isMine ? 1 : 0) + '">' +
-           escapeHtml(g.name || '') + cost + ' ' + where + '</div>';
-  };
-
-  el.innerHTML = mine.map(g => item(g, true, me)).join('') +
-                 theirs.map(g => item(g, false, opp)).join('');
-
-  if (hint) {
-    hint.textContent = crossingGearKey
-      ? '— choose one of your creatures to cross it onto'
-      : (mine.length ? '— click a gear to cross it (costs its mana again)' : '');
-  }
-
-  el.querySelectorAll('.gear-item[data-mine="1"]').forEach(node => {
-    node.addEventListener('click', () => {
-      const key = node.getAttribute('data-gear');
-      crossingGearKey = (crossingGearKey === key) ? null : key;
-      renderState(state);
-    });
-  });
-}
 
 // while crossing, clicking one of your creatures completes it
 function tryCompleteCross(creatureKey) {
@@ -2821,6 +2781,36 @@ function gearCountOn(creatureKey, isMine) {
 function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pendingTargets) {
   const container = document.getElementById(elId);
   container.innerHTML = '';
+
+  // Cross Gear shares the battle zone with creatures. It is drawn slightly smaller and
+  // labelled with whatever it is crossed to, so it reads as equipment rather than a
+  // creature without needing a zone of its own.
+  const st0 = seats[activeSeat] && seats[activeSeat].state;
+  const owner = st0 ? st0.players[ownerIdx] : null;
+  const gearList = (owner && owner.crossGear) || [];
+  gearList.forEach(g => {
+    const div = document.createElement('div');
+    const bearer = (owner.battlezone || []).find(c => c.key === g.crossedTo);
+    div.className = 'card gear-card' + (bearer ? ' crossed' : ' unattached') +
+                    (crossingGearKey === g.key ? ' selected' : '');
+    div.dataset.key = g.key;
+    div.dataset.gear = '1';
+    div.innerHTML = cardImgHtml(g.id) +
+      '<div class="gear-tag">' + (bearer ? '\u2699 ' + escapeHtml(cardBaseName(bearer.id)) : '\u2699 not crossed') + '</div>';
+    makeMagnifiable(div, g.id);
+    const gx = (g.x != null) ? g.x : 4;
+    const gy = Math.max(0, Math.min(22, (g.y != null) ? g.y : 4));
+    div.style.left = gx + '%';
+    if (isMine) div.style.bottom = gy + '%'; else div.style.top = gy + '%';
+    if (isMine) {
+      div.addEventListener('click', (e) => {
+        e.stopPropagation();
+        crossingGearKey = (crossingGearKey === g.key) ? null : g.key;
+        renderState(st0);
+      });
+    }
+    container.appendChild(div);
+  });
 
   cards.forEach(c => {
     const div = document.createElement('div');
