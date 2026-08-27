@@ -574,3 +574,25 @@ input {
 }
 .music-toggle:hover { background: #33405f; }
 .music-toggle.muted { color: #8a93a6; border-color: #333a4a; }
+
+
+/* Cross Gear: sits below the battle zone, showing what each piece is attached to */
+.gear-label { margin-top: 6px; opacity: 0.8; }
+.gear-zone {
+  display: flex; flex-wrap: wrap; gap: 8px; min-height: 10px; padding: 4px 6px;
+}
+.gear-item {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  border: 1px solid #4a5f8a; border-radius: 8px; padding: 4px 8px;
+  background: rgba(30, 48, 80, 0.55); font-size: 12px; color: #cfe0ff;
+}
+.gear-item:hover { background: rgba(45, 70, 115, 0.75); }
+.gear-item.crossed { border-color: #7fd4a0; }
+.gear-item.unattached { border-style: dashed; opacity: 0.85; }
+.gear-item .gear-to { opacity: 0.75; font-size: 11px; }
+.gear-item.opp { cursor: default; }
+.gear-badge {
+  position: absolute; top: 2px; left: 2px; z-index: 5;
+  background: #2f7d55; color: #eafff2; border-radius: 999px;
+  font-size: 10px; padding: 1px 6px; font-weight: 700; pointer-events: none;
+}

@@ -1398,6 +1398,15 @@ function isBlockerById(id) {
 }
 // a card the opponent's effects can't choose (Petrova, and anything the sheet grants
 // "unchoosable" to) — read from the published effect index rather than by name
+// Cross Gear, identified the same way the engine does: from the published ability
+// index, so the two can never disagree about what counts as gear.
+function isCrossGearById(id) {
+  const name = normKeyClient(cardBaseName(id));
+  const meta = cardMetaDB.get(name);
+  if (meta && /cross gear/i.test(meta.type || '')) return true;
+  const fx = (typeof EFFECT_INDEX !== 'undefined' && EFFECT_INDEX) ? EFFECT_INDEX[name] : null;
+  return !!(fx && fx.crossGear);
+}
 function isUnchoosableById(id) {
   const name = normKeyClient(cardBaseName(id));
   if (name === 'petrova, channeler of suns') return true;
@@ -1978,6 +1987,29 @@ let multiTableChosen = new Set();
 
 function selectableKeysFor(state, me, opp) {
   // returns { keys:Set, onClick(key), banner:string, showConfirm:bool, showSkip:bool }
+
+  // Crossing a piece of gear: pick one of your own creatures to attach it to.
+  if (crossingGearKey) {
+    const gear = (me.crossGear || []).find(g => g.key === crossingGearKey);
+    const legal = me.battlezone.filter(c => !isSpellById(c.id) && c.key !== (gear && gear.crossedTo));
+    if (!gear || !legal.length) {
+      crossingGearKey = null;
+    } else {
+      const costTxt = gear.cost != null ? (' — costs ' + gear.cost + ' mana again') : '';
+      return {
+        keys: new Set(legal.map(c => c.key)),
+        onClick: key => {
+          sendMsg({ type: 'crossGear', key: crossingGearKey, targetKey: key });
+          crossingGearKey = null;
+        },
+        banner: 'Cross ' + (gear.name || 'gear') + ' onto which creature?' + costTxt,
+        showSkip: true,
+        skipLabel: 'Cancel',
+        onSkip: () => { crossingGearKey = null; }
+      };
+    }
+  }
+
   if (evolveMode) {
     const legal = me.battlezone.filter(b => canEvolveOntoClient(evolveMode.cardId, b.id));
     if (!legal.length) { evolveMode = null; return null; }
@@ -2352,7 +2384,7 @@ function renderState(state) {
       clearSelection();
       const items = [
         ['Charge Mana', () => sendMsg({ type: 'chargeMana', key: c.key })],
-        [(isSpellById(c.id) ? 'Cast' : 'Summon'), () => {
+        [(isCrossGearById(c.id) ? 'Generate' : isSpellById(c.id) ? 'Cast' : 'Summon'), () => {
           if (isEvolutionById(c.id)) {
             const st = seats[activeSeat] && seats[activeSeat].state;
             const mine = st && st.players[st.you];
@@ -2556,6 +2588,7 @@ function renderState(state) {
   };
   manaLabel('my-mana-count', me.mana);
   manaLabel('opp-mana-count', opp.mana);
+  renderGearZone(state, me, opp);
 
 
   const ws = document.getElementById('whose-side');
@@ -2711,6 +2744,80 @@ function renderShieldZone(elId, shields, isMine, ownerIdx) {
   });
 }
 
+
+// ---------------------------------------------------------------------------
+// Cross Gear
+//
+// Gear is generated into the battle zone, then crossed onto one of your creatures by
+// paying its cost again. Clicking a piece of gear starts a crossing: pick the
+// creature to attach it to. Gear stays behind when its bearer leaves.
+// ---------------------------------------------------------------------------
+let crossingGearKey = null;
+// card names come from filenames, so escape before putting them in markup
+function escapeHtml(t) {
+  return String(t == null ? '' : t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderGearZone(state, me, opp) {
+  const el = document.getElementById('gear-zone');
+  const hint = document.getElementById('gear-hint');
+  if (!el) return;
+  const mine = me.crossGear || [];
+  const theirs = opp.crossGear || [];
+  if (!mine.length && !theirs.length) { el.innerHTML = ''; if (hint) hint.textContent = ''; return; }
+
+  const nameOfCreature = (player, key) => {
+    const c = (player.battlezone || []).find(x => x.key === key);
+    return c ? cardBaseName(c.id) : null;
+  };
+
+  const item = (g, isMine, player) => {
+    const on = g.crossedTo ? nameOfCreature(player, g.crossedTo) : null;
+    const cls = 'gear-item ' + (isMine ? '' : 'opp ') + (on ? 'crossed' : 'unattached') +
+                (crossingGearKey === g.key ? ' selected' : '');
+    const where = on ? '<span class="gear-to">on ' + escapeHtml(on) + '</span>'
+                     : '<span class="gear-to">not crossed</span>';
+    const cost = g.cost != null ? ' <span class="gear-to">(' + g.cost + ')</span>' : '';
+    return '<div class="' + cls + '" data-gear="' + g.key + '" data-mine="' + (isMine ? 1 : 0) + '">' +
+           escapeHtml(g.name || '') + cost + ' ' + where + '</div>';
+  };
+
+  el.innerHTML = mine.map(g => item(g, true, me)).join('') +
+                 theirs.map(g => item(g, false, opp)).join('');
+
+  if (hint) {
+    hint.textContent = crossingGearKey
+      ? '— choose one of your creatures to cross it onto'
+      : (mine.length ? '— click a gear to cross it (costs its mana again)' : '');
+  }
+
+  el.querySelectorAll('.gear-item[data-mine="1"]').forEach(node => {
+    node.addEventListener('click', () => {
+      const key = node.getAttribute('data-gear');
+      crossingGearKey = (crossingGearKey === key) ? null : key;
+      renderState(state);
+    });
+  });
+}
+
+// while crossing, clicking one of your creatures completes it
+function tryCompleteCross(creatureKey) {
+  if (!crossingGearKey) return false;
+  sendMsg({ type: 'crossGear', key: crossingGearKey, targetKey: creatureKey });
+  crossingGearKey = null;
+  return true;
+}
+
+// how many pieces of gear are crossed onto this creature
+function gearCountOn(creatureKey, isMine) {
+  const st = seats[activeSeat] && seats[activeSeat].state;
+  if (!st) return 0;
+  const p = st.players[isMine ? st.you : (st.you === 0 ? 1 : 0)];
+  return ((p && p.crossGear) || []).filter(g => g.crossedTo === creatureKey).length;
+}
+
 function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pendingTargets) {
   const container = document.getElementById(elId);
   container.innerHTML = '';
@@ -2732,7 +2839,8 @@ function renderBattleHalf(elId, cards, isMine, ownerIdx, pendingCorileUses, pend
       (boosted ? '<div class="power-overlay" title="Printed power ' + c.basePower +
                  ', currently ' + c.livePower + '">' + c.livePower + '</div>' : '') +
       (showPA ? '<div class="pa-badge"><span>POWER ATTACKER</span>+' + c.powerAttacker + '</div>' : '') +
-      (stacked ? '<div class="evo-badge" title="Evolution stack: ' + (stacked + 1) + ' cards">\u21D1' + (stacked + 1) + '</div>' : '');
+      (stacked ? '<div class="evo-badge" title="Evolution stack: ' + (stacked + 1) + ' cards">\u21D1' + (stacked + 1) + '</div>' : '') +
+      (gearCountOn(c.key, isMine) ? '<div class="gear-badge" title="Cross Gear attached">\u2699' + gearCountOn(c.key, isMine) + '</div>' : '');
     makeMagnifiable(div, c.id);
 
     const xPct0 = (c.x != null) ? c.x : 4;
