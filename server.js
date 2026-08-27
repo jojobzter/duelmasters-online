@@ -252,6 +252,7 @@ function buildEffectIndex() {
     if (c.parsedEffects.some(e => e.action === 'grant' && /unchoosable/i.test(e.keyword || ''))) {
       put(key, { unchoosable: true });
     }
+    if (isCrossGear(key)) put(key, { crossGear: true });
     if (c.effectProps && c.effectProps.resolvesTo) {
       put(key, { resolvesTo: c.effectProps.resolvesTo.to, resolvesTapped: !!c.effectProps.resolvesTo.tapped });
     }
@@ -439,7 +440,10 @@ function isBlockerNow(state, ownerIdx, card) {
 }
 function removeBattleCard(owner, key) {
   const i = owner.battlezone.findIndex(c => c.key === key);
-  return i === -1 ? null : owner.battlezone.splice(i, 1)[0];
+  if (i === -1) return null;
+  // gear is not destroyed with its bearer — it stays in the battle zone unattached
+  releaseGearFrom(owner, key, null);
+  return owner.battlezone.splice(i, 1)[0];
 }
 // Single funnel for battlezone -> graveyard so the Coiling Vines redirect can't be
 // missed by one of the several paths that destroy a creature.
@@ -457,6 +461,19 @@ function battleCardToGrave(owner, card) {
     owner.hand.push({ id: card.id, key: card.key });
     return 'hand';
   }
+  // Every other onDestroy clause fires as the creature dies — a farewell effect like
+  // Bombersaur's, Cetibols' draw or Snipe Bug's ramp. Only "-> hand/mana" above
+  // replaces destruction; these happen alongside it.
+  if (owner.__state && dm.some(e => e.trigger === 'ondestroy' && e.action !== 'moveSelf')) {
+    const st = owner.__state;
+    const ownIdx = st.players.indexOf(owner);
+    if (ownIdx !== -1) {
+      const logs = [];
+      try { firePar(st, ownIdx, card, 'ondestroy', logs); } catch (e) { /* never block the death */ }
+      if (logs.length && st.__deathLogs) st.__deathLogs.push(...logs);
+    }
+  }
+  releaseGearFrom(owner, card.key, null);
   // destroyed: the whole stack goes to the graveyard together
   dissolveStack(owner, card, null, 'graveyard');
   const nm = normalizeCardKey(cardLabel(card.id));
@@ -535,6 +552,10 @@ function effectivePowerInner(state, ownerIdx, card, attacking) {
   // continuous buffs described in the spreadsheet, plus any granted this turn
   p += staticBuffTotal(state, ownerIdx, card, { attacking });
   p += (card.tempBuff || 0) + (card.permBuff || 0);
+  // multipliers come last, and power never drops below zero
+  const factor = staticPowerFactor(state, ownerIdx, card) * (card.powerFactor || 1);
+  if (factor !== 1) p = Math.round(p * factor);
+  if (p < 0) p = 0;
   // a Power Attacker bonus granted by another card
   if (attacking) {
     const kw = grantedKeywords(state, ownerIdx, card);
@@ -702,6 +723,10 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
   const [sh] = opp.shields.splice(i, 1);
   me.brokeShieldThisTurn = true;
   if (attacker) attacker.brokeShieldThisTurn = true;
+
+  // The defender may have a card that reacts before the shield is actually lost.
+  fireBoardWide(state, 'onshieldwouldbreak', logs, { onlySide: defIdx,
+    event: { cardId: sh.id, key: sh.key, ownerIdx: defIdx } });
 
   // The attacker's onBreak clauses see the shield that was just broken, so a card
   // like Bluum Erkis can reveal it and decide what happens to it INSTEAD of the
@@ -926,6 +951,57 @@ function isUnchoosable(id) {
   const m = cardMeta(id) || {};
   if (normalizeCardKey(cardLabel(id)) === PETROVA_NAME) return true;
   return (m.parsedEffects || []).some(e => e.action === 'grant' && /unchoosable/i.test(e.keyword || ''));
+}
+
+// ---------------------------------------------------------------------------
+// Cross Gear
+//
+// Gear is generated into the battle zone by paying its cost, then crossed onto one of
+// your creatures by paying that cost AGAIN. While crossed, the gear's static clauses
+// apply to the creature carrying it. If that creature leaves, the gear stays behind
+// unattached and can be crossed again later. Any number may stack on one creature.
+// ---------------------------------------------------------------------------
+
+// A card is gear if the sheet types it so, or if it describes what happens to "the
+// creature I am crossed to". A card that merely destroys or bounces gear is NOT gear.
+function isCrossGear(id) {
+  const m = cardMeta(id) || {};
+  if (/cross gear/i.test(m.type || '')) return true;
+  return (m.parsedEffects || []).some(e =>
+    (e.watches && /crossedCreature/i.test(e.watches)) ||
+    (e.target && e.target.crossed && e.target.of !== 'target') ||
+    (e.selector && e.selector.crossed && e.selector.of !== 'target'));
+}
+
+// The gear currently crossed onto a creature.
+function gearOn(player, creatureKey) {
+  return (player.crossGear || []).filter(g => g.crossedTo === creatureKey);
+}
+
+// The creature a piece of gear is crossed to, if any.
+function creatureUnderGear(player, gear) {
+  if (!gear || !gear.crossedTo) return null;
+  return player.battlezone.find(c => c.key === gear.crossedTo) || null;
+}
+
+// When a creature leaves the battle zone its gear is NOT destroyed — it stays in the
+// battle zone unattached, ready to be crossed onto something else later.
+function releaseGearFrom(player, creatureKey, logs) {
+  for (const g of (player.crossGear || [])) {
+    if (g.crossedTo !== creatureKey) continue;
+    g.crossedTo = null;
+    if (logs) logs.push(cardLabel(g.id) + ' is no longer crossed and stays in the battle zone.');
+  }
+}
+
+// Can this player generate or cross gear without paying? (Bolberg Cross Dragon etc.)
+function gearIsFree(state, playerIdx) {
+  const me = state.players[playerIdx];
+  for (const c of me.battlezone) {
+    const kw = grantedKeywords(state, playerIdx, c);
+    if (kw.has('freecrossgear')) return true;
+  }
+  return false;
 }
 
 function opponentOf(room, player) {
@@ -1178,13 +1254,55 @@ function countSelector(state, srcOwnerIdx, srcCard, selText) {
 }
 
 // Total power granted to `card` by every static buff currently in play.
+// Multipliers from static clauses (e.g. "x2 power crossedCreature"). Applied after
+// every flat change, which is the order the printed cards use.
+function staticPowerFactor(state, cardOwnerIdx, card) {
+  let factor = 1;
+  for (let si = 0; si < state.players.length; si++) {
+    for (const { src, bearer } of staticSources(state, si)) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'buffMultiply') continue;
+        const hits = bearer ? crossedTargetMatches(e.target, bearer, card)
+                            : selectorMatches(state, si, src, e.target, cardOwnerIdx, card);
+        if (!hits) continue;
+        if (!conditionHolds(state, si, src, e.condition, null)) continue;
+        factor *= (e.factor || 1);
+      }
+    }
+  }
+  return factor;
+}
+
+// Every static source in play: creatures, plus gear that is currently crossed onto a
+// creature. Crossed gear behaves as though its clauses were printed on its bearer.
+function staticSources(state, si) {
+  const p = state.players[si];
+  const out = p.battlezone.map(c => ({ src: c, bearer: null }));
+  for (const g of (p.crossGear || [])) {
+    if (!g.crossedTo) continue;                       // unattached gear does nothing
+    const bearer = p.battlezone.find(c => c.key === g.crossedTo);
+    if (bearer) out.push({ src: g, bearer });
+  }
+  return out;
+}
+
+// "crossedCreature" means the creature this gear is crossed to.
+function crossedTargetMatches(sel, bearer, card) {
+  if (!sel || !sel.crossed) return false;
+  return !!bearer && card.key === bearer.key;
+}
+
 function staticBuffTotal(state, cardOwnerIdx, card, ctx) {
   let bonus = 0;
   for (let si = 0; si < state.players.length; si++) {
-    for (const src of state.players[si].battlezone) {
+    for (const { src, bearer } of staticSources(state, si)) {
       for (const e of staticClauses(src)) {
         if (e.action !== 'buff') continue;
-        if (!selectorMatches(state, si, src, e.target, cardOwnerIdx, card)) continue;
+        // Gear only ever affects the creature it is crossed to; a creature source
+        // uses the normal selector rules.
+        const hits = bearer ? crossedTargetMatches(e.target, bearer, card)
+                            : selectorMatches(state, si, src, e.target, cardOwnerIdx, card);
+        if (!hits) continue;
         if (!conditionHolds(state, si, src, e.condition, ctx)) continue;
         const mult = e.per ? countSelector(state, si, src, e.per) : 1;
         bonus += (e.amount || 0) * mult;
@@ -1220,10 +1338,12 @@ function grantedKeywords(state, cardOwnerIdx, card) {
   // keywords granted to this card for the rest of the turn
   for (const g of (card.tempGrants || [])) { out.add(g.keyword); if (g.arg) args[g.keyword] = g.arg; }
   for (let si = 0; si < state.players.length; si++) {
-    for (const src of state.players[si].battlezone) {
+    for (const { src, bearer } of staticSources(state, si)) {
       for (const e of staticClauses(src)) {
         if (e.action !== 'grant') continue;
-        if (!selectorMatches(state, si, src, e.selector, cardOwnerIdx, card)) continue;
+        const hits = bearer ? crossedTargetMatches(e.selector, bearer, card)
+                            : selectorMatches(state, si, src, e.selector, cardOwnerIdx, card);
+        if (!hits) continue;
         if (!conditionHolds(state, si, src, e.condition, null)) continue;
         const kw = String(e.keyword || '').toLowerCase();
         out.add(kw);
@@ -1335,7 +1455,8 @@ function zoneNameOf(sel) {
     'own:mana': 'ownMana', 'opp:mana': 'oppMana',
     'own:shield': 'ownShield', 'opp:shield': 'oppShield',
     'own:grave': 'ownGrave', 'opp:grave': 'oppGrave',
-    'own:hand': 'ownHand', 'opp:hand': 'oppHand'
+    'own:hand': 'ownHand', 'opp:hand': 'oppHand',
+    'own:crossgear': 'ownCrossGear', 'opp:crossgear': 'oppCrossGear', 'any:crossgear': 'anyCrossGear'
   }[key] || null;
 }
 
@@ -1385,7 +1506,9 @@ function listForZone(me, opp, zoneName) {
   return {
     oppBattle: opp.battlezone, ownBattle: me.battlezone, anyBattle: me.battlezone.concat(opp.battlezone),
     ownMana: me.mana, oppMana: opp.mana, ownShield: me.shields, oppShield: opp.shields,
-    ownGrave: me.graveyard, oppGrave: opp.graveyard, ownHand: me.hand, oppHand: opp.hand
+    ownGrave: me.graveyard, oppGrave: opp.graveyard, ownHand: me.hand, oppHand: opp.hand,
+    ownCrossGear: me.crossGear || [], oppCrossGear: opp.crossGear || [],
+    anyCrossGear: (me.crossGear || []).concat(opp.crossGear || [])
   }[zoneName] || [];
 }
 
@@ -1644,6 +1767,23 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const count = (e.count === 'all') ? me.hand.length : (typeof e.count === 'number' ? e.count : 1);
         me.pendingDiscards.push({ id: newKey(), kind: e.optional || e.count === 'all' ? 'choose' : 'choose',
                                   count: Math.min(count, me.hand.length), source: cardLabel(cardId) });
+        break;
+      }
+      case 'toDeckBottom': {
+        const zoneName = zoneNameOf(e.selector) || 'ownHand';
+        const list = listForZone(me, opp, zoneName);
+        let n = 0;
+        while (list.length) { const c = list.shift(); me.deck.push(c.id); n++; }
+        logs.push('put ' + n + ' card' + (n === 1 ? '' : 's') + ' on the bottom of their deck.');
+        break;
+      }
+      case 'buffMultiply': {
+        // a multiplier is stored on the card and applied when power is calculated
+        const zoneName2 = (e.target && e.target.selfOnly) ? 'ownBattle' : (zoneNameOf(e.target) || 'ownBattle');
+        const pool2 = listForZone(me, opp, zoneName2);
+        const hit2 = (e.target && e.target.selfOnly) ? pool2.filter(c => c.key === cardKey) : pool2;
+        hit2.forEach(c => { c.powerFactor = (c.powerFactor || 1) * (e.factor || 1); });
+        if (hit2.length) logs.push(cardLabel(cardId) + ' doubled the power of ' + hit2.length + ' creature(s).');
         break;
       }
       case 'toDeck': {
@@ -2313,7 +2453,7 @@ function emptyPlayerState() {
     pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
-    pendingRaceChoices: [], pendingShieldTriggers: []
+    pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: []
   };
 }
 
@@ -2396,6 +2536,10 @@ function viewFor(room, viewerIdx) {
     diamondCutterActive: !!p.diamondCutterActive,
     pendingTruce: isSelf ? p.pendingTruce : undefined,
     pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
+    crossGear: (p.crossGear || []).map(g => ({
+      id: g.id, key: g.key, crossedTo: g.crossedTo || null, x: g.x, y: g.y,
+      name: cardLabel(g.id), cost: (cardMeta(g.id) || {}).cost != null ? cardMeta(g.id).cost : null
+    })),
     pendingShieldTriggerCount: (p.pendingShieldTriggers || []).length,
     pendingShieldTriggers: isSelf ? (p.pendingShieldTriggers || []) : undefined,
     // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
@@ -2538,6 +2682,8 @@ function freshMatchState() {
   // players carry a back-reference so destruction hooks can fire board-wide triggers
   // non-enumerable so it can never be serialised into a state broadcast
   st.players.forEach(p => Object.defineProperty(p, '__state', { value: st, enumerable: false, writable: true }));
+  // effects that fire deep inside a destruction need somewhere to log
+  Object.defineProperty(st, '__deathLogs', { value: [], enumerable: false, writable: true });
   return st;
 }
 
@@ -2673,6 +2819,7 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'drawCard': {
+        // fires below, after the card is actually drawn
         const c = me.deck.shift();
         if (c) {
           me.hand.push({ id: c, key: newKey() });
@@ -2681,6 +2828,11 @@ wss.on('connection', (ws) => {
           const offTurn = (s.activeTurn !== null && s.activeTurn !== undefined && s.activeTurn !== idx);
           logText = offTurn ? 'drew a card OUT OF TURN.' : 'drew a card.';
           sfxToPlay = 'draw';
+          // cards that react to drawing; the turn-start draw also counts as the draw step
+          for (const bc of me.battlezone.slice()) {
+            firePar(s, idx, bc, 'ondraw', extraLogs);
+            if (!offTurn) firePar(s, idx, bc, 'ondrawstep', extraLogs);
+          }
         } else {
           // The deck was already empty when this draw was attempted — that's the
           // decking-out loss condition. Drawing the last card successfully (deck
@@ -2690,6 +2842,35 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'shuffleDeck': { me.deck = shuffle(me.deck); logText = 'shuffled their deck.'; break; }
+      case 'crossGear': {
+        // Crossing costs the gear's mana cost again — and again to re-cross it later.
+        const gear = (me.crossGear || []).find(g => g.key === msg.key);
+        if (!gear) return;
+        const target = me.battlezone.find(c => c.key === msg.targetKey);
+        if (!target) { send(ws, { type: 'summonRejected', reason: 'Choose one of your creatures to cross it onto.' }); return; }
+        if (isSpellCard(target.id)) { send(ws, { type: 'summonRejected', reason: 'Cross Gear can only be crossed onto a creature.' }); return; }
+        if (gear.crossedTo === target.key) { send(ws, { type: 'summonRejected', reason: cardLabel(gear.id) + ' is already crossed onto that creature.' }); return; }
+
+        const gmeta = cardMeta(gear.id);
+        if (!gearIsFree(s, idx) && gmeta && gmeta.cost != null) {
+          const adj = costAdjustment(s, idx, gear.id);
+          const payMeta = adj.delta
+            ? Object.assign({}, gmeta, { cost: Math.max(adj.floor || 0, gmeta.cost + adj.delta) })
+            : gmeta;
+          const plan = planManaPayment(me, payMeta);
+          if (!plan) {
+            send(ws, { type: 'summonRejected',
+              reason: 'Crossing ' + cardLabel(gear.id) + ' costs ' + payMeta.cost + ' again — not enough untapped mana.' });
+            return;
+          }
+          plan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
+        }
+        const moving = !!gear.crossedTo;
+        gear.crossedTo = target.key;
+        logText = (moving ? 're-crossed ' : 'crossed ') + cardLabel(gear.id) + ' onto ' + cardLabel(target.id) + '.';
+        break;
+      }
+
       case 'endTurn': {
         // You can only end YOUR turn. Without this, a stray end-turn could hand the
         // turn straight back — or take the opponent's turn away from them.
@@ -2805,6 +2986,8 @@ wss.on('connection', (ws) => {
         const arrivesTapped = civsOf(c.id).length > 1 || entersManaTapped(c.id);
         me.mana.push({ id: c.id, key: c.key, tapped: arrivesTapped, x: mSlot.x, y: mSlot.y });
         logText = 'charged ' + cardLabel(c.id) + ' to their mana zone' + (arrivesTapped ? ' (tapped).' : '.');
+        fireBoardWide(s, 'onoppmanacharge', extraLogs,
+          { onlySide: oppIdx, event: { cardId: c.id, key: c.key, ownerIdx: idx } });
         break;
       }
       case 'summonCard': {
@@ -2872,6 +3055,17 @@ wss.on('connection', (ws) => {
           }
           plan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
         }
+        // Cross Gear is GENERATED into the battle zone rather than summoned. It has no
+        // power, can't attack or block, and does nothing until it is crossed.
+        if (isCrossGear(cardId)) {
+          const gi = me.hand.findIndex(h => h.key === c.key);
+          if (gi !== -1) me.hand.splice(gi, 1);
+          const gslot = battlefieldSlot(me);
+          me.crossGear.push({ id: cardId, key: c.key, crossedTo: null, x: gslot.x, y: gslot.y });
+          logText = 'generated ' + cardLabel(cardId) + ' into the battle zone.';
+          break;
+        }
+
         // Evolution creatures are never summoned onto empty ground — they stack onto
         // one of your creatures that shares a race with them.
         let evoBase = null;
@@ -2948,6 +3142,24 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'castFreeFromHand': {
+        fireBoardWide(s, 'onownshieldtriggercast', extraLogs, { onlySide: idx });
+        // Gear broken as a shield is both generated AND crossed for free.
+        {
+          const gi = me.hand.findIndex(h => h.key === msg.key);
+          const gcard = gi === -1 ? null : me.hand[gi];
+          if (gcard && isCrossGear(gcard.id)) {
+            me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
+            me.hand.splice(gi, 1);
+            const gslot = battlefieldSlot(me);
+            const target = me.battlezone.find(c => !isSpellCard(c.id)) || null;
+            me.crossGear.push({ id: gcard.id, key: gcard.key, crossedTo: target ? target.key : null,
+                                x: gslot.x, y: gslot.y });
+            logText = target
+              ? ('generated ' + cardLabel(gcard.id) + ' free from a shield and crossed it onto ' + cardLabel(target.id) + '.')
+              : ('generated ' + cardLabel(gcard.id) + ' free from a shield (nothing to cross it onto yet).');
+            break;
+          }
+        }
         // "Players can't cast spells other than Light" (Alcadeias etc.) applies to a
         // shield-trigger free-cast exactly like any other cast — check it before doing
         // anything else, so a blocked attempt doesn't fire Glena Vuele or consume the trigger.
@@ -3093,7 +3305,7 @@ wss.on('connection', (ws) => {
           const gigazald = me.battlezone.some(g => normalizeCardKey(cardLabel(g.id)) === GIGAZALD_NAME);
           // Silent Skill: the ability is used INSTEAD of attacking, so it only makes
           // sense on your own turn with the creature still untapped.
-          const grantsChoice = hasSheetTrigger(c.id, 'tapability') || TAP_ABILITIES[name] ||
+          const grantsChoice = hasSheetTrigger(c.id, 'tapability') || hasSheetTrigger(c.id, 'silentskill') || TAP_ABILITIES[name] ||
             (gigazald && name !== GIGAZALD_NAME && civsOf(c.id).includes('Darkness'));
           if (grantsChoice && !msg.mode) {
             send(ws, { type: 'tapModeOffer', key: c.key, name: cardLabel(c.id) });
@@ -3106,8 +3318,9 @@ wss.on('connection', (ws) => {
 
         if (c.tapped && msg.mode === 'ability') {
           // a card described in the sheet runs its own tapAbility clause
-          if (hasSheetTrigger(c.id, 'tapability')) {
+          if (hasSheetTrigger(c.id, 'tapability') || hasSheetTrigger(c.id, 'silentskill')) {
             firePar(s, idx, c, 'tapability', extraLogs);
+            firePar(s, idx, c, 'silentskill', extraLogs);
             logText = 'used ' + cardLabel(c.id) + "'s tap ability instead of attacking.";
             break;
           }
@@ -3615,28 +3828,26 @@ wss.on('connection', (ws) => {
         if (i === -1) return;
         const eff = me.pendingDiscards[i];
         const moved = [];
+        // Single funnel: a discarded card may redirect itself (Dava Torey enters play
+        // instead), and the opponent may have cards that react to the discard.
+        const discardOne = (c) => {
+          if (!discardRedirect(s, idx, c, extraLogs)) me.graveyard.push({ id: c.id, key: c.key });
+          moved.push(cardLabel(c.id));
+          fireBoardWide(s, 'onoppdiscard', extraLogs,
+            { onlySide: oppIdx, event: { cardId: c.id, key: c.key, ownerIdx: idx } });
+        };
         if (eff.kind === 'random') {
           if (me.hand.length) {
             const r = Math.floor(Math.random() * me.hand.length);
-            const [c] = me.hand.splice(r, 1);
-            me.graveyard.push({ id: c.id, key: c.key });
-            moved.push(cardLabel(c.id));
+            discardOne(me.hand.splice(r, 1)[0]);
           }
         } else if (eff.kind === 'all') {
-          while (me.hand.length) {
-            const [c] = me.hand.splice(0, 1);
-            me.graveyard.push({ id: c.id, key: c.key });
-            moved.push(cardLabel(c.id));
-          }
+          while (me.hand.length) discardOne(me.hand.splice(0, 1)[0]);
         } else { // 'choose'
           const keys = Array.isArray(msg.keys) ? msg.keys.slice(0, eff.count) : [];
           for (const k of keys) {
-            const idx = me.hand.findIndex(c => c.key === k);
-            if (idx !== -1) {
-              const [c] = me.hand.splice(idx, 1);
-              me.graveyard.push({ id: c.id, key: c.key });
-              moved.push(cardLabel(c.id));
-            }
+            const di = me.hand.findIndex(c => c.key === k);
+            if (di !== -1) discardOne(me.hand.splice(di, 1)[0]);
           }
         }
         // naming them is fine — they're in the graveyard now, which both players can inspect
@@ -3724,6 +3935,8 @@ wss.on('connection', (ws) => {
         const atkEv = { cardId: atk.id, key: atk.key, ownerIdx: idx };
         fireBoardWide(s, 'oncreatureattack', extraLogs, { onlySide: idx, exceptKey: atk.key, event: atkEv });
         fireBoardWide(s, 'onowncreatureattack', extraLogs, { onlySide: idx, exceptKey: atk.key, event: atkEv });
+        // the defending player's cards that react to being attacked into
+        fireBoardWide(s, 'onoppcreatureattack', extraLogs, { onlySide: oppIdx, event: atkEv });
         if (target.type === 'creature') {
           const victim = opp.battlezone.find(c => c.key === target.key);
           if (victim) {
@@ -3952,6 +4165,11 @@ wss.on('connection', (ws) => {
     }
     shieldTriggerOffers = offerable;
     broadcastState(room);
+    // anything logged by a death-trigger during this action
+    if (s.__deathLogs && s.__deathLogs.length) {
+      for (const l of s.__deathLogs) extraLogs.push(l);
+      s.__deathLogs.length = 0;
+    }
     if (logText) logMsg(room, idx, logText);
     extraLogs.forEach(t => logMsg(room, idx, t));
     pendingNotices.forEach(n => noticeMsg(room, idx, n.self, n.other));

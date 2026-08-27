@@ -22,6 +22,8 @@ const TRIGGERS = new Set([
   'startturn', 'onownshieldbreak', 'onattacked', 'onowncreaturedestroyed',
   'onownsummon', 'oncreatureattack', 'oppstartturn', 'onoppcreaturedestroyed',
   'silentskill',
+  // added with the Cross Gear set
+  'onoppcreatureattack', 'ondraw', 'ondrawstep', 'onoppdiscard', 'onoppmanacharge',
   // added with DM-08
   'onowncreatureenter', 'onowncreatureattacked', 'onshieldwouldbreak', 'onturnstart',
   'onoppturnstart', 'onowncreatureattack', 'onanycast', 'onownshieldtriggercast'
@@ -50,6 +52,12 @@ const ZONES = {
   otheranycreature: { side: 'any', zone: 'battle', excludeSelf: true },
   // "other..." forms simply exclude the card doing the choosing
   // either player's zone, used by effects that may reach across the table
+  // Cross Gear: gear sits in its own zone and may be crossed to a creature
+  owncrossgear: { side: 'own', zone: 'crossgear' },
+  oppcrossgear: { side: 'opp', zone: 'crossgear' },
+  anycrossgear: { side: 'any', zone: 'crossgear' },
+  // the creature this gear is currently crossed to
+  crossedcreature: { side: 'own', zone: 'battle', crossed: true },
   anymana:   { side: 'any', zone: 'mana' },
   anyshield: { side: 'any', zone: 'shield' },
   anygrave:  { side: 'any', zone: 'grave' },
@@ -91,8 +99,14 @@ function parseSelector(raw) {
     return parts[0];
   }
   let accessor = null;
-  const acc = raw.match(/^(.*)\.(topCard|count|evoBase|name)$/);
+  const acc = raw.match(/^(.*)\.(topCard|count|evoBase|name|crossedCreature|crossed)$/);
   if (acc) { raw = acc[1]; accessor = acc[2]; }
+  // "self.crossedCreature" / "target.crossedCreature" resolve to a crossed creature
+  if (accessor === 'crossedCreature') {
+    const base = raw.trim().toLowerCase();
+    return { name: raw + '.crossedCreature', side: base === 'target' ? 'target' : 'own',
+             zone: 'battle', crossed: true, of: base, filters: [], accessor: null };
+  }
   const m = raw.match(/^([a-zA-Z]+)(?:\[(.*)\])?$/);
   if (!m) return null;
   const base = ZONES[m[1].toLowerCase()];
@@ -155,7 +169,7 @@ function processBody(bodyIn) {
 }
 
 function parseClause(raw, cardName, inheritedTrigger) {
-  const clause = raw.trim();
+  let clause = raw.trim();
   if (!clause) return null;
 
   // card-level property, no trigger
@@ -165,6 +179,15 @@ function parseClause(raw, cardName, inheritedTrigger) {
   // "noAutoUntap" — this card is skipped by the automatic untap step and stays
   // tapped until something (a player's manual untap, or a card effect) untaps it.
   if (/^noAutoUntap$/i.test(clause)) return { kind: 'property', property: 'noAutoUntap', value: true };
+
+  // "crossedCreature.onDestroy: -> hand" — the trigger belongs to the creature this
+  // card is crossed to, not to the card itself.
+  let watches = null;
+  const pref = clause.match(/^([a-zA-Z]+)\.([a-zA-Z]+)(\[[^\]]*\])?\s*:\s*(.+)$/);
+  if (pref && TRIGGERS.has(pref[2].toLowerCase())) {
+    watches = pref[1];
+    clause = pref[2] + (pref[3] || '') + ': ' + pref[4];
+  }
 
   m = clause.match(/^([a-zA-Z]+)(?:\[([^\]]*)\])?\s*:\s*(.+)$/);
   if (!m) {
@@ -193,7 +216,7 @@ function parseClause(raw, cardName, inheritedTrigger) {
   const action = parseAction(body, mods);
   if (!action) return { kind: 'error', reason: 'unrecognised action', text: clause };
 
-  return Object.assign({ kind: 'effect', trigger, triggerFilter, condition, orElse, card: cardName }, action, { mods });
+  return Object.assign({ kind: 'effect', trigger, triggerFilter, watches, condition, orElse, card: cardName }, action, { mods });
 }
 
 function parseAction(body, mods) {
@@ -222,12 +245,29 @@ function parseAction(body, mods) {
 
   // "+2000 self per ownGrave[civ=Fire]"
   // the selector may contain spaces inside its brackets, e.g. [race=Beast Folk]
-  const SEL = '[a-zA-Z]+(?:\\[[^\\]]*\\])?';
-  const plus = body.match(new RegExp('^\\+(\\d+)\\s+(' + SEL + ')(?:\\s+per\\s+(' + SEL + '))?', 'i'));
+  // A selector may carry brackets (with spaces inside) and a dotted accessor.
+  const SEL = '[a-zA-Z]+(?:\\.[a-zA-Z]+)?(?:\\[[^\\]]*\\])?';
+  // "+2000 X", "-1000 power X", each optionally "per <selector>"
+  // The target may carry a count word ("all X"), and the "per" selector may end in
+  // ".count" or be followed by a duration word — none of which change the amount.
+  const plus = body.match(new RegExp(
+    '^([+-])(\\d+)\\s+(?:power\\s+)?(?:(all|any number(?: of)?|up to \\d+|\\d+)\\s+)?(' + SEL + ')' +
+    '(?:\\s+per\\s+(' + SEL + ')(?:\\.count)?)?' +
+    '(?:\\s+(untilEndOfTurn|thisTurn|permanently))?\\s*$', 'i'));
   if (plus) {
-    return { action: 'buff', amount: parseInt(plus[1], 10),
-             target: parseSelector(plus[2]) || { name: plus[2] },
-             per: plus[3] ? (parseSelector(plus[3]) || { name: plus[3] }) : null };
+    const sign = plus[1] === '-' ? -1 : 1;
+    const dur = (plus[6] || '').toLowerCase();
+    return { action: 'buff', amount: sign * parseInt(plus[2], 10),
+             count: plus[3] ? parseCount([plus[3], 'x']).count : undefined,
+             target: parseSelector(plus[4]) || { name: plus[4] },
+             per: plus[5] ? (parseSelector(plus[5]) || { name: plus[5] }) : null,
+             duration: dur || null };
+  }
+  // "x2 power crossedCreature" — a multiplier rather than a flat change
+  const times = body.match(new RegExp('^x(\\d+(?:\\.\\d+)?)\\s+(?:power\\s+)?(' + SEL + ')\\s*$', 'i'));
+  if (times) {
+    return { action: 'buffMultiply', factor: parseFloat(times[1]),
+             target: parseSelector(times[2]) || { name: times[2] } };
   }
 
   let rest = words.slice(1);
@@ -329,6 +369,11 @@ function parseAction(body, mods) {
     case 'tobattle': {
       const c = parseCount(rest);
       return { action: 'toBattle', count: c.count, optional: !!c.optional,
+               selector: parseSelector(c.rest) || { name: c.rest } };
+    }
+    case 'todeckbottom': {
+      const c = parseCount(rest);
+      return { action: 'toDeckBottom', count: c.count,
                selector: parseSelector(c.rest) || { name: c.rest } };
     }
     case 'todeck': {
