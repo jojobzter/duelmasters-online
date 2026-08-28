@@ -4293,15 +4293,15 @@ wss.on('connection', (ws) => {
           return;
         }
 
-        // an attacker with shield choice always goes through the pick-a-shield path
-        if (target.type === 'shield' && !target.key && picksShield(s, idx, atk) && opp.shields.length > 1) {
-          send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' chooses which shield to break — click one.' });
-          return;
-        }
         const cantAttack = attackerForbidden(s, idx, atk);
         if (cantAttack) { send(ws, { type: 'summonRejected', reason: cantAttack + '.' }); return; }
 
         const target = msg.target || {};
+        // an attacker that chooses its shield must be pointed at a specific one
+        if (target.type === 'shield' && !target.key && picksShield(s, idx, atk) && opp.shields.length > 1) {
+          send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' chooses which shield to break — click one.' });
+          return;
+        }
         if (target.type === 'shield') {
           if (!dcShieldRun && !canAttackShields(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack shields." }); return; }
           // no shields left: this is the direct attack that wins the game if unblocked
@@ -4641,3 +4641,6 @@ wss.on('connection', (ws) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log('Duel Masters table running on port ' + PORT));
+
+// exported for server-test.js so the real message handlers can be driven in tests
+module.exports = Object.assign(module.exports || {}, { __wss: wss });
