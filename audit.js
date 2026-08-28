@@ -35,6 +35,60 @@ for (const r of rows) {
   }
 }
 console.log('clauses wired: ' + wired + '/' + total);
+
+// Deeper pass: a clause can be "wired" and still do nothing if the engine never
+// consults the specific keyword it grants or the specific thing it prevents.
+// Read the engine's own declared registries rather than guessing from patterns —
+// a keyword can then never look supported without actually being handled.
+const readSet = (name) => {
+  const m = server.match(new RegExp('const ' + name + ' = new Set\\(\\[([^\\]]*)\\]'));
+  return new Set(m ? (m[1].match(/'([^']+)'/g) || []).map(x => x.slice(1, -1)) : []);
+};
+const consulted = readSet('HANDLED_KEYWORDS');
+const preventsDone = readSet('HANDLED_PREVENTS');
+
+const gaps = { grant: {}, prevent: {} };
+for (const r of rows) {
+  for (const e of parseEffect(r.effect, r.name).effects) {
+    if (e.action === 'grant') {
+      const k = String(e.keyword || '').toLowerCase().replace(/\[.*$/, '');
+      if (!consulted.has(k)) (gaps.grant[k] = gaps.grant[k] || []).push(r.name);
+    }
+    if (e.action === 'prevent') {
+      const w = String(e.what || '').toLowerCase().replace(/\[.*$/, '');
+      if (!preventsDone.has(w)) (gaps.prevent[w] = gaps.prevent[w] || []).push(r.name);
+    }
+  }
+}
+const dump2 = (label, obj) => {
+  const keys = Object.keys(obj);
+  if (!keys.length) { console.log(label + ' none'); return; }
+  console.log('\n' + label);
+  keys.sort((a, b) => obj[b].length - obj[a].length).forEach(k =>
+    console.log('   ' + k.padEnd(28) + String(obj[k].length).padStart(3) + '  ' + obj[k].slice(0, 2).join(', ')));
+};
+dump2('GRANTED keywords the engine never consults:', gaps.grant);
+dump2('PREVENT variants not enforced:', gaps.prevent);
+// The registries above are only trustworthy if the engine really references each
+// entry. Verify that too, so nothing can be declared handled without being handled.
+const declSpan = (() => {
+  const a = server.indexOf('const HANDLED_KEYWORDS');
+  const b = server.indexOf(']);', server.indexOf('const HANDLED_PREVENTS')) + 3;
+  return [a, b];
+})();
+const engineBody = server.slice(0, declSpan[0]) + server.slice(declSpan[1]);
+const unrefK = [...consulted].filter(k => !new RegExp(k.replace(/[-[\]{}()*+?.,\\^$|#]/g, '\\$&'), 'i').test(engineBody));
+const unrefP = [...preventsDone].filter(k => !new RegExp(k, 'i').test(engineBody));
+if (unrefK.length || unrefP.length) {
+  console.error('\nDECLARED BUT NOT REFERENCED IN ENGINE CODE:');
+  if (unrefK.length) console.error('   keywords: ' + unrefK.join(', '));
+  if (unrefP.length) console.error('   prevents: ' + unrefP.join(', '));
+  process.exitCode = 1;
+} else {
+  console.log('registry entries all referenced by engine code: yes');
+}
+
+if (Object.keys(gaps.grant).length || Object.keys(gaps.prevent).length) process.exitCode = 1;
 const dump = (label, obj) => {
   const keys = Object.keys(obj);
   if (!keys.length) return;

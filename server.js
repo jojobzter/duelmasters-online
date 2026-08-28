@@ -247,7 +247,9 @@ function buildEffectIndex() {
       filters: e.selector ? e.selector.filters : null,
       amount: e.amount || null,
       keyword: e.keyword || null,
-      condition: e.condition || null
+      condition: e.condition || null,
+      what: e.what || null,
+      filters: e.cardFilter ? e.cardFilter.filters : (e.selector ? e.selector.filters : null)
     })) });
     if (c.parsedEffects.some(e => e.action === 'grant' && /unchoosable/i.test(e.keyword || ''))) {
       put(key, { unchoosable: true });
@@ -448,6 +450,46 @@ function removeBattleCard(owner, key) {
 // Single funnel for battlezone -> graveyard so the Coiling Vines redirect can't be
 // missed by one of the several paths that destroy a creature.
 function battleCardToGrave(owner, card) {
+  const st0 = owner.__state;
+  const oi = st0 ? st0.players.indexOf(owner) : -1;
+  if (st0 && oi !== -1) {
+    const kw = grantedKeywords(st0, oi, card);
+    // outright protection from destruction
+    for (const e of staticClauses(card)) {
+      if (e.action === 'prevent' && String(e.what || '').toLowerCase() === 'destroy') {
+        if (!e.condition || conditionHolds(st0, oi, card, e.condition, null)) {
+          owner.battlezone.push(card);           // it never left
+          return 'protected';
+        }
+      }
+    }
+    // a Saver elsewhere on the board takes the hit for a matching creature
+    for (const guard of owner.battlezone) {
+      if (guard.key === card.key) continue;
+      const gkw = grantedKeywords(st0, oi, guard);
+      const spec = kwArg(gkw, 'saver');
+      if (!spec) continue;
+      const race = String(spec).replace(/^race=/i, '');
+      if (!raceMatchesAny(card.id, race)) continue;
+      const gi = owner.battlezone.findIndex(c => c.key === guard.key);
+      if (gi !== -1) owner.battlezone.splice(gi, 1);
+      owner.graveyard.push({ id: guard.id, key: guard.key });
+      owner.battlezone.push(card);               // saved
+      return 'saved by ' + cardLabel(guard.id);
+    }
+    // keyword forms of the "goes somewhere else instead" replacement
+    if (hasKw(kw, 'returnondestroy') || hasKw(kw, 'ondestroy->hand')) {
+      dissolveStack(owner, card, null, 'hand');
+      owner.hand.push({ id: card.id, key: card.key });
+      return 'hand';
+    }
+    if (hasKw(kw, 'tomanaondestroy')) {
+      dissolveStack(owner, card, null, 'hand');
+      const sl = manaSlot(owner);
+      owner.mana.push({ id: card.id, key: card.key, tapped: false, x: sl.x, y: sl.y });
+      return 'mana zone';
+    }
+  }
   // A sheet-described "onDestroy: -> hand/mana" replaces destruction entirely.
   const dm = (cardMeta(card.id) || {}).parsedEffects || [];
   const move = dm.find(e => e.trigger === 'ondestroy' && e.action === 'moveSelf');
@@ -617,8 +659,13 @@ function breakerCount(state, ownerIdx, card) {
   // writes these as power thresholds, with the double range stopping where the triple
   // range starts so a card can never claim both.
   const kw = grantedKeywords(state, ownerIdx, card);
-  if (m.tripleBreaker || kw.has('triplebreaker')) return 3;
-  if (m.doubleBreaker || kw.has('doublebreaker')) return 2;
+  let extra = 0;
+  if (hasKw(kw, 'extrabreaker') || hasKw(kw, 'additionalbreaker')) extra += 1;
+  const bump = kwArg(kw, 'breaker');
+  if (bump) { const n = parseInt(String(bump).replace(/[^0-9]/g, ''), 10); if (Number.isFinite(n)) extra += n; }
+  if (m.tripleBreaker || hasKw(kw, 'triplebreaker')) return 3 + extra;
+  if (m.doubleBreaker || hasKw(kw, 'doublebreaker')) return 2 + extra;
+  if (extra) return 1 + extra;
   // fallback for a card whose Effect text hasn't been filled in yet
   if (!hasSheetEffects(card.id) && normalizeCardKey(cardLabel(card.id)) === 'magmadragon ogrist vhal') {
     const p = effectivePower(state, ownerIdx, card, true) || 0;
@@ -688,10 +735,30 @@ function hasLegalBlocker(state, defender, atkCard) {
   if (atkCard.unblockableThisTurn) return false;
   if (ALWAYS_UNBLOCKABLE.has(normalizeCardKey(cardLabel(atkCard.id)))) return false;
   const atkIdx = state.players.indexOf(defender) === 0 ? 1 : 0;
-  if (grantedKeywords(state, atkIdx, atkCard).has('unblockable')) return false;
+  if (hasKw(grantedKeywords(state, atkIdx, atkCard), 'unblockable')) return false;
+  if (stealthActive(state, atkIdx, atkCard)) return false;
   const m = metaOf(atkCard.id);
   if (m.lightStealth && defender.mana.some(x => civsOf(x.id).includes('Light'))) return false;
-  return defender.battlezone.some(c => !c.tapped && metaOf(c.id).blocker);
+  const defIdx = state.players.indexOf(defender);
+  const akw = grantedKeywords(state, atkIdx, atkCard);
+  // "unblockableBy[...]" and a blanket block lock are both attacker-side
+  const byRace = kwArg(akw, 'unblockableby');
+  return defender.battlezone.some(c => {
+    if (c.tapped) return false;
+    const ckw = grantedKeywords(state, defIdx, c);
+    if (!metaOf(c.id).blocker && !hasKw(ckw, 'blocker')) return false;
+    if (hasKw(ckw, 'lockblock')) return false;              // this creature may not block
+    if (byRace && raceMatchesAny(c.id, String(byRace).replace(/^race=/i, ''))) return false;
+    // a blocker that may only stop dragons
+    if (hasKw(ckw, 'blockervsdragon') && !raceMatchesAny(atkCard.id, 'Dragon')) return false;
+    if (blockPrevented(state, atkIdx, atkCard, c)) return false;
+    return true;
+  });
+}
+
+// Does this attacker get to pick which shield falls, rather than taking the first?
+function picksShield(state, atkIdx, attacker) {
+  return !!attacker && hasKw(grantedKeywords(state, atkIdx, attacker), 'shieldbreakchoice');
 }
 
 // One shield breaking, shared by the "declare and break in one click" path and the
@@ -850,9 +917,35 @@ function resolveBattle(state, aIdx, aCard, dIdx, dCard, logs) {
   if (!aSheetWin && winner && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(aName)) && loserD) losers.push([A, aCard, aIdx]);
   if (!dSheetWin && !losers.some(l => l[1].key === dCard.key) && SELF_DESTRUCT_ON_WIN.has(normalizeCardKey(dName))) losers.push([D, dCard, dIdx]);
 
+  // A creature may refuse the battle entirely (Badlands Lizard) — no one is destroyed.
+  for (const [who, idx0] of [[aCard, aIdx], [dCard, dIdx]]) {
+    for (const e of staticClauses(who)) {
+      if (e.action !== 'prevent' || String(e.what || '').toLowerCase() !== 'battle') continue;
+      if (e.condition && !conditionHolds(state, idx0, who, e.condition, null)) continue;
+      logs.push('no battle happened (' + cardLabel(who.id) + ').');
+      return;
+    }
+  }
   logs.push('battle: ' + aName + ' (' + ap + ') vs ' + dName + ' (' + dp + ').');
   firePar(state, aIdx, aCard, 'onbattle', logs);
   firePar(state, dIdx, dCard, 'onbattle', logs);
+  const aAlways = hasKw(grantedKeywords(state, aIdx, aCard), 'winsallbattles');
+  const dAlways = hasKw(grantedKeywords(state, dIdx, dCard), 'winsallbattles');
+  if (aAlways || dAlways) {
+    losers.length = 0;
+    if (aAlways && !dAlways) losers.push([D, dCard, dIdx]);
+    if (dAlways && !aAlways) losers.push([A, aCard, aIdx]);
+    logs.push((aAlways ? cardLabel(aCard.id) : cardLabel(dCard.id)) + ' wins all battles.');
+  }
+  // "destroy the other creature after any battle", and "untap after winning"
+  for (const [who, foe, wi, fi, fp] of [[aCard, dCard, aIdx, dIdx, D], [dCard, aCard, dIdx, aIdx, A]]) {
+    const kw = grantedKeywords(state, wi, who);
+    if (hasKw(kw, 'destroyonbattle') && !losers.some(l => l[1].key === foe.key)) {
+      losers.push([fp, foe, fi]);
+      logs.push(cardLabel(who.id) + ' destroys whatever it battles.');
+    }
+    if (hasKw(kw, 'battlewinuntap') && !losers.some(l => l[1].key === who.key)) who.tapped = false;
+  }
   if (!losers.some(l => l[1].key === aCard.key)) firePar(state, aIdx, aCard, 'onbattlewin', logs);
   if (!losers.some(l => l[1].key === dCard.key)) firePar(state, dIdx, dCard, 'onbattlewin', logs);
   for (const [owner, card, ownerIdx] of losers) {
@@ -948,9 +1041,8 @@ function legalTargetCount(me, opp, eff) {
 }
 
 function isUnchoosable(id) {
-  const m = cardMeta(id) || {};
   if (normalizeCardKey(cardLabel(id)) === PETROVA_NAME) return true;
-  return (m.parsedEffects || []).some(e => e.action === 'grant' && /unchoosable/i.test(e.keyword || ''));
+  return hasKw(selfGrantedKeywords(id), 'unchoosable');
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +1056,41 @@ function isUnchoosable(id) {
 
 // A card is gear if the sheet types it so, or if it describes what happens to "the
 // creature I am crossed to". A card that merely destroys or bounces gear is NOT gear.
+// The single source of truth for what the rules engine actually enforces. The audit
+// reads these, so a keyword can never be quietly "supported" without being handled.
+const HANDLED_KEYWORDS = new Set([
+  'blocker', 'unblockable', 'unblockableby', 'lockblock', 'mustblock', 'blockervsdragon',
+  'speedattacker', 'slayer', 'doublebreaker', 'triplebreaker', 'extrabreaker',
+  'additionalbreaker', 'breaker', 'powerattacker', 'mustattack', 'unattackable',
+  'unattackableby', 'attackuntapped', 'attackableuntapped', 'ignoreattackrestrictions',
+  'unchoosable', 'entersmanatapped', 'manatapped', 'enterstapped', 'enterstappedinmana',
+  'freecrossgear', 'winsallbattles', 'destroyonbattle', 'battlewinuntap',
+  'breakshieldonblock', 'shieldbreakchoice', 'returnondestroy', 'tomanaondestroy',
+  'ondestroy->hand', 'saver', 'untappermana', 'darknessstealth', 'wavestriker',
+  'sharedtap', 'evolutionanyrace', 'silentskill', 'sharedability', 'race'
+]);
+const HANDLED_PREVENTS = new Set([
+  'anycast', 'oppcast', 'oppblock', 'oppattack', 'selfattack', 'attack', 'attackedby',
+  'battle', 'untap', 'destroy', 'shieldtrigger', 'oppshieldtrigger', 'opptap',
+  'tapability', 'civattackyou', 'lookatdeck'
+]);
+
+// keyword lookup that tolerates the bracketed forms, e.g. saver[race=Demon]
+function kwBase(k) { return String(k || '').toLowerCase().replace(/\[.*$/, ''); }
+function hasKw(set, name) {
+  if (set.has(name)) return true;
+  for (const k of set) if (kwBase(k) === name) return true;
+  return false;
+}
+function kwArg(set, name) {
+  for (const k of set) {
+    if (kwBase(k) !== name) continue;
+    const m = String(k).match(/\[(.*)\]?$/);
+    if (m) return m[1].replace(/\]$/, '');
+  }
+  return null;
+}
+
 function isCrossGear(id) {
   const m = cardMeta(id) || {};
   if (/cross gear/i.test(m.type || '')) return true;
@@ -1335,7 +1462,7 @@ function selfGrantedKeywords(cardId) {
 // working so previously-filled rows don't need rewriting.
 function entersManaTapped(cardId) {
   const kw = selfGrantedKeywords(cardId);
-  if (kw.has('entersmanatapped') || kw.has('manatapped')) return true;
+  if (hasKw(kw, 'entersmanatapped') || hasKw(kw, 'manatapped') || hasKw(kw, 'enterstappedinmana')) return true;
   return ENTERS_MANA_TAPPED.has(normalizeCardKey(cardLabel(cardId)));
 }
 
@@ -1396,6 +1523,178 @@ function castPrevented(state, playerIdx, cardId) {
         if (what !== 'anycast' && what !== 'oppcast') continue;
         if (what === 'oppcast' && playerIdx === si) continue;
         if (cardMatchesFilter(cardId, e.cardFilter)) return cardLabel(src.id);
+      }
+    }
+  }
+  return null;
+}
+
+// Can `blocker` legally block `attacker`? A creature may forbid certain creatures
+// from blocking it ("prevent oppBlock oppCreature[civ=Light]").
+function blockPrevented(state, attackerIdx, attacker, blocker) {
+  if (!attacker || !blocker) return null;
+  for (const e of staticClauses(attacker)) {
+    if (e.action !== 'prevent') continue;
+    if (String(e.what || '').toLowerCase() !== 'oppblock') continue;
+    if (cardMatchesFilter(blocker.id, e.cardFilter)) return cardLabel(attacker.id);
+  }
+  return null;
+}
+
+// Can `attacker` legally attack `victim`? A creature may forbid certain creatures
+// from attacking it ("prevent oppAttack oppCreature[civ=Light]").
+function attackPrevented(state, victim, attacker) {
+  if (!attacker || !victim) return null;
+  for (const e of staticClauses(victim)) {
+    if (e.action !== 'prevent') continue;
+    if (String(e.what || '').toLowerCase() !== 'oppattack') continue;
+    if (cardMatchesFilter(attacker.id, e.cardFilter)) return cardLabel(victim.id);
+  }
+  return null;
+}
+
+// A creature may be immune to attack outright, or immune to attackers of a kind.
+// slayer / power attacker / wave striker etc. may be granted rather than printed
+function hasSlayer(state, ownerIdx, card) {
+  if (metaOf(card.id).slayer) return true;
+  return hasKw(grantedKeywords(state, ownerIdx, card), 'slayer');
+}
+
+// A creature told it must attack, or must block if able.
+// Wave Striker is a race-style tag used by conditions like "if waveStriker.count>=3";
+// it is meaningful through counting rather than as a standalone rule.
+// "sharedAbility[onSummon: ...]" — the clause named in the bracket is treated as
+// belonging to every other creature this card designates. Recorded here so the
+// interpreter can fire it for them.
+function sharedAbilityClauses(state, ownerIdx, card) {
+  const out = [];
+  for (const e of staticClauses(card)) {
+    if (e.action !== 'grant') continue;
+    if (kwBase(e.keyword) !== 'sharedability') continue;
+    out.push({ raw: kwArg(new Set([e.keyword]), 'sharedability'), selector: e.selector });
+  }
+  return out;
+}
+
+function isWaveStriker(state, ownerIdx, card) {
+  return hasKw(grantedKeywords(state, ownerIdx, card), 'wavestriker');
+}
+
+// Shared tap: tapping one taps the others of its kind.
+function applySharedTap(state, ownerIdx, card) {
+  const kw = grantedKeywords(state, ownerIdx, card);
+  const spec = kwArg(kw, 'sharedtap');
+  if (!hasKw(kw, 'sharedtap')) return;
+  const me = state.players[ownerIdx];
+  for (const c of me.battlezone) {
+    if (c.key === card.key) continue;
+    if (spec) {
+      const civ = String(spec).replace(/^civ=/i, '');
+      if (!civMatches(c.id, civ)) continue;
+    }
+    c.tapped = card.tapped;
+  }
+}
+
+function mustAttack(state, ownerIdx, card) {
+  return hasKw(grantedKeywords(state, ownerIdx, card), 'mustattack');
+}
+function mustBlock(state, ownerIdx, card) {
+  return hasKw(grantedKeywords(state, ownerIdx, card), 'mustblock');
+}
+
+// A creature may be attackable while untapped even though the attacker normally
+// couldn't, or an attacker may ignore printed attack restrictions altogether.
+function canAttackUntappedNow(state, atkIdx, attacker, victimIdx, victim) {
+  const akw = grantedKeywords(state, atkIdx, attacker);
+  if (hasKw(akw, 'attackuntapped') || hasKw(akw, 'ignoreattackrestrictions')) return true;
+  const vkw = grantedKeywords(state, victimIdx, victim);
+  if (hasKw(vkw, 'attackableuntapped')) return true;
+  return canAttackUntappedTarget(attacker.id, victim.id);
+}
+
+// Darkness Stealth: unblockable while the defender has Darkness in their mana zone.
+function stealthActive(state, atkIdx, attacker) {
+  const kw = grantedKeywords(state, atkIdx, attacker);
+  const def = state.players[atkIdx === 0 ? 1 : 0];
+  if (hasKw(kw, 'darknessstealth') && def.mana.some(m => civsOf(m.id).includes('Darkness'))) return true;
+  return false;
+}
+
+function attackTargetForbidden(state, victimIdx, victim, attacker) {
+  const kw = grantedKeywords(state, victimIdx, victim);
+  if (hasKw(kw, 'unattackable')) return cardLabel(victim.id) + ' cannot be attacked';
+  const byRace = kwArg(kw, 'unattackableby');
+  if (byRace) {
+    const spec = String(byRace).replace(/^race=/i, '');
+    if (raceMatchesAny(attacker.id, spec)) return cardLabel(victim.id) + ' cannot be attacked by that race';
+  }
+  for (const e of staticClauses(victim)) {
+    if (e.action !== 'prevent') continue;
+    const w = String(e.what || '').toLowerCase();
+    if (w !== 'attackedby' && w !== 'oppattack') continue;
+    if (cardMatchesFilter(attacker.id, e.cardFilter)) return cardLabel(victim.id) + " can't be attacked by that creature";
+  }
+  return null;
+}
+
+// A creature may be forbidden from attacking at all, or only under a condition.
+// Is this player's untap step blocked for a kind of card? Returns the culprit's name.
+// "prevent untap" on an opposing card holds the other player down; "untapPerMana"
+// and similar variants carry their own card filter.
+// Cryptic Totem and friends: while in play, the other player's Shield Triggers
+// simply don't fire.
+function shieldTriggersSuppressed(state, defenderIdx) {
+  for (let si = 0; si < state.players.length; si++) {
+    for (const src of state.players[si].battlezone) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'prevent') continue;
+        const w = String(e.what || '').toLowerCase();
+        if (w !== 'shieldtrigger' && w !== 'oppshieldtrigger') continue;
+        if (w === 'oppshieldtrigger' && si === defenderIdx) continue;
+        if (e.condition && !conditionHolds(state, si, src, e.condition, null)) continue;
+        return cardLabel(src.id);
+      }
+    }
+  }
+  return null;
+}
+
+function untapBlockedFor(state, playerIdx, kind, card) {
+  for (let si = 0; si < state.players.length; si++) {
+    for (const src of state.players[si].battlezone) {
+      for (const e of staticClauses(src)) {
+        if (e.action !== 'prevent') continue;
+        const w = String(e.what || '').toLowerCase();
+        if (w !== 'untap' && w !== 'untappermana') continue;
+        if (si === playerIdx) continue;                    // it restrains the opponent
+        if (w === 'untappermana' && kind !== 'mana') continue;
+        if (card && e.cardFilter && !cardMatchesFilter(card.id, e.cardFilter)) continue;
+        if (e.condition && !conditionHolds(state, si, src, e.condition, null)) continue;
+        return cardLabel(src.id);
+      }
+    }
+  }
+  return null;
+}
+
+function attackerForbidden(state, ownerIdx, attacker) {
+  for (const e of staticClauses(attacker)) {
+    if (e.action !== 'prevent') continue;
+    const w = String(e.what || '').toLowerCase();
+    if (w !== 'selfattack' && w !== 'attack') continue;
+    if (e.condition && !conditionHolds(state, ownerIdx, attacker, e.condition, null)) continue;
+    return cardLabel(attacker.id) + " can't attack right now";
+  }
+  // Miraculous Truce: a whole civilization is barred from attacking you
+  const opp = state.players[ownerIdx === 0 ? 1 : 0];
+  for (const c of opp.battlezone) {
+    for (const e of staticClauses(c)) {
+      if (e.action !== 'prevent') continue;
+      if (!/^civattackyou/i.test(String(e.what || ''))) continue;
+      const named = opp.truceCiv || c.truceCiv || null;
+      if (named && civsOf(attacker.id).includes(named)) {
+        return 'creatures of that civilization cannot attack (' + cardLabel(c.id) + ')';
       }
     }
   }
@@ -2790,6 +3089,18 @@ wss.on('connection', (ws) => {
       if (!room.decks[idx]) return;
       const me0 = s.players[idx];
       if (!canSearchDeck(me0)) return;
+      // an opposing card may forbid looking through decks (Mestapo, the Patroller)
+      {
+        const other = s.players[idx === 0 ? 1 : 0];
+        for (const src of other.battlezone) {
+          for (const e of staticClauses(src)) {
+            if (e.action === 'prevent' && String(e.what || '').toLowerCase() === 'lookatdeck') {
+              send(ws, { type: 'summonRejected', reason: cardLabel(src.id) + ' prevents looking through decks.' });
+              return;
+            }
+          }
+        }
+      }
       send(ws, { type: 'searchDeckOffer', cards: me0.deck.map((id, index) => ({ index, id })), filter: null, source: 'Search Deck' });
       return;
     }
@@ -2898,6 +3209,17 @@ wss.on('connection', (ws) => {
           return;
         }
         if (s.combat) { send(ws, { type: 'summonRejected', reason: 'Finish resolving the current attack first.' }); return; }
+        // a creature under "must attack" should not be left sitting untapped
+        {
+          const idle = me.battlezone.find(c =>
+            !c.tapped && mustAttack(s, idx, c) && !hasSummoningSickness(s, idx, c) &&
+            !attackerForbidden(s, idx, c));
+          if (idle && !msg.force) {
+            send(ws, { type: 'summonRejected',
+              reason: cardLabel(idle.id) + ' must attack if it is able. Attack with it first, or end the turn again to override.' });
+            return;
+          }
+        }
         // the defender may still be deciding on a shield trigger you caused
         if ((opp.pendingShieldTriggers || []).length) {
           send(ws, { type: 'summonRejected', reason: 'Wait — your opponent is still deciding on a Shield Trigger.' });
@@ -2920,6 +3242,7 @@ wss.on('connection', (ws) => {
             extraLogs.push('returned ' + cardLabel(c.id) + ' to their hand (it broke a shield this turn).');
           }
         }
+
         // sheet-described end-of-turn effects for this player's creatures
         for (const c of me.battlezone.slice()) firePar(s, idx, c, 'endturn', extraLogs);
         // temporary buffs and granted keywords expire now
@@ -2976,9 +3299,18 @@ wss.on('connection', (ws) => {
         // except a creature marked noAutoUntap (e.g. Venom Capsule), which stays tapped
         // until manually untapped or untapped by an effect.
         let untapped = 0;
-        for (const m of opp.mana) { if (m.tapped) { m.tapped = false; untapped++; } }
+        // an effect may hold cards down through the untap step
+        const heldMana = untapBlockedFor(s, oppIdx, 'mana');
+        for (const m of opp.mana) {
+          if (!m.tapped) continue;
+          if (heldMana) continue;
+          m.tapped = false; untapped++;
+        }
+        if (heldMana) extraLogs.push('mana stayed tapped (' + heldMana + ').');
         for (const c of opp.battlezone) {
-          if (c.tapped && !skipsAutoUntap(c.id)) { c.tapped = false; untapped++; }
+          const held = untapBlockedFor(s, oppIdx, 'creature', c);
+          if (c.tapped && !skipsAutoUntap(c.id) && !held) { c.tapped = false; untapped++; }
+          else if (c.tapped && held) extraLogs.push(cardLabel(c.id) + ' stayed tapped (' + held + ').');
           c.atkResolved = false;
         }
         // Miraculous Truce expires at the start of its caster's next turn
@@ -3089,7 +3421,11 @@ wss.on('connection', (ws) => {
         // one of your creatures that shares a race with them.
         let evoBase = null;
         if (isEvolutionCard(cardId)) {
-          const legal = me.battlezone.filter(b => canEvolveOnto(cardId, b.id));
+          // "evolutionAnyRace" lets a card evolve from anything you control
+          const anyRace = hasKw(selfGrantedKeywords(cardId), 'evolutionanyrace');
+          const legal = anyRace
+            ? me.battlezone.filter(b => !isSpellCard(b.id))
+            : me.battlezone.filter(b => canEvolveOnto(cardId, b.id));
           if (!legal.length) {
             const need = (cardMeta(cardId) || {}).race || 'a matching race';
             send(ws, { type: 'summonRejected', reason: cardLabel(cardId) + ' is an evolution creature — you need a ' + need + ' creature in your battle zone to evolve from.' });
@@ -3124,6 +3460,13 @@ wss.on('connection', (ws) => {
         me.battlezone.push({ id: c.id, key: c.key, tapped: inheritTapped, x, y,
                              summonedTurn: evoBase ? null : s.turnNumber,
                              brokeShieldThisTurn: false, under: stack });
+        {
+          const placed = me.battlezone[me.battlezone.length - 1];
+          if (placed && hasKw(selfGrantedKeywords(placed.id), 'enterstapped')) {
+            placed.tapped = true;
+            extraLogs.push(cardLabel(placed.id) + ' entered the battle zone tapped.');
+          }
+        }
         onCreatureEnteredBattlezone(s, c.key, c.id, extraLogs);
         if (evoBase) extraLogs.push('evolved ' + cardLabel(c.id) + ' from ' + cardLabel(evoBase.id) + '.');
         if (isSpellCard(c.id)) {
@@ -3337,6 +3680,16 @@ wss.on('connection', (ws) => {
 
         if (c.tapped && msg.mode === 'ability') {
           // a card described in the sheet runs its own tapAbility clause
+          const tapLock = (() => {
+            for (let si = 0; si < s.players.length; si++)
+              for (const src of s.players[si].battlezone)
+                for (const e of staticClauses(src)) {
+                  if (e.action === 'prevent' && String(e.what || '').toLowerCase() === 'tapability' && si !== idx)
+                    return cardLabel(src.id);
+                }
+            return null;
+          })();
+          if (tapLock) { send(ws, { type: 'summonRejected', reason: tapLock + ' prevents tap abilities.' }); return; }
           if (hasSheetTrigger(c.id, 'tapability') || hasSheetTrigger(c.id, 'silentskill')) {
             firePar(s, idx, c, 'tapability', extraLogs);
             firePar(s, idx, c, 'silentskill', extraLogs);
@@ -3610,6 +3963,20 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a spell.' });
           return;
         }
+        // an effect may forbid the opponent tapping this player's cards
+        if (eff.action === 'tap') {
+          const ownerIdx0 = s.players.indexOf(owner);
+          if (ownerIdx0 !== idx) {
+            for (const src of owner.battlezone) {
+              for (const e2 of staticClauses(src)) {
+                if (e2.action === 'prevent' && String(e2.what || '').toLowerCase() === 'opptap') {
+                  send(ws, { type: 'summonRejected', reason: cardLabel(src.id) + " prevents tapping that player's cards." });
+                  return;
+                }
+              }
+            }
+          }
+        }
         if (eff.civ && !civMatches(card.id, eff.civ)) {
           send(ws, { type: 'summonRejected', reason: eff.source + ' can only choose a ' + eff.civ + ' card.' });
           return;
@@ -3648,6 +4015,7 @@ wss.on('connection', (ws) => {
           case 'tap':
             if (card.tapped) { send(ws, { type: 'summonRejected', reason: label + ' is already tapped.' }); return; }
             card.tapped = true;
+            applySharedTap(s, s.players.indexOf(owner), card);
             logText = 'used ' + eff.source + ' to tap ' + label + '.';
             break;
           case 'untap':
@@ -3925,6 +4293,14 @@ wss.on('connection', (ws) => {
           return;
         }
 
+        // an attacker with shield choice always goes through the pick-a-shield path
+        if (target.type === 'shield' && !target.key && picksShield(s, idx, atk) && opp.shields.length > 1) {
+          send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' chooses which shield to break — click one.' });
+          return;
+        }
+        const cantAttack = attackerForbidden(s, idx, atk);
+        if (cantAttack) { send(ws, { type: 'summonRejected', reason: cantAttack + '.' }); return; }
+
         const target = msg.target || {};
         if (target.type === 'shield') {
           if (!dcShieldRun && !canAttackShields(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack shields." }); return; }
@@ -3932,17 +4308,21 @@ wss.on('connection', (ws) => {
         } else if (target.type === 'creature') {
           const victim = opp.battlezone.find(c => c.key === target.key);
           if (!victim) return;
-          if (!victim.tapped && !canAttackUntappedTarget(atk.id, victim.id)) {
+          if (!victim.tapped && !canAttackUntappedNow(s, idx, atk, oppIdx, victim)) {
             send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' can only attack TAPPED creatures.' });
             return;
           }
-          if (blockerOnly(atk.id) && !metaOf(victim.id).blocker) {
+          if (blockerOnly(atk.id) && !hasKw(grantedKeywords(s, idx, atk), 'ignoreattackrestrictions')
+              && !metaOf(victim.id).blocker) {
             send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' can only attack creatures that have Blocker.' });
             return;
           }
           if (normalizeCardKey(cardLabel(victim.id)) === PETROVA_NAME) {
             // Petrova can't be *chosen* by effects, but attacking it is allowed
           }
+          // the target may forbid this attacker ("can't be attacked by light creatures")
+          const noAttack = attackTargetForbidden(s, oppIdx, victim, atk);
+          if (noAttack) { send(ws, { type: 'summonRejected', reason: noAttack + '.' }); return; }
         } else return;
 
         // Miraculous Truce: creatures of the named civilization can't attack that player
@@ -4014,7 +4394,15 @@ wss.on('connection', (ws) => {
 
         if (msg.blockerKey) {
           const blk = me.battlezone.find(c => c.key === msg.blockerKey);
-          if (!blk || blk.tapped || !metaOf(blk.id).blocker) return;
+          if (!blk || blk.tapped) return;
+          // a blocker granted by gear or a static effect counts as a blocker too
+          if (!metaOf(blk.id).blocker && !grantedKeywords(s, idx, blk).has('blocker')) return;
+          // the attacker may forbid this creature from blocking it
+          const noBlock = blockPrevented(s, cb.attackerIdx, atk, blk);
+          if (noBlock) {
+            send(ws, { type: 'summonRejected', reason: noBlock + " can't be blocked by that creature." });
+            return;
+          }
           // Light Stealth: can't be blocked if the blocking player has Light cards in mana
           if (metaOf(atk.id).lightStealth && me.mana.some(m => civsOf(m.id).includes('Light'))) {
             send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " has Light Stealth — you can't block it while you have Light cards in your mana zone." });
@@ -4026,6 +4414,12 @@ wss.on('connection', (ws) => {
           }
           blk.tapped = true;
           logText = 'blocked with ' + cardLabel(blk.id) + '.';
+          // "breaks a shield whenever it blocks"
+          if (hasKw(grantedKeywords(s, cb.attackerIdx, atk), 'breakshieldonblock') && me.shields.length) {
+            const sh0 = me.shields.shift();
+            me.hand.push({ id: sh0.id, key: sh0.key });
+            extraLogs.push(cardLabel(atk.id) + ' broke a shield as it was blocked.');
+          }
           firePar(s, idx, blk, 'onblock', extraLogs);
           firePar(s, idx, blk, 'onattacked', extraLogs);
           firePar(s, cb.attackerIdx, atk, 'onblocked', extraLogs);
@@ -4174,6 +4568,11 @@ wss.on('connection', (ws) => {
       // locks out non-Light spells for BOTH players, including its own controller).
       // Offering it anyway asks a question whose answer the server would refuse,
       // and the unresolved prompt then blocks both players indefinitely.
+      const suppressor = shieldTriggersSuppressed(s, offer.idx);
+      if (suppressor) {
+        extraLogs.push('Shield Triggers are suppressed (' + suppressor + ').');
+        continue;
+      }
       const blockedBy = castPrevented(s, offer.idx, offer.id);
       if (blockedBy) {
         extraLogs.push(cardLabel(offer.id) + ' could not be cast (' + blockedBy + ') — it stays in hand.');
