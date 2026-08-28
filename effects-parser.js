@@ -99,7 +99,7 @@ function parseSelector(raw) {
     return parts[0];
   }
   let accessor = null;
-  const acc = raw.match(/^(.*)\.(topCard|count|evoBase|name|crossedCreature|crossed)$/);
+  const acc = raw.match(/^(.*)\.(topCard|count|civCount|evoBase|name|crossedCreature|crossed)$/);
   if (acc) { raw = acc[1]; accessor = acc[2]; }
   // "self.crossedCreature" / "target.crossedCreature" resolve to a crossed creature
   if (accessor === 'crossedCreature') {

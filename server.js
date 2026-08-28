@@ -1371,6 +1371,13 @@ function countSelector(state, srcOwnerIdx, srcCard, selText) {
   if (sel.side === 'own') list = zoneList(own);
   else if (sel.side === 'opp') list = zoneList(other);
   else list = zoneList(own).concat(zoneList(other));
+  // "ownMana.civCount" asks how many different civilizations are present, not how
+  // many cards — Elixia grows with the breadth of your mana, not its size.
+  if (sel.accessor === 'civCount') {
+    const seen = new Set();
+    for (const c of list) for (const v of civsOf(c.id)) seen.add(v);
+    return seen.size;
+  }
   return list.filter(c => {
     if (sel.excludeSelf && c.key === srcCard.key) return false;
     const ownerIdx = own.battlezone.includes(c) || own.mana.includes(c) ||
