@@ -3,6 +3,8 @@
 // Cross Gear crossing state — declared up here because the selection resolver reads
 // it far earlier in the file, and a `let` below its first use throws at load.
 let crossingGearKey = null;
+// set when the server warns that a creature must attack; a second press overrides
+let endTurnWarned = false;
 // card names come from filenames, so escape before putting them in markup
 function escapeHtml(t) {
   return String(t == null ? '' : t)
@@ -898,6 +900,7 @@ function handleSeatMessage(seatIndex, msg) {
     if (isBotGame && seatIndex === 1) { Bot.onRejected(); return; }
     // If a free cast was refused, the trigger can't be used — decline it rather than
     // leaving the prompt pending, which would block the opponent too.
+    if (/must attack if it is able/.test(msg.reason || '')) endTurnWarned = true;
     if (shieldTriggerPendingKey) {
       sendMsg({ type: 'shieldTriggerDecline', key: shieldTriggerPendingKey });
       const m = document.getElementById('shield-trigger-modal');
@@ -1411,6 +1414,26 @@ function isBlockerById(id) {
 // "unchoosable" to) — read from the published effect index rather than by name
 // Cross Gear, identified the same way the engine does: from the published ability
 // index, so the two can never disagree about what counts as gear.
+// "This creature can't be blocked by light creatures" — mirrors the engine so the
+// client never highlights a blocker the server would then refuse.
+function blockForbidden(attacker, blocker) {
+  if (!attacker || !blocker) return false;
+  const name = normKeyClient(cardBaseName(attacker.id));
+  const fx = (typeof EFFECT_INDEX !== 'undefined' && EFFECT_INDEX) ? EFFECT_INDEX[name] : null;
+  const clauses = (fx && fx.described) || [];
+  for (const d of clauses) {
+    if (d.action !== 'prevent' || String(d.what || '').toLowerCase() !== 'oppblock') continue;
+    for (const f of (d.filters || [])) {
+      if (f.key === 'civ') {
+        const wants = String(f.value).split('/').map(x => x.trim().toLowerCase());
+        const got = civsById(blocker.id).map(x => String(x).toLowerCase());
+        if (wants.some(w => got.includes(w))) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function isCrossGearById(id) {
   const name = normKeyClient(cardBaseName(id));
   const meta = cardMetaDB.get(name);
@@ -1501,7 +1524,8 @@ document.getElementById('btn-quit').addEventListener('click', () => {
 document.getElementById('btn-stop-showing').addEventListener('click', () => sendMsg({ type: 'setShowingHand', show: false }));
 document.getElementById('btn-skip-corile').addEventListener('click', () => sendMsg({ type: 'corileSkip' }));
 document.getElementById('btn-end-turn').addEventListener('click', () => {
-  sendMsg({ type: 'endTurn' });
+  sendMsg({ type: 'endTurn', force: endTurnWarned });
+  endTurnWarned = false;
   // practice mode: hop to the other player so you're always looking at whoever is up.
   // Against the computer you stay put — seat 1 is the bot.
   if (isSolo && !isBotGame) setTimeout(() => switchSeat(activeSeat === 0 ? 1 : 0), 260);
@@ -2075,7 +2099,10 @@ function selectableKeysFor(state, me, opp) {
   const cb = state.combat;
   if (cb && cb.phase === 'blocking' && cb.attackerIdx !== state.you) {
     const atk = opp.battlezone.find(c => c.key === cb.attackerKey);
-    const keys = new Set(me.battlezone.filter(c => !c.tapped && isBlockerById(c.id)).map(c => c.key));
+    // an attacker may forbid certain creatures from blocking it — don't offer those
+    const keys = new Set(me.battlezone
+      .filter(c => !c.tapped && isBlockerById(c.id) && !blockForbidden(atk, c))
+      .map(c => c.key));
     return {
       keys,
       onClick: key => sendMsg({ type: 'declareBlock', blockerKey: key }),

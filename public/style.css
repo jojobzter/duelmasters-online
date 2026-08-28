@@ -224,7 +224,9 @@ input {
    13.8% works out narrower than a card and creatures overlap. Below that width the
    zone scrolls sideways instead of squashing. */
 .battle-zone { flex-direction: column; min-width: 0; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; overflow: hidden; }
-.battle-half { position: relative; width: 100%; min-width: min(calc(var(--bz-card-w) * 7.6), 100%); min-height: calc(var(--bz-card-h) * 1.15 + 16px); padding: 4px; overflow: hidden; }
+/* The just-moved flash and the breakable outline are drawn OUTSIDE the card box, so
+   the zone keeps a few pixels of padding for them instead of clipping them off. */
+.battle-half { position: relative; width: 100%; min-width: min(calc(var(--bz-card-w) * 7.6), 100%); min-height: calc(var(--bz-card-h) * 1.15 + 22px); padding: 8px 6px 10px; overflow: visible; }
 .battle-divider { height: 1px; background: rgba(255,255,255,0.15); margin: 4px 0; }
 
 .card {
@@ -475,8 +477,9 @@ input {
 /* a card the engine just moved — brief red flash so fast effects are readable */
 .card.just-moved, .card-thumb.just-moved { animation: just-moved-flash 0.5s ease-in-out 3; }
 @keyframes just-moved-flash {
-  0%,100% { outline: 3px solid rgba(255,70,70,0); box-shadow: none; }
-  50%     { outline: 3px solid #ff4646; box-shadow: 0 0 18px rgba(255,70,70,.85); }
+  0%,100% { outline: 3px solid rgba(255,70,70,0); outline-offset: -2px; box-shadow: none; }
+  50%     { outline: 3px solid #ff4646; outline-offset: -2px;
+            box-shadow: 0 0 14px rgba(255,70,70,.85), inset 0 0 12px rgba(255,70,70,.55); }
 }
 
 .card.breakable { outline: 3px solid #ff6b3d; outline-offset: 2px; cursor: crosshair; animation: breakable-pulse 1s ease-in-out infinite; }
