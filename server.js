@@ -1101,12 +1101,13 @@ const HANDLED_KEYWORDS = new Set([
   'freecrossgear', 'winsallbattles', 'destroyonbattle', 'battlewinuntap',
   'breakshieldonblock', 'shieldbreakchoice', 'returnondestroy', 'tomanaondestroy',
   'ondestroy->hand', 'saver', 'untappermana', 'darknessstealth', 'wavestriker',
-  'sharedtap', 'evolutionanyrace', 'silentskill', 'sharedability', 'race'
+  'sharedtap', 'evolutionanyrace', 'silentskill', 'sharedability', 'race',
+  'shieldtriggercross', 'crossedgear'
 ]);
 const HANDLED_PREVENTS = new Set([
   'anycast', 'oppcast', 'oppblock', 'oppattack', 'selfattack', 'attack', 'attackedby',
   'battle', 'untap', 'destroy', 'shieldtrigger', 'oppshieldtrigger', 'opptap',
-  'tapability', 'civattackyou', 'lookatdeck'
+  'tapability', 'civattackyou', 'lookatdeck', 'anysummon', 'oppsummon', 'oppmana'
 ]);
 
 // keyword lookup that tolerates the bracketed forms, e.g. saver[race=Demon]
@@ -1355,6 +1356,39 @@ function conditionHolds(state, srcOwnerIdx, srcCard, condition, ctx) {
       default: return cur === v;
     }
   }
+  // Cross Gear state: does this creature currently carry gear?
+  if (/^self\.crossed$/.test(c)) {
+    const owner = state.players[srcOwnerIdx];
+    return (owner.crossGear || []).some(g => g.crossedTo === srcCard.key);
+  }
+  if (/^!self\.crossed$/.test(c)) {
+    const owner = state.players[srcOwnerIdx];
+    return !(owner.crossGear || []).some(g => g.crossedTo === srcCard.key);
+  }
+  // is a card of this same name already in your graveyard?
+  if (/^self\.nameingrave$/.test(c)) {
+    const owner = state.players[srcOwnerIdx];
+    const me = normalizeCardKey(cardLabel(srcCard.id));
+    return (owner.graveyard || []).some(g => normalizeCardKey(cardLabel(g.id)) === me);
+  }
+  // true only during this creature's FIRST attack of the turn
+  if (/^self\.firstattackthisturn$/.test(c)) return (srcCard.attacksThisTurn || 0) <= 1;
+  // the power of the creature this gear is crossed onto
+  const cp = condition.match(/^crossedCreature\.power\s*(>=|<=|>|<|=)\s*(\d+)$/i);
+  if (cp) {
+    const owner = state.players[srcOwnerIdx];
+    const gear = (owner.crossGear || []).find(g => g.key === srcCard.key);
+    const host = gear && gear.crossedTo ? owner.battlezone.find(x => x.key === gear.crossedTo) : null;
+    if (!host) return false;
+    const hp = effectivePower(state, srcOwnerIdx, host, false);
+    if (hp == null) return false;
+    const v2 = parseInt(cp[2], 10);
+    switch (cp[1]) {
+      case '>=': return hp >= v2; case '<=': return hp <= v2;
+      case '>': return hp > v2;   case '<': return hp < v2;
+      default: return hp === v2;
+    }
+  }
   if (/^self\.tapped$/.test(c)) return !!srcCard.tapped;
   if (/^self\.untapped$/.test(c)) return !srcCard.tapped;
   if (/^self\.brokeshieldthisturn$/.test(c)) return !!srcCard.brokeShieldThisTurn;
@@ -1556,13 +1590,20 @@ function costAdjustment(state, playerIdx, cardId) {
 
 // Is this player prevented from casting this card? ("prevent anyCast spell[!civ=Light]")
 function castPrevented(state, playerIdx, cardId) {
+  const spell = isSpellCard(cardId);
   for (let si = 0; si < state.players.length; si++) {
     for (const src of state.players[si].battlezone) {
       for (const e of staticClauses(src)) {
         if (e.action !== 'prevent') continue;
         const what = String(e.what || '').toLowerCase();
-        if (what !== 'anycast' && what !== 'oppcast') continue;
-        if (what === 'oppcast' && playerIdx === si) continue;
+        // "anySummon" restricts CREATURES; "anyCast"/"oppCast" restrict spells.
+        // Alphadios carries both, so each half only judges its own card type.
+        const isCastRule = (what === 'anycast' || what === 'oppcast');
+        const isSummonRule = (what === 'anysummon' || what === 'oppsummon');
+        if (!isCastRule && !isSummonRule) continue;
+        if (isCastRule && !spell) continue;
+        if (isSummonRule && spell) continue;
+        if ((what === 'oppcast' || what === 'oppsummon') && playerIdx === si) continue;
         if (cardMatchesFilter(cardId, e.cardFilter)) return cardLabel(src.id);
       }
     }
@@ -1842,6 +1883,7 @@ function matchesExtra(id, ex) {
 // pooled and the target validation accepts a card from whichever it came from.
 function zonesForSelector(sel) {
   if (!sel) return [];
+  if (sel.attachedToSelf) return ['ownCrossGear'];
   if (sel.alternatives) {
     return sel.alternatives.map(a => zoneNameOf(a)).filter(Boolean);
   }
@@ -1957,6 +1999,28 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const zoneNames = zonesForSelector(e.selector);
         const zoneName = zoneNames[0];
         if (!zoneName) break;
+        // "crossedGear" only ever means the gear attached to THIS creature
+        if (e.selector && e.selector.attachedToSelf) {
+          const mine = (me.crossGear || []).filter(g => g.crossedTo === cardKey);
+          if (!mine.length) { logs.push(cardLabel(cardId) + ': no Cross Gear attached.'); break; }
+          const act = PARSED_ACTION_MAP[e.action];
+          for (const g of mine.slice()) {
+            const gi = me.crossGear.indexOf(g);
+            if (gi === -1) continue;
+            if (act === 'toGrave' || act === 'destroy') {
+              me.crossGear.splice(gi, 1);
+              me.graveyard.push({ id: g.id, key: g.key });
+            } else if (act === 'returnToHand' || act === 'toHand') {
+              me.crossGear.splice(gi, 1);
+              me.hand.push({ id: g.id, key: g.key });
+            } else {
+              g.crossedTo = null;
+            }
+          }
+          logs.push(cardLabel(cardId) + ': its Cross Gear was ' +
+            (act === 'toGrave' || act === 'destroy' ? 'sent to the graveyard' : 'moved') + '.');
+          break;
+        }
         const wantCount = resolveCount(e.count);
         if (wantCount === 0) { logs.push(cardLabel(cardId) + ': nothing to choose (count is zero).'); break; }
         const ex = filtersToEngine(e.selector);
@@ -2238,6 +2302,57 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       }
       case 'nameCost': {
         logs.push('named a mana cost with ' + cardLabel(cardId) + '.');
+        break;
+      }
+      case 'crossGear': case 'recrossGear': {
+        // Attach (or move) gear onto one of your creatures. "free" waives the cost,
+        // which is the only form the sheet uses — these all come from card effects.
+        const targets = me.battlezone.filter(c => !isSpellCard(c.id));
+        if (!targets.length) { logs.push(cardLabel(cardId) + ': no creature to cross onto.'); break; }
+
+        // which gear is being moved?
+        let gears = [];
+        const sel = e.selector || {};
+        if (sel.selfOnly || /^self$/i.test(sel.name || '')) {
+          const own = (me.crossGear || []).find(g => g.key === cardKey);
+          if (own) gears = [own];
+        } else if (sel.attachedToSelf) {
+          gears = (me.crossGear || []).filter(g => g.crossedTo === cardKey);
+        } else {
+          gears = (me.crossGear || []).slice();
+        }
+        if (!gears.length) { logs.push(cardLabel(cardId) + ': no Cross Gear to move.'); break; }
+
+        const wantAll = resolveCount(e.count) === 'all';
+        const pool = wantAll ? gears : gears.slice(0, 1);
+        // prefer a creature other than the one the gear just left
+        const dest = targets.find(t => t.key !== cardKey) || targets[0];
+        for (const g of pool) { g.crossedTo = dest.key; }
+        logs.push(cardLabel(cardId) + ': crossed ' + pool.length + ' Cross Gear onto ' + cardLabel(dest.id) + '.');
+        break;
+      }
+      case 'shuffleIntoDeck': {
+        const zoneName = zoneNameOf(e.selector) || 'ownShield';
+        const list = listForZone(me, opp, zoneName);
+        const both = zoneName.startsWith('any');
+        const lists = both ? [me.shields, opp.shields] : [list];
+        let n = 0;
+        for (const L of lists) {
+          const owner = (L === opp.shields) ? opp : me;
+          while (L.length) { const c = L.shift(); owner.deck.push(c.id); n++; }
+          owner.deck = shuffle(owner.deck);
+        }
+        logs.push('shuffled ' + n + ' card' + (n === 1 ? '' : 's') + ' back into their decks.');
+        break;
+      }
+      case 'prevent': {
+        // a one-shot restriction placed on the opponent, e.g. "prevent oppMana untilNextTurn"
+        const what2 = String(e.what || '').toLowerCase();
+        if (what2 === 'oppmana') {
+          state.manaLockUntil = { forIdx: oppIdx, untilTurn: (state.turnNumber || 0) + 1,
+                                  source: cardLabel(cardId) };
+          logs.push(cardLabel(cardId) + ': their opponent cannot charge mana next turn.');
+        }
         break;
       }
       case 'reveal': {
@@ -3300,7 +3415,7 @@ wss.on('connection', (ws) => {
         for (const c of me.battlezone.slice()) firePar(s, idx, c, 'endturn', extraLogs);
         // temporary buffs and granted keywords expire now
         // only the this-turn effects expire; permanent ones stay
-        for (const p of s.players) for (const c of p.battlezone) { c.tempBuff = 0; c.tempGrants = []; }
+        for (const p of s.players) for (const c of p.battlezone) { c.tempBuff = 0; c.tempGrants = []; c.attacksThisTurn = 0; }
 
         // per-turn counters reset as the turn passes
         me.spellsCastThisTurn = 0; me.turboRushActive = false; me.brokeShieldThisTurn = false; me.diamondCutterActive = false;
@@ -3379,6 +3494,11 @@ wss.on('connection', (ws) => {
       }
 
       case 'chargeMana': {
+        // Reality Void: the opponent's mana charge is locked out for a turn
+        if (s.manaLockUntil && s.manaLockUntil.forIdx === idx && (s.turnNumber || 0) <= s.manaLockUntil.untilTurn) {
+          send(ws, { type: 'summonRejected', reason: s.manaLockUntil.source + ' stops you charging mana this turn.' });
+          return;
+        }
         const i = me.hand.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const [c] = me.hand.splice(i, 1);
@@ -3466,6 +3586,8 @@ wss.on('connection', (ws) => {
           if (gi !== -1) me.hand.splice(gi, 1);
           const gslot = battlefieldSlot(me);
           me.crossGear.push({ id: cardId, key: c.key, crossedTo: null, x: gslot.x, y: gslot.y });
+          fireBoardWide(s, 'ongeneratecrossgear', extraLogs,
+            { onlySide: idx, event: { cardId, key: c.key, ownerIdx: idx } });
           logText = 'generated ' + cardLabel(cardId) + ' into the battle zone.';
           break;
         }
@@ -3563,14 +3685,18 @@ wss.on('connection', (ws) => {
           const gi = me.hand.findIndex(h => h.key === msg.key);
           const gcard = gi === -1 ? null : me.hand[gi];
           if (gcard && isCrossGear(gcard.id)) {
+            const stCross = hasKw(selfGrantedKeywords(gcard.id), 'shieldtriggercross');
             me.pendingShieldTriggers = (me.pendingShieldTriggers || []).filter(k => k !== msg.key);
             me.hand.splice(gi, 1);
             const gslot = battlefieldSlot(me);
             const target = me.battlezone.find(c => !isSpellCard(c.id)) || null;
             me.crossGear.push({ id: gcard.id, key: gcard.key, crossedTo: target ? target.key : null,
                                 x: gslot.x, y: gslot.y });
+            fireBoardWide(s, 'ongeneratecrossgear', extraLogs,
+              { onlySide: idx, event: { cardId: gcard.id, key: gcard.key, ownerIdx: idx } });
             logText = target
-              ? ('generated ' + cardLabel(gcard.id) + ' free from a shield and crossed it onto ' + cardLabel(target.id) + '.')
+              ? ((stCross ? 'Shield Trigger Cross: generated ' : 'generated ') + cardLabel(gcard.id) +
+                 ' free from a shield and crossed it onto ' + cardLabel(target.id) + '.')
               : ('generated ' + cardLabel(gcard.id) + ' free from a shield (nothing to cross it onto yet).');
             break;
           }
@@ -4386,6 +4512,7 @@ wss.on('connection', (ws) => {
 
         atk.tapped = true;
         atk.attackedThisTurn = true;
+        atk.attacksThisTurn = (atk.attacksThisTurn || 0) + 1;
         fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'declare');
         firePar(s, idx, atk, 'onattack', extraLogs);
         const atkEv = { cardId: atk.id, key: atk.key, ownerIdx: idx };

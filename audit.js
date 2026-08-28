@@ -21,7 +21,22 @@ const handlesAction = (a) =>
   new RegExp("case '" + a + "'").test(interpBody) ||
   ['buff', 'grant', 'prevent', 'costPlus', 'costMinus', 'condition'].includes(a);
 
-const rows = JSON.parse(fs.readFileSync(process.argv[2] || '/tmp/e8.json', 'utf8'));
+// Read the effects straight from the shipped spreadsheet by default, so the audit can
+// never pass against a stale export of an older sheet.
+let rows;
+if (process.argv[2]) rows = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+else {
+  const XLSX = require('xlsx');
+  const dir = __dirname + '/carddata';
+  const file = fs.readdirSync(dir).find(f => f.endsWith('.xlsx') && !f.startsWith('~'));
+  const wb = XLSX.readFile(dir + '/' + file);
+  const sheet = wb.Sheets[wb.SheetNames.find(n => n.trim().toLowerCase() === 'cards') || wb.SheetNames[0]];
+  const seen = new Set();
+  rows = XLSX.utils.sheet_to_json(sheet)
+    .filter(r => r.Name && r.Effect)
+    .filter(r => { const k = String(r.Name); if (seen.has(k)) return false; seen.add(k); return true; })
+    .map(r => ({ name: String(r.Name), effect: String(r.Effect) }));
+}
 let total = 0, wired = 0;
 const missTrigger = {}, missAction = {};
 for (const r of rows) {

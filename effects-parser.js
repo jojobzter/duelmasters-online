@@ -24,6 +24,7 @@ const TRIGGERS = new Set([
   'silentskill',
   // added with the Cross Gear set
   'onoppcreatureattack', 'ondraw', 'ondrawstep', 'onoppdiscard', 'onoppmanacharge',
+  'ongeneratecrossgear',
   // added with DM-08
   'onowncreatureenter', 'onowncreatureattacked', 'onshieldwouldbreak', 'onturnstart',
   'onoppturnstart', 'onowncreatureattack', 'onanycast', 'onownshieldtriggercast'
@@ -58,6 +59,8 @@ const ZONES = {
   anycrossgear: { side: 'any', zone: 'crossgear' },
   // the creature this gear is currently crossed to
   crossedcreature: { side: 'own', zone: 'battle', crossed: true },
+  // the mirror image: from a creature, the gear currently attached to it
+  crossedgear: { side: 'own', zone: 'crossgear', attachedToSelf: true },
   anymana:   { side: 'any', zone: 'mana' },
   anyshield: { side: 'any', zone: 'shield' },
   anygrave:  { side: 'any', zone: 'grave' },
@@ -221,6 +224,19 @@ function parseClause(raw, cardName, inheritedTrigger) {
 
 function parseAction(body, mods) {
   if (!body) return { action: 'condition' };
+
+  // "crossedGear -> grave instead" — a replacement written without a verb
+  const bare = body.match(/^([a-zA-Z]+(?:\[[^\]]*\])?)\s*->\s*(\w+)(\s+instead)?\s*$/i);
+  if (bare) {
+    const destWord = bare[2].toLowerCase();
+    const verbFor = { mana: 'toMana', hand: 'toHand', shield: 'toShield', grave: 'toGrave',
+                      battle: 'toBattle', deck: 'toDeck' }[destWord];
+    if (verbFor) {
+      return { action: verbFor, count: 1, optional: !!(mods && mods.optional),
+               replacement: !!bare[3],
+               selector: parseSelector(bare[1]) || { name: bare[1] } };
+    }
+  }
 
   // Some clauses lead with the quantity rather than a verb, e.g.
   // "up to 2 ownHand -> mana" or "any number ownGrave[...] -> hand".
@@ -443,6 +459,22 @@ function parseAction(body, mods) {
                pool: km[2] ? parseInt(km[2], 10) : null,
                selector: parseSelector(km[3].trim()) || { name: km[3].trim() },
                rest: km[4] ? km[4].toLowerCase() : 'hand' };
+    }
+    case 'cross': case 'recross': {
+      // "cross <gear> -> <creature>, free" — attach (or move) a Cross Gear
+      const txt = rest.join(' ');
+      const m2 = txt.match(/^(.+?)\s*->\s*(\S+)/);
+      const c = parseCount((m2 ? m2[1] : txt).split(/\s+/));
+      return { action: verb === 'cross' ? 'crossGear' : 'recrossGear',
+               count: c.count, optional: !!(mods && mods.optional),
+               free: !!(mods && mods.free),
+               selector: parseSelector(c.rest) || { name: c.rest },
+               dest: m2 ? (parseSelector(m2[2]) || { name: m2[2] }) : null };
+    }
+    case 'shuffleintodeck': {
+      const c = parseCount(rest);
+      return { action: 'shuffleIntoDeck', count: c.count,
+               selector: parseSelector(c.rest) || { name: c.rest } };
     }
     case 'namerace': return { action: 'nameRace' };
     case 'nameciv': return { action: 'nameCiv' };
