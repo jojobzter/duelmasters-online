@@ -776,6 +776,40 @@ function picksShield(state, atkIdx, attacker) {
 // shield breaks — would rip the attacking creature out from under a combat that's
 // still waiting on it.
 // the socket belonging to a seat in the room that owns this match state
+// Anything that flagged itself during an attack is resolved here, once the attack is
+// over. Keeps a self-destroying attacker on the table for the whole of its attack.
+// Close out an attack: remember whose it was, clear it, then run the post-attack
+// sweep for that player. Used everywhere combat ends so no path can miss it.
+function endCombat(state, logs) {
+  const atkIdx = state.combat ? state.combat.attackerIdx : null;
+  state.combat = null;
+  if (atkIdx !== null && atkIdx !== undefined) resolvePostAttack(state, atkIdx, logs || []);
+}
+
+function resolvePostAttack(state, ownerIdx, logs) {
+  const me = state.players[ownerIdx];
+  for (const c of me.battlezone.slice()) {
+    if (!c.pendingSelfAction) continue;
+    const what = c.pendingSelfAction;
+    c.pendingSelfAction = null;
+    const i = me.battlezone.findIndex(x => x.key === c.key);
+    if (i === -1) continue;
+    me.battlezone.splice(i, 1);
+    if (what === 'destroy') {
+      const dest = battleCardToGrave(me, c);
+      logs.push(cardLabel(c.id) + ' was destroyed after attacking' +
+                (dest && dest !== 'graveyard' ? ' (to ' + dest + ')' : '') + '.');
+      creatureDestroyed(me, state.players[ownerIdx === 0 ? 1 : 0], c, logs, true);
+    } else if (what === 'bounce' || what === 'toHand') {
+      dissolveStack(me, c, logs, 'hand');
+      me.hand.push({ id: c.id, key: c.key });
+      logs.push(cardLabel(c.id) + ' returned to their hand after attacking.');
+    } else {
+      me.graveyard.push({ id: c.id, key: c.key });
+    }
+  }
+}
+
 function roomSocketFor(state, idx) {
   for (const room of rooms.values()) {
     if (room.state === state) return room.sockets[idx] || null;
@@ -1908,6 +1942,18 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       }
       case 'destroy': case 'bounce': case 'toMana': case 'toGrave': case 'toHand':
       case 'toShield': case 'toDeckTop': case 'tap': case 'untap': {
+        // "onPlayerAttack: destroy self" means destroyed AFTER the attack, not instead
+        // of it. Flag it and let the post-combat sweep handle it.
+        if (e.selector && e.selector.selfOnly &&
+            (trigger === 'onplayerattack' || trigger === 'onattack' || trigger === 'onunblockedattack')) {
+          const selfCard = me.battlezone.find(c => c.key === cardKey);
+          if (selfCard) {
+            selfCard.pendingSelfAction = e.action;
+            logs.push(cardLabel(cardId) + ' will be ' +
+              (e.action === 'destroy' ? 'destroyed' : 'moved') + ' after this attack.');
+          }
+          break;
+        }
         const zoneNames = zonesForSelector(e.selector);
         const zoneName = zoneNames[0];
         if (!zoneName) break;
@@ -4372,7 +4418,7 @@ wss.on('connection', (ws) => {
           firePar(s, idx, atk, 'onunblockedattack', extraLogs);
           if (target.type === 'creature') {
             const victim = opp.battlezone.find(c => c.key === target.key);
-            s.combat = null;
+            endCombat(s, extraLogs);
             if (victim) {
               const res = resolveBattle(s, idx, atk, oppIdx, victim, extraLogs);
               if (res.needsManual) manualBattle = res.needsManual;
@@ -4380,7 +4426,7 @@ wss.on('connection', (ws) => {
           } else {
             if (!opp.shields.length) {
               // nothing to break — the attack lands on the player and ends the game
-              s.combat = null;
+              endCombat(s, extraLogs);
               winCheck = true;
             } else if (target.key) {
               // the attack connects: break the shield they clicked, in the same click
@@ -4397,7 +4443,7 @@ wss.on('connection', (ws) => {
         if (!cb || cb.phase !== 'blocking' || cb.attackerIdx === idx) return;
         const attacker = s.players[cb.attackerIdx];
         const atk = attacker.battlezone.find(c => c.key === cb.attackerKey);
-        if (!atk) { s.combat = null; break; }
+        if (!atk) { endCombat(s, extraLogs); break; }
 
         if (msg.blockerKey) {
           const blk = me.battlezone.find(c => c.key === msg.blockerKey);
@@ -4431,7 +4477,7 @@ wss.on('connection', (ws) => {
           firePar(s, idx, blk, 'onattacked', extraLogs);
           firePar(s, cb.attackerIdx, atk, 'onblocked', extraLogs);
           const res = resolveBattle(s, cb.attackerIdx, atk, idx, blk, extraLogs);
-          s.combat = null;
+          endCombat(s, extraLogs);
           if (res.needsManual) manualBattle = res.needsManual;
           break;
         }
@@ -4448,11 +4494,11 @@ wss.on('connection', (ws) => {
             const res = resolveBattle(s, cb.attackerIdx, atk, idx, victim, extraLogs);
             if (res.needsManual) manualBattle = res.needsManual;
           }
-          s.combat = null;
+          endCombat(s, extraLogs);
         } else {
           const attackerCard = attacker.battlezone.find(c => c.key === cb.attackerKey);
           if (!me.shields.length) {
-            s.combat = null;
+            endCombat(s, extraLogs);
             winCheck = true;
             winnerIdx = cb.attackerIdx;
           } else {
@@ -4489,7 +4535,7 @@ wss.on('connection', (ws) => {
       }
       case 'cancelCombat': {
         if (!s.combat) return;
-        s.combat = null;
+        endCombat(s, extraLogs);
         logText = 'ended the attack.';
         break;
       }

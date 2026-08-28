@@ -33,7 +33,10 @@ Module._load = function (request, parent, isMain) {
         Civilization: 'Fire', Power: 3000, Race: 'Dragonoid',
         'Speed Attacker (yes/No)': 'Yes' },
       { Name: 'Test Gear', Set: 'DM-01', 'Mana Cost': 2, Type: 'Cross Gear',
-        Civilization: 'Light', Effect: 'static: +2000 crossedCreature' }
+        Civilization: 'Light', Effect: 'static: +2000 crossedCreature' },
+      { Name: 'Test Ooze', Set: 'DM-01', 'Mana Cost': 1, Type: 'Creature',
+        Civilization: 'Darkness', Power: 1000, Race: 'Living Dead',
+        'Speed Attacker (yes/No)': 'Yes', Effect: 'onPlayerAttack: destroy self' }
     ] }
   };
   return origLoad.apply(this, arguments);
@@ -130,5 +133,45 @@ try {
 } catch (e) {
   console.error('HANDLER THREW:', e.message);
   console.error((e.stack || '').split('\n').slice(1, 4).join('\n'));
+  process.exit(1);
+}
+
+// --- a creature that destroys itself when it attacks must survive the attack ---
+try {
+  const a2 = mkSock(), b2 = mkSock();
+  wss.handlers.connection(a2); wss.handlers.connection(b2);
+  const say2 = (s, m) => s._message(JSON.stringify(m));
+  say2(a2, { type: 'create', name: 'A' });
+  const j2 = a2.inbox.find(m => m.type === 'joined');
+  say2(b2, { type: 'join', room: j2.room, name: 'B' });
+  say2(a2, { type: 'acceptJoin' });
+  const oozeDeck = new Array(40).fill('DM-01/Test Ooze');
+  say2(a2, { type: 'submitDeck', deck: oozeDeck });
+  say2(b2, { type: 'submitDeck', deck: oozeDeck });
+  const L2 = (s) => { const m = s.inbox.filter(x => x.type === 'state').pop(); return m && m.state; };
+  say2(a2, { type: 'claimTurn' });
+  let s2 = L2(a2);
+  const seat2 = s2.you;
+  for (let t = 0; t < 2; t++) { s2 = L2(a2); const h = s2.players[seat2].hand; if (h.length) say2(a2, { type: 'chargeMana', key: h[0].key }); }
+  s2 = L2(a2);
+  const h2 = s2.players[seat2].hand;
+  if (h2.length) say2(a2, { type: 'summonCard', key: h2[0].key });
+  s2 = L2(a2);
+  const bz2 = s2.players[seat2].battlezone;
+  if (!bz2.length) { console.log('(ooze check skipped — no creature summoned)'); }
+  else {
+    const oppSeat2 = seat2 === 0 ? 1 : 0;
+    say2(a2, { type: 'declareAttack', key: bz2[0].key, target: { type: 'shield' } });
+    const mid = L2(a2);
+    const stillThere = mid.players[seat2].battlezone.some(c => c.key === bz2[0].key);
+    const inGrave = mid.players[seat2].graveyard.some(c => c.key === bz2[0].key);
+    console.log('self-destroying attacker: on table after attack = ' + stillThere +
+                ', in graveyard = ' + inGrave);
+    if (stillThere) { console.error('FAIL: it should be destroyed once the attack finished'); process.exit(1); }
+    if (!inGrave) { console.error('FAIL: it vanished without reaching the graveyard'); process.exit(1); }
+    console.log('self-destroy-after-attack works');
+  }
+} catch (e) {
+  console.error('ooze check threw:', e.message);
   process.exit(1);
 }
