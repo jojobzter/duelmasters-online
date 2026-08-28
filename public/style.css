@@ -604,3 +604,13 @@ input {
   background: #2f7d55; color: #eafff2; border-radius: 999px;
   font-size: 10px; padding: 1px 6px; font-weight: 700; pointer-events: none;
 }
+
+
+/* The card browser holds thousands of thumbnails. content-visibility lets the browser
+   skip layout and painting for the ones off screen, which is the single biggest win
+   for scroll smoothness; contain-intrinsic-size keeps the scrollbar honest. */
+.card-thumb {
+  content-visibility: auto;
+  contain-intrinsic-size: 140px 200px;
+}
+#card-grid { contain: layout paint; }

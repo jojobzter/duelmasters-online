@@ -91,7 +91,7 @@ let __yieldCounter = 0;
 async function maybeYield() { __yieldCounter++; if (__yieldCounter % 15 === 0) await new Promise(r => setTimeout(r, 0)); }
 
 async function scanDirHandle(dirHandle) {
-  cardDB.clear(); cardBackUrl = null;
+  cardDB.clear(); cardBackUrl = null; invalidateCardGridCache();
   const statusEl = document.getElementById('load-status');
   progressStart(true);
   statusEl.textContent = 'Scanning folders...';
@@ -136,7 +136,7 @@ async function scanDirHandle(dirHandle) {
 }
 
 async function scanFileList(files) {
-  cardDB.clear(); cardBackUrl = null;
+  cardDB.clear(); cardBackUrl = null; invalidateCardGridCache();
   const statusEl = document.getElementById('load-status');
   deckFilesFound = [];
   for (const f of files) {
@@ -281,7 +281,13 @@ let cardMetaDB = new Map(); // lowercase card name -> {name, cost, type, civs}
 // the engine's published ability index, so the client can mirror rules like
 // "this card can't be chosen by an opponent's effect" without hardcoding names
 let EFFECT_INDEX = {};
-fetch('/api/effects').then(r => r.json()).then(x => { EFFECT_INDEX = x || {}; }).catch(() => {});
+// Fetched lazily: neither index is needed until a game starts, and on a cold Render
+// instance these requests can take seconds — time better spent letting the menu paint.
+function loadEffectIndex() {
+  if (EFFECT_INDEX.__loading || Object.keys(EFFECT_INDEX).length) return;
+  EFFECT_INDEX.__loading = true;
+  fetch('/api/effects').then(r => r.json()).then(x => { EFFECT_INDEX = x || {}; }).catch(() => {});
+}
 let activeCivFilters = new Set();
 let activeTypeFilters = new Set();
 const CIV_COLORS = { Fire: '#c0392b', Water: '#2980b9', Nature: '#27ae60', Light: '#c99a1e', Darkness: '#6a3f9e' };
@@ -305,6 +311,9 @@ async function loadCardMetaDB() {
   }
 }
 loadCardMetaDB();
+// warm the secondary indexes when the browser is idle, so they never block first paint
+if (typeof requestIdleCallback === 'function') requestIdleCallback(() => { loadEffectIndex(); loadRaceList(); });
+else setTimeout(() => { loadEffectIndex(); loadRaceList(); }, 1500);
 
 function buildFilterUI(civs, types) {
   const civWrap = document.getElementById('civ-filters');
@@ -352,38 +361,81 @@ function cardPassesFilters(id) {
   return true;
 }
 
+// The card browser can hold a few thousand cards, so this is the hottest thing on the
+// setup screen. Five things keep it responsive:
+//   1. images load lazily, so only what is on screen is decoded
+//   2. deck counts come from one tally instead of a scan per card
+//   3. the sorted id list and normalised names are cached, not recomputed
+//   4. rows are built into a fragment and attached once
+//   5. one delegated click handler instead of two listeners per card
+let cardIdsSorted = null;          // invalidated when the library reloads
+const normNameCache = new Map();
+
+function invalidateCardGridCache() { cardIdsSorted = null; normNameCache.clear(); }
+
+function normNameCached(name) {
+  let v = normNameCache.get(name);
+  if (v === undefined) { v = normKeyClient(name); normNameCache.set(name, v); }
+  return v;
+}
+
 function refreshCardGrid() {
   const grid = document.getElementById('card-grid');
   const query = (document.getElementById('card-search').value || '').toLowerCase();
-  grid.innerHTML = '';
-  const ids = [...cardDB.keys()].sort();
-  for (const id of ids) {
+  if (!cardIdsSorted) cardIdsSorted = [...cardDB.keys()].sort();
+
+  // one pass over the deck instead of a filter per card
+  const deckCounts = new Map();
+  for (const id of currentDeck) deckCounts.set(id, (deckCounts.get(id) || 0) + 1);
+
+  const frag = document.createDocumentFragment();
+  for (const id of cardIdsSorted) {
     const c = cardDB.get(id);
     if (query && !c.name.toLowerCase().includes(query) && !c.set.toLowerCase().includes(query)) continue;
     if (!cardPassesFilters(id)) continue;
-    const meta = cardMetaDB.get(normKeyClient(c.name));
+    const meta = cardMetaDB.get(normNameCached(c.name));
     const div = document.createElement('div');
     div.className = 'card-thumb';
-    const count = currentDeck.filter(x => x === id).length;
-    div.innerHTML = `<img src="${c.url}" title="${c.name}">` +
+    div.dataset.cardId = id;
+    const count = deckCounts.get(id) || 0;
+    div.innerHTML = `<img src="${c.url}" title="${c.name}" loading="lazy" decoding="async">` +
       (count ? `<div class="count-badge">${count}</div>` : '') +
       (meta && meta.cost != null ? `<div class="cost-badge">${meta.cost}</div>` : '') +
       `<div class="zoom-btn" title="Preview">\u{1F50D}</div>` +
       `<div class="name">${c.name}</div>`;
-    div.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(id); });
-    div.addEventListener('click', () => {
-      if (currentDeck.length >= 40) return;
-      if (currentDeck.filter(x => x === id).length >= 4) {
-        alert('You can only have 4 copies of "' + c.name + '" in a deck.');
-        return;
-      }
-      currentDeck.push(id);
-      refreshCardGrid(); refreshDeckList();
-    });
-    grid.appendChild(div);
+    frag.appendChild(div);
   }
+  grid.innerHTML = '';
+  grid.appendChild(frag);
 }
-document.getElementById('card-search').addEventListener('input', refreshCardGrid);
+
+// One delegated handler for the whole grid, attached once, rather than two listeners
+// per card on every rebuild.
+document.getElementById('card-grid').addEventListener('click', (e) => {
+  const thumb = e.target.closest('.card-thumb');
+  if (!thumb) return;
+  const id = thumb.dataset.cardId;
+  if (!id) return;
+  if (e.target.closest('.zoom-btn')) { e.stopPropagation(); openMagnify(id); return; }
+  if (currentDeck.length >= 40) return;
+  const name = (cardDB.get(id) || {}).name || id;
+  if (currentDeck.filter(x => x === id).length >= 4) {
+    alert('You can only have 4 copies of "' + name + '" in a deck.');
+    return;
+  }
+  currentDeck.push(id);
+  refreshCardGrid(); refreshDeckList();
+});
+
+// typing fires this on every keystroke, so coalesce to one rebuild per frame
+let gridRedrawPending = false;
+function refreshCardGridSoon() {
+  if (gridRedrawPending) return;
+  gridRedrawPending = true;
+  requestAnimationFrame(() => { gridRedrawPending = false; refreshCardGrid(); });
+}
+
+document.getElementById('card-search').addEventListener('input', refreshCardGridSoon);
 
 function refreshDeckList() {
   const list = document.getElementById('deck-list');
@@ -1217,6 +1269,7 @@ document.addEventListener('click', (e) => {
 
 function ensureTableVisible() {
   if (document.getElementById('screen-table').style.display !== 'flex') {
+    loadEffectIndex(); loadRaceList();
     document.getElementById('screen-setup').style.display = 'none';
     document.getElementById('screen-table').style.display = 'flex';
     fadeOutMenuMusic(1400);
@@ -1881,7 +1934,10 @@ let multiPickId = null, multiPickChosen = new Set();
 let truceAsked = false;
 let raceAsked = null;
 let ALL_RACES = [];
-fetch('/api/races').then(r => r.json()).then(list => { ALL_RACES = list || []; }).catch(() => {});
+function loadRaceList() {
+  if (ALL_RACES && ALL_RACES.length) return;
+  fetch('/api/races').then(r => r.json()).then(list => { ALL_RACES = list || []; }).catch(() => {});
+}
 
 function openRacePicker(source, excludeRace) {
   const grid = document.getElementById('race-pick-grid');
