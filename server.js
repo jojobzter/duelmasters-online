@@ -1025,9 +1025,21 @@ function onCreatureEnteredBattlezone(state, enteringKey, enteringId, logs) {
 
 // Everything a player still has to answer. While this is non-zero the other player
 // must wait — you can't attack into an unresolved Shield Trigger.
+// A card can produce several multi-select prompts (Hydro Hurricane has two). There is
+// only one live slot, so the rest wait in a queue and are promoted as each resolves.
+function queueMulti(player, multi) {
+  player.pendingMultiQueue = player.pendingMultiQueue || [];
+  if (player.pendingMulti) player.pendingMultiQueue.push(multi);
+  else player.pendingMulti = multi;
+}
+function advanceMulti(player) {
+  player.pendingMultiQueue = player.pendingMultiQueue || [];
+  player.pendingMulti = player.pendingMultiQueue.shift() || null;
+}
+
 function pendingPromptTotal(p) {
   return (p.pendingTargets || []).length + (p.pendingDiscards || []).length +
-    (p.pendingMulti ? 1 : 0) + (p.pendingSearch ? 1 : 0) +
+    (p.pendingMulti ? 1 : 0) + (p.pendingMultiQueue || []).length + (p.pendingSearch ? 1 : 0) +
     (p.pendingRaceChoices || []).length + (p.pendingTruce ? 1 : 0) +
     (p.pendingShieldTriggers || []).length + (p.pendingManaDiscards || 0);
 }
@@ -2101,10 +2113,10 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
             .filter(c => matchesExtra(c.id, ex))
             .filter(c => !(zoneName === 'oppBattle' && isUnchoosable(c.id)));
           if (pool.length) {
-            me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: zoneName,
+            queueMulti(me, { id: newKey(), source: cardLabel(cardId), zone: zoneName,
                                 action: engineAction, max: wantCount === 'all' ? 99 : wantCount,
                                 keys: pool.map(c => c.key), spellKey: base.spellKey,
-                                prompt: 'Choose up to ' + (wantCount === 'all' ? 'any number of' : wantCount) + ' card(s).' };
+                                prompt: 'Choose up to ' + (wantCount === 'all' ? 'any number of' : wantCount) + ' card(s).' });
             defer = true;
           } else logs.push(cardLabel(cardId) + ': no legal target.');
         } else if (legalTargetCount(me, opp, base) > 0) {
@@ -2279,12 +2291,12 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const keep = typeof e.keep === 'number' ? e.keep
                    : countSelector(state, meIdx, { key: cardKey, id: cardId }, e.keep && e.keep.dynamic ? e.keep.dynamic : 'ownShield');
         if (pool.length > keep) {
-          opp.pendingMulti = {
+          queueMulti(opp, {
             id: newKey(), source: cardLabel(cardId), zone: zoneName === 'oppShield' ? 'ownShield' : zoneName,
             action: e.rest === 'destroy' ? 'destroy' : e.rest === 'grave' ? 'toGrave' : 'toHand',
             max: pool.length - keep, keys: pool.map(c => c.key), spellKey: null,
             prompt: 'Choose ' + (pool.length - keep) + ' to give up — you keep ' + keep + '.'
-          };
+          });
         }
         break;
       }
@@ -2407,11 +2419,11 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const pool = listForZone(me, opp, zoneName);
         const keep = typeof e.keep === 'number' ? e.keep : 1;
         if (pool.length > keep) {
-          me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: zoneName,
+          queueMulti(me, { id: newKey(), source: cardLabel(cardId), zone: zoneName,
                               action: e.rest === 'destroy' ? 'destroy' : e.rest === 'grave' ? 'toGrave'
                                     : e.rest === 'hand' ? 'returnToHand' : 'tap',
                               max: pool.length - keep, keys: pool.map(c => c.key), spellKey: null,
-                              prompt: 'Choose ' + (pool.length - keep) + ' — you keep ' + keep + '.' };
+                              prompt: 'Choose ' + (pool.length - keep) + ' — you keep ' + keep + '.' });
           defer = true;
         }
         break;
@@ -2674,10 +2686,10 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
     }
     extraLog.push('cast ' + cardLabel(cardId) + ' \u2014 ' + (killed.length ? 'destroyed ' + killed.join(', ') + '.' : 'destroyed nothing automatically.'));
     if (unknown.length) {
-      me.pendingMulti = {
+      queueMulti(me, {
         id: newKey(), source: cardLabel(cardId), keys: unknown, spellKey: cardKey,
         prompt: 'These creatures have no power recorded in your spreadsheet. Tick any with power ' + massMax + ' or less to destroy them.'
-      };
+      });
       defer = true;
     }
   }
@@ -2694,9 +2706,9 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
       keys = pool.filter(c => { const pw = powerOf(c.id); return pw == null || pw <= multiEff.maxPower; }).map(c => c.key);
     }
     if (keys.length) {
-      me.pendingMulti = { id: newKey(), source: cardLabel(cardId), zone: multiEff.zone, action: multiEff.action,
+      queueMulti(me, { id: newKey(), source: cardLabel(cardId), zone: multiEff.zone, action: multiEff.action,
                           max: multiEff.max, keys: keys.filter(k => k !== cardKey),
-                          prompt: multiEff.prompt, spellKey: isSpellCard(cardId) ? cardKey : null };
+                          prompt: multiEff.prompt, spellKey: isSpellCard(cardId) ? cardKey : null });
       defer = true;
     }
   }
@@ -2939,7 +2951,7 @@ function emptyPlayerState() {
     pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
-    pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: []
+    pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: [], pendingMultiQueue: []
   };
 }
 
@@ -3885,8 +3897,8 @@ wss.on('connection', (ws) => {
           } else if (ability.kind === 'multi') {
             const pool = ability.zone === 'ownGrave' ? me.graveyard : me.battlezone;
             if (pool.length) {
-              me.pendingMulti = { id: newKey(), source: cardLabel(c.id), zone: ability.zone, action: ability.action,
-                                  max: ability.max, keys: pool.map(x => x.key), prompt: ability.prompt, spellKey: null };
+              queueMulti(me, { id: newKey(), source: cardLabel(c.id), zone: ability.zone, action: ability.action,
+                                  max: ability.max, keys: pool.map(x => x.key), prompt: ability.prompt, spellKey: null });
             }
           } else if (ability.kind === 'target') {
             me.pendingTargets.push({ id: newKey(), zone: ability.zone, action: ability.action,
@@ -4345,8 +4357,11 @@ wss.on('connection', (ws) => {
         logText = done.length ? (verb + ' ' + done.join(', ') + ' with ' + pm.source + '.')
                               : ('used ' + pm.source + ' without choosing anything.');
         const spellKey = pm.spellKey;
-        me.pendingMulti = null;
-        if (spellKey) resolveSpellCard(me, { spellKey }, extraLogs);
+        advanceMulti(me);                      // promote the next queued prompt, if any
+        // a spell only retires once ALL of its prompts have been answered
+        if (spellKey && !me.pendingMulti && !(me.pendingTargets || []).some(t => t.spellKey === spellKey)) {
+          resolveSpellCard(me, { spellKey }, extraLogs);
+        }
         break;
       }
       case 'choosePetrovaRace': {
