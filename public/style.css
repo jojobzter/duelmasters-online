@@ -9,7 +9,11 @@
   --card-w: calc(var(--card-base-w) * var(--card-scale));
   --card-h: calc(var(--card-base-h) * var(--card-scale));
   /* battlezone cards render permanently at the old hover size */
+  /* The battle zone is where decisions get made, so it is the biggest thing on the
+     table. Mana is reference information and can afford to be smaller. */
   --bz-card-w: calc(var(--card-w) * 1.35);
+  --mana-card-w: calc(var(--card-w) * 0.80);
+  --mana-card-h: calc(var(--card-h) * 0.80);
   --bz-card-h: calc(var(--card-h) * 1.35);
   /* hand cards are the ones you actually read, so they're scaled up hardest.
      Tune --hand-scale alone to make the whole hand bigger or smaller. */
@@ -193,7 +197,8 @@ input {
 .zone.opp-hand { min-height: calc(var(--card-h) + 12px); align-items: center; padding-top: 8px; justify-content: flex-start; padding-right: 8px; }
 .zone.opp-hand .card { width: var(--card-w); height: var(--card-h); margin-left: calc(var(--card-w) * -0.42); }
 .zone.opp-hand .card:first-child { margin-left: 0; }
-.mana-zone { min-height: calc(var(--card-h) + 26px); }
+.mana-zone { min-height: calc(var(--mana-card-h) + 26px); }
+.mana-zone .card { width: var(--mana-card-w); height: var(--mana-card-h); }
 .shield-zone { min-height: calc(var(--card-h) + 16px); }
 .shield-track { position: relative; height: var(--card-h); flex-shrink: 0; }
 .shield-track .card { position: absolute; top: 0; }
@@ -271,7 +276,7 @@ input {
    Tapped mana is that same inversion rotated a further 90°. The magnify overlay
    renders outside .mana-zone, so double-clicking always shows the card upright. */
 .mana-zone .card { transform: rotate(180deg); }
-.mana-zone .card.tapped { transform: rotate(270deg); margin: 0 calc(var(--card-w) * 0.29); }
+.mana-zone .card.tapped { transform: rotate(270deg); margin: 0 calc(var(--mana-card-w) * 0.29); }
 
 /* No hover scaling outside the hand — cards in play sit at a fixed size.
    The menu-open lift stays: it keeps a card raised while its right-click menu is open. */
@@ -518,7 +523,8 @@ input {
   #right-column { width: 100%; }
   :root { --card-base-w: 78px; --card-base-h: 109px; --hand-scale: 1.7; }
   /* battlezone cards sized to fit the 13.8% column spacing, so they don't overlap */
-  :root { --bz-card-w: calc(var(--card-w) * 1.12); --bz-card-h: calc(var(--card-h) * 1.12); }
+  :root { --bz-card-w: calc(var(--card-w) * 1.25); --bz-card-h: calc(var(--card-h) * 1.25); }
+  :root { --mana-card-w: calc(var(--card-w) * 0.82); --mana-card-h: calc(var(--card-h) * 0.82); }
   .chat-messages { max-height: 180px; min-height: 100px; }
   .hand-zone { padding-right: calc(var(--card-w) * 1.4); }
   html, body { max-width: 100%; overflow-x: clip; }
@@ -533,7 +539,11 @@ input {
    six shields still fits across the narrow side. */
 @media (max-width: 760px) and (orientation: portrait) {
   :root { --card-base-w: 52px; --card-base-h: 73px; --hand-scale: 1.9; }
-  :root { --bz-card-w: calc(var(--card-w) * 0.78); --bz-card-h: calc(var(--card-h) * 0.78); }
+  /* Battle zone cards were previously shrunk to 0.78 to avoid overlap. Shrinking the
+     MANA row instead leaves room to make the battle zone the largest thing on screen,
+     which is what you actually read while deciding a play. */
+  :root { --bz-card-w: calc(var(--card-w) * 1.15); --bz-card-h: calc(var(--card-h) * 1.15); }
+  :root { --mana-card-w: calc(var(--card-w) * 0.72); --mana-card-h: calc(var(--card-h) * 0.72); }
   .screen { padding: 8px; }
   #table { padding: 8px; }
   .zone { padding: 5px; gap: 5px; }
@@ -563,7 +573,7 @@ input {
   #end-turn-block { order: 0; }
   #danger-actions { order: 5; }
   .shield-zone { min-height: calc(var(--card-h) + 10px); }
-  .mana-zone { min-height: calc(var(--card-h) + 16px); }
+  .mana-zone { min-height: calc(var(--mana-card-h) + 16px); }
   .hand-zone { min-height: calc(var(--hand-card-h) + 22px); padding-top: 18px; padding-right: calc(var(--card-w) * 0.6); }
 }
 
