@@ -2124,7 +2124,12 @@ function selectableKeysFor(state, me, opp) {
       if (blockerOnlyC(card.id) && !isBlockerById(c.id)) return;
       keys.add(c.key);
     });
-    const dcActive = !!me.diamondCutterActive;
+    // Diamond Cutter grants "ignoreAttackRestrictions", which lets a creature that
+    // normally can't attack players go at SHIELDS this turn. Read it from the state so
+    // the client never offers an attack the server would refuse, or hide a legal one.
+    const kwList = (me.liveKeywords && me.liveKeywords[card.key]) || [];
+    const ignoresRestrictions = kwList.some(k => /^ignoreattackrestrictions/i.test(k));
+    const dcActive = !!me.diamondCutterActive || ignoresRestrictions;
     const mayHitPlayer = canAttackShieldsC(card.id) || dcActive;
     const canShields = mayHitPlayer && opp.shields.length;
     if (canShields) opp.shields.forEach(sh => keys.add(sh.key));
