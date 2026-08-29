@@ -476,6 +476,16 @@ function parseAction(body, mods) {
       return { action: 'shuffleIntoDeck', count: c.count,
                selector: parseSelector(c.rest) || { name: c.rest } };
     }
+    case 'evocharge': {
+      // the shared "Evo Charger" half: put a creature from mana under one of your
+      // evolution creatures
+      return { action: 'evoCharge', optional: !!(mods && mods.optional) };
+    }
+    case 'bindattackers': {
+      // each player names one creature; nothing else may attack for the duration
+      return { action: 'bindAttackers',
+               untilNextTurn: !!(mods && mods.untilnextturn) || /untilNextTurn/i.test(rest.join(' ')) };
+    }
     case 'namerace': return { action: 'nameRace' };
     case 'nameciv': return { action: 'nameCiv' };
     default:

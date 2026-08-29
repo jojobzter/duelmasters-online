@@ -59,17 +59,45 @@ function loadCardDatabase(filePath) {
     const rows = XLSX.utils.sheet_to_json(sheet);
     const db = new Map();
     const parseProblems = [];
+    const civConflicts = [];
     const yes = v => /^y(es)?$/i.test((v === undefined || v === null ? '' : v).toString().trim());
     const txt = v => (v === undefined || v === null) ? null : (v.toString().trim() || null);
     const num = v => {
       const n = parseInt((v === undefined || v === null ? '' : v).toString().replace(/[^0-9-]/g, ''), 10);
       return Number.isFinite(n) ? n : null;
     };
+    // First pass: for each card, work out its civilization by majority vote across all
+    // its rows. A single mistyped reprint can then never redefine the card — which is
+    // what made Skysword unplayable and what "shorter list wins" got backwards.
+    const civVotes = new Map();
+    for (const row of rows) {
+      const nm = (row['Name'] || '').toString().trim();
+      if (!nm) continue;
+      const civRaw0 = (row['Civilization'] || '').toString().trim();
+      if (!civRaw0) continue;
+      const k = normalizeCardKey(nm);
+      if (!civVotes.has(k)) civVotes.set(k, new Map());
+      const tally = civVotes.get(k);
+      // a row that also carries a Type is more complete, so it counts for slightly more
+      const weight = (row['Type'] || '').toString().trim() ? 1.1 : 1;
+      tally.set(civRaw0, (tally.get(civRaw0) || 0) + weight);
+    }
+    const civWinner = new Map();
+    for (const [k, tally] of civVotes) {
+      let best = null, bestN = -1;
+      for (const [v, n] of tally) if (n > bestN) { best = v; bestN = n; }
+      civWinner.set(k, best);
+      if (tally.size > 1) {
+        const losers = [...tally.keys()].filter(v => v !== best);
+        civConflicts.push(k + ': using [' + best + '], ignoring [' + losers.join('], [') + ']');
+      }
+    }
+
     for (const row of rows) {
       const name = (row['Name'] || '').toString().trim();
       if (!name) continue;
       const key = normalizeCardKey(name);
-      const civRaw = (row['Civilization'] || '').toString().trim();
+      const civRaw = civWinner.get(key) || (row['Civilization'] || '').toString().trim();
       const entry = {
         name,
         cost: num(row['Mana Cost']),
@@ -128,6 +156,11 @@ function loadCardDatabase(filePath) {
       }
     } catch (e) { /* reporting only */ }
 
+    if (civConflicts.length) {
+      console.warn('Civilization disagreements between reprints (' + civConflicts.length +
+                   ') — majority value used, worth fixing in the sheet:');
+      civConflicts.slice(0, 15).forEach(c => console.warn('   ' + c));
+    }
     if (parseProblems.length) {
       console.warn('Effect column could not be read for', parseProblems.length, 'card(s):');
       parseProblems.slice(0, 25).forEach(p => console.warn('   ' + p.name + ': ' + p.errors.join(' | ')));
@@ -159,14 +192,9 @@ function mergeCardEntries(a, b) {
       // Civilizations are NOT additive across reprints: a single bad row listing every
       // civilization would otherwise make the card unplayable, since the payment rule
       // demands one mana of each. Prefer the SHORTER list and flag the disagreement.
-      if (k === 'civs' && av.length !== bv.length) {
-        const shorter = av.length <= bv.length ? av : bv;
-        const longer = av.length <= bv.length ? bv : av;
-        console.warn('Civilization mismatch for a reprint: [' + av.join('/') + '] vs [' + bv.join('/') +
-                     '] — using [' + shorter.join('/') + ']. Check the sheet for a bad row.');
-        out[k] = shorter;
-        continue;
-      }
+      // Civilizations are settled by the vote in loadCardDatabase, so every row now
+      // carries the same value and there is nothing to reconcile here.
+      if (k === 'civs') { out[k] = av.length ? av : bv; continue; }
       out[k] = av.length >= bv.length ? av : bv;
       continue;
     }
@@ -1128,7 +1156,7 @@ const HANDLED_KEYWORDS = new Set([
   'breakshieldonblock', 'shieldbreakchoice', 'returnondestroy', 'tomanaondestroy',
   'ondestroy->hand', 'saver', 'untappermana', 'darknessstealth', 'wavestriker',
   'sharedtap', 'evolutionanyrace', 'silentskill', 'sharedability', 'race',
-  'shieldtriggercross', 'crossedgear'
+  'shieldtriggercross', 'crossedgear', 'unblockable'
 ]);
 const HANDLED_PREVENTS = new Set([
   'anycast', 'oppcast', 'oppblock', 'oppattack', 'selfattack', 'attack', 'attackedby',
@@ -1787,6 +1815,13 @@ function untapBlockedFor(state, playerIdx, kind, card) {
 }
 
 function attackerForbidden(state, ownerIdx, attacker) {
+  // Bind EVO Charger: only the two named creatures may attack, for this turn and next
+  const bind = state.attackBind;
+  if (bind && (state.turnNumber || 0) <= bind.untilTurn) {
+    if (!bind.allowed.includes(attacker.key)) {
+      return cardLabel(attacker.id) + ' cannot attack (' + bind.source + ')';
+    }
+  }
   for (const e of staticClauses(attacker)) {
     if (e.action !== 'prevent') continue;
     const w = String(e.what || '').toLowerCase();
@@ -2379,6 +2414,46 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
                                   source: cardLabel(cardId) };
           logs.push(cardLabel(cardId) + ': their opponent cannot charge mana next turn.');
         }
+        break;
+      }
+      case 'evoCharge': {
+        // "You may put a creature from your mana zone under one of your evolution
+        // creatures." Needs both an evolution creature to stack onto and a creature
+        // in mana; otherwise it simply doesn't happen.
+        const evos = me.battlezone.filter(c => isEvolutionCard(c.id) || (c.under && c.under.length));
+        const manaCreatures = me.mana.filter(m => !isSpellCard(m.id));
+        if (!evos.length || !manaCreatures.length) {
+          logs.push(cardLabel(cardId) + ': no evolution creature to reinforce.');
+          break;
+        }
+        me.pendingTargets.push({
+          id: newKey(), zone: 'ownMana', action: 'toEvoStack', filter: 'creature',
+          source: cardLabel(cardId), sourceKey: cardKey,
+          evoKey: evos.length === 1 ? evos[0].key : null,   // one candidate needs no second prompt
+          spellKey: null                                     // the spell retires on its own
+        });
+        defer = true;
+        break;
+      }
+      case 'bindAttackers': {
+        // Each player names one creature; everything else is barred from attacking
+        // for the rest of this turn and the next.
+        const untilTurn = (state.turnNumber || 0) + (e.untilNextTurn ? 2 : 1);
+        state.attackBind = { untilTurn, allowed: [], source: cardLabel(cardId) };
+        if (me.battlezone.some(c => !isSpellCard(c.id))) {
+          me.pendingTargets.push({
+            id: newKey(), zone: 'ownBattle', action: 'bindAllow', filter: 'creature',
+            source: cardLabel(cardId), sourceKey: cardKey, spellKey: null
+          });
+          defer = true;
+        }
+        if (opp.battlezone.some(c => !isSpellCard(c.id))) {
+          opp.pendingTargets.push({
+            id: newKey(), zone: 'ownBattle', action: 'bindAllow', filter: 'creature',
+            source: cardLabel(cardId), sourceKey: cardKey, spellKey: null
+          });
+        }
+        logs.push(cardLabel(cardId) + ': each player names one creature — nothing else may attack.');
         break;
       }
       case 'reveal': {
@@ -3063,6 +3138,7 @@ function viewFor(room, viewerIdx) {
     pendingShieldTriggers: isSelf ? (p.pendingShieldTriggers || []) : undefined,
     // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
     pendingPromptCount: pendingPromptTotal(p),
+    attackBind: s.attackBind || null,
     truceCiv: p.truceCiv || null,
     brokeShieldThisTurn: !!p.brokeShieldThisTurn
   });
@@ -3479,6 +3555,8 @@ wss.on('connection', (ws) => {
           broadcastState(room);
           return;
         }
+        // a lapsed attack bind is cleared rather than left on the state
+        if (s.attackBind && (s.turnNumber || 0) > s.attackBind.untilTurn) s.attackBind = null;
         s.extraTurnActiveFor = null;
         s.activeTurn = oppIdx;
         s.turnNumber = (s.turnNumber || 0) + 1;
@@ -4238,6 +4316,24 @@ wss.on('connection', (ws) => {
             card.tempBuff = (card.tempBuff || 0) + (eff.buffAmount || 0);
             logText = 'used ' + eff.source + ' to give ' + label + ' +' + (eff.buffAmount || 0) + ' this turn.';
             break;
+          case 'toEvoStack': {
+            // slide a creature out of mana and under an evolution creature
+            const evos = owner.battlezone.filter(c => isEvolutionCard(c.id) || (c.under && c.under.length));
+            const host = eff.evoKey ? owner.battlezone.find(c => c.key === eff.evoKey) : evos[0];
+            if (!host) { logText = eff.source + ': no evolution creature to reinforce.'; break; }
+            list.splice(ci, 1);
+            host.under = host.under || [];
+            host.under.push({ id: card.id, key: card.key });
+            logText = 'put ' + label + ' from their mana zone under ' + cardLabel(host.id) + '.';
+            break;
+          }
+          case 'bindAllow': {
+            // this creature is one of the two allowed to keep attacking
+            s.attackBind = s.attackBind || { untilTurn: (s.turnNumber || 0) + 2, allowed: [], source: eff.source };
+            if (!s.attackBind.allowed.includes(card.key)) s.attackBind.allowed.push(card.key);
+            logText = 'named ' + label + ' — it may still attack.';
+            break;
+          }
           case 'returnToHand':
             list.splice(ci, 1);
             dissolveStack(owner, card, extraLogs, 'hand');

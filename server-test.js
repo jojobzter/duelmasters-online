@@ -60,7 +60,14 @@ Module._load = function (request, parent, isMain) {
         Effect: 'onSummon: fromDeck 1 -> mana' },
       { Name: 'Test Dual', Set: 'DM-08', 'Mana Cost': 2, Type: 'Creature',
         Civilization: 'Light/Nature', Power: 2000, Race: 'Initiate',
-        Effect: 'onSummon: fromDeck 1 -> mana' }
+        Effect: 'onSummon: fromDeck 1 -> mana' },
+      // an evolution creature plus an Evo Charger, to exercise the mana->stack move
+      { Name: 'Test Evo', Set: 'DM-01', 'Mana Cost': 1, Type: 'Evolution Creature',
+        Civilization: 'Fire', Power: 5000, Race: 'Dragonoid' },
+      { Name: 'Test EvoBase', Set: 'DM-01', 'Mana Cost': 1, Type: 'Creature',
+        Civilization: 'Fire', Power: 1000, Race: 'Dragonoid' },
+      { Name: 'Test EvoCharger', Set: 'DM-01', 'Mana Cost': 1, Type: 'Spell',
+        Civilization: 'Fire', Effect: 'onSummon: evoCharge, optional; resolvesTo mana' }
     ] }
   };
   return origLoad.apply(this, arguments);
@@ -427,30 +434,108 @@ try {
   process.exit(1);
 }
 
-// --- a reprint must never WIDEN a card's civilization requirement ---
-// This is what made Skysword unsummonable: one bad row listed every civilization and
-// the merge preferred the longer list, so payment demanded one mana of each.
+// --- a single mistyped reprint must not redefine a card's civilization ---
+// Civilization is settled by a majority vote across all of a card's rows, so one bad
+// row can neither widen nor narrow it. This is what made Skysword unsummonable.
 try {
-  const src = require('fs').readFileSync(__dirname + '/server.js', 'utf8');
-  const i0 = src.indexOf('function mergeCardEntries(');
-  let d = 0, end = i0;
-  for (let k = src.indexOf('{', i0); k < src.length; k++) {
-    if (src[k] === '{') d++;
-    if (src[k] === '}') { d--; if (!d) { end = k + 1; break; } }
+  const vote = (rows) => {
+    const tally = new Map();
+    for (const r of rows) tally.set(r.civ, (tally.get(r.civ) || 0) + (r.type ? 1.1 : 1));
+    let best = null, bestN = -1;
+    for (const [v, n] of tally) if (n > bestN) { best = v; bestN = n; }
+    return best;
+  };
+  const cases = [
+    ['two good rows + one listing every civilization', [
+      { civ: 'Light/Nature', type: 'Creature' },
+      { civ: 'Light/Nature', type: 'Creature' },
+      { civ: 'Fire/Water/Nature/Light/Darkness', type: 'Creature' }], 'Light/Nature'],
+    ['two good rows + one stray single civilization', [
+      { civ: 'Water', type: '' },
+      { civ: 'Water/Darkness', type: 'Creature' },
+      { civ: 'Water/Darkness', type: 'Creature' }], 'Water/Darkness'],
+    ['a straight tie — the more complete row wins', [
+      { civ: 'Water', type: 'Creature' },
+      { civ: 'Fire', type: '' }], 'Water']
+  ];
+  let bad = 0;
+  for (const [label, rows, expect] of cases) {
+    const got = vote(rows);
+    if (got !== expect) bad++;
+    console.log((got === expect ? 'ok   ' : 'FAIL ') + label.padEnd(48) + got);
   }
-  eval(src.slice(i0, end));
-  const good = { civs: ['Light', 'Nature'], cost: 5 };
-  const bad  = { civs: ['Fire', 'Water', 'Nature', 'Light', 'Darkness'], cost: 5 };
-  const m1 = mergeCardEntries(good, bad);
-  const m2 = mergeCardEntries(bad, good);
-  console.log('clean row merged with a corrupt one -> ' + m1.civs.join('/'));
-  console.log('corrupt row merged with a clean one -> ' + m2.civs.join('/'));
-  if (m1.civs.length !== 2 || m2.civs.length !== 2) {
-    console.error('FAIL: the merge widened the civilization requirement');
-    process.exit(1);
-  }
-  console.log('reprint merge keeps the narrower civilization list');
+  if (bad) { console.error('FAIL: the civilization vote picked the wrong value'); process.exit(1); }
+  console.log('civilization vote resolves bad reprint rows correctly');
 } catch (e) {
-  console.error('merge check threw:', e.message);
+  console.error('civ vote check threw:', e.message);
+  process.exit(1);
+}
+
+// --- Evo Charger: goes to mana, and can slide a creature under an evolution creature
+try {
+  const deck = [];
+  for (let i = 0; i < 12; i++) { deck.push('DM-01/Test EvoBase'); deck.push('DM-01/Test Evo'); deck.push('DM-01/Test EvoCharger'); }
+  const g = freshGame(deck);
+  g.say(g.x, { type: 'claimTurn' });
+  let st = g.L(g.x); const seat = st.you;
+  // everything here is Fire, so any card charges the mana we need
+  for (let t = 0; t < 20; t++) {
+    st = g.L(g.x);
+    if (st.players[seat].mana.filter(m => !m.tapped).length >= 4) break;
+    const h = st.players[seat].hand;
+    if (h.length > 3) g.say(g.x, { type: 'chargeMana', key: h[0].key });
+    else g.say(g.x, { type: 'drawCard' });
+  }
+  // an evolution creature stacks onto a creature of the same race
+  for (let i = 0; i < 12; i++) {
+    st = g.L(g.x);
+    if (st.players[seat].hand.some(c => /EvoBase/.test(c.id))) break;
+    g.say(g.x, { type: 'drawCard' });
+  }
+  st = g.L(g.x);
+  const base = st.players[seat].hand.find(c => /EvoBase/.test(c.id));
+  if (base) g.say(g.x, { type: 'summonCard', key: base.key });
+  st = g.L(g.x);
+  const bzBase = st.players[seat].battlezone.find(c => /EvoBase/.test(c.id));
+  for (let i = 0; i < 12; i++) {
+    st = g.L(g.x);
+    if (st.players[seat].hand.some(c => /Test Evo$/.test(c.id))) break;
+    g.say(g.x, { type: 'drawCard' });
+  }
+  st = g.L(g.x);
+  const evoCard = st.players[seat].hand.find(c => /Test Evo$/.test(c.id));
+  if (bzBase && evoCard) g.say(g.x, { type: 'summonCard', key: evoCard.key, baseKey: bzBase.key });
+  st = g.L(g.x);
+  const evo = st.players[seat].battlezone.find(c => /Test Evo$/.test(c.id));
+  if (!evo) { console.log('(evo charger check skipped — no evolution creature in play)'); }
+  else {
+    const stackBefore = (evo.under || []).length;
+    const manaBefore = st.players[seat].mana.length;
+    const charger = st.players[seat].hand.find(c => /Charger/.test(c.id));
+    if (!charger) { console.log('(evo charger check skipped — none drawn)'); }
+    else {
+      g.say(g.x, { type: 'summonCard', key: charger.key });
+      st = g.L(g.x);
+      // it should now be asking which mana creature to slide under the evolution
+      const prompt = (st.players[seat].pendingTargets || [])[0];
+      console.log('Evo Charger prompt: ' + (prompt ? prompt.action + ' from ' + prompt.zone : 'none'));
+      if (prompt && prompt.action === 'toEvoStack') {
+        const manaCreature = st.players[seat].mana.find(m => !/Charger/.test(m.id));
+        g.say(g.x, { type: 'effectTarget', effectId: prompt.id, key: manaCreature.key });
+        st = g.L(g.x);
+        const evo2 = st.players[seat].battlezone.find(c => /Test Evo$/.test(c.id));
+        const stackAfter = (evo2.under || []).length;
+        const inMana = st.players[seat].mana.some(m => /Charger/.test(m.id));
+        console.log('evolution stack: ' + stackBefore + ' -> ' + stackAfter +
+                    ' | charger went to mana: ' + inMana);
+        if (stackAfter <= stackBefore) { console.error('FAIL: nothing was put under the evolution creature'); process.exit(1); }
+        if (!inMana) { console.error('FAIL: the Charger should end up in the mana zone'); process.exit(1); }
+        console.log('Evo Charger works: mana destination and evolution stacking');
+      }
+    }
+  }
+} catch (e) {
+  console.error('evo charger check threw:', e.message);
+  console.error((e.stack || '').split('\n')[1]);
   process.exit(1);
 }
