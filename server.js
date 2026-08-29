@@ -155,7 +155,21 @@ function mergeCardEntries(a, b) {
     const av = a[k], bv = b[k];
     if (bv === null || bv === undefined || bv === false) continue;      // b adds nothing
     if (av === null || av === undefined || av === false) { out[k] = bv; continue; }
-    if (Array.isArray(av) && Array.isArray(bv)) { out[k] = av.length >= bv.length ? av : bv; continue; }
+    if (Array.isArray(av) && Array.isArray(bv)) {
+      // Civilizations are NOT additive across reprints: a single bad row listing every
+      // civilization would otherwise make the card unplayable, since the payment rule
+      // demands one mana of each. Prefer the SHORTER list and flag the disagreement.
+      if (k === 'civs' && av.length !== bv.length) {
+        const shorter = av.length <= bv.length ? av : bv;
+        const longer = av.length <= bv.length ? bv : av;
+        console.warn('Civilization mismatch for a reprint: [' + av.join('/') + '] vs [' + bv.join('/') +
+                     '] — using [' + shorter.join('/') + ']. Check the sheet for a bad row.');
+        out[k] = shorter;
+        continue;
+      }
+      out[k] = av.length >= bv.length ? av : bv;
+      continue;
+    }
     if (k === 'attackRestriction' && av === 'none' && bv !== 'none') { out[k] = bv; continue; }
   }
   return out;
@@ -3034,6 +3048,13 @@ function viewFor(room, viewerIdx) {
     diamondCutterActive: !!p.diamondCutterActive,
     pendingTruce: isSelf ? p.pendingTruce : undefined,
     pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
+    // keywords each of this player's creatures currently has, so the client can offer
+    // exactly the attacks the server would allow
+    liveKeywords: p.battlezone.reduce((acc, c) => {
+      const kw = [...grantedKeywords(s, s.players.indexOf(p), c)];
+      if (kw.length) acc[c.key] = kw;
+      return acc;
+    }, {}),
     crossGear: (p.crossGear || []).map(g => ({
       id: g.id, key: g.key, crossedTo: g.crossedTo || null, x: g.x, y: g.y,
       name: cardLabel(g.id), cost: (cardMeta(g.id) || {}).cost != null ? cardMeta(g.id).cost : null
@@ -4471,7 +4492,11 @@ wss.on('connection', (ws) => {
         // Diamond Cutter this turn: summoning sickness is bypassed for ANY attack,
         // while the attack restrictions it lifts ("can't attack" / "not players")
         // only let a creature swing at SHIELDS — never at other creatures.
-        const dc = !!me.diamondCutterActive;
+        // Diamond Cutter now grants "ignoreAttackRestrictions" from the sheet, so honour
+        // the keyword as well as the old hardcoded flag. Either way the lifted
+        // restrictions only permit a run at SHIELDS, never at another creature.
+        const ignoresRestrictions = hasKw(grantedKeywords(s, idx, atk), 'ignoreattackrestrictions');
+        const dc = !!me.diamondCutterActive || ignoresRestrictions;
         const dcShieldRun = dc && (msg.target || {}).type === 'shield';
         if (!dcShieldRun && !canAttackAtAll(atk.id)) { send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + " can't attack." }); return; }
         if (!dcShieldRun) {

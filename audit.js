@@ -26,7 +26,13 @@ const handlesAction = (a) =>
 let rows;
 if (process.argv[2]) rows = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 else {
-  const XLSX = require('xlsx');
+  let XLSX;
+  try { XLSX = require('xlsx'); }
+  catch (e) {
+    console.error('audit needs the xlsx module (npm install), or pass a JSON export:');
+    console.error('   node audit.js effects.json');
+    process.exit(2);
+  }
   const dir = __dirname + '/carddata';
   const file = fs.readdirSync(dir).find(f => f.endsWith('.xlsx') && !f.startsWith('~'));
   const wb = XLSX.readFile(dir + '/' + file);
