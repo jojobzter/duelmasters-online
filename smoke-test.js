@@ -1,6 +1,6 @@
 // Exercise the new interpreter paths in isolation so a crash shows up here rather
 // than mid-game.
-const { parseEffect } = require('/home/claude/duelmasters/effects-parser.js');
+const { parseEffect } = require(__dirname + '/effects-parser.js');
 const cases = [
   ['Bluum Erkis, Flare Guardian', 'onBreak: reveal target'],
   ['Bombazar, Dragon of Destiny', 'onSummon: destroy all anyCreature[power=6000,!self]; extraTurn; loseGame endOfExtraTurn'],

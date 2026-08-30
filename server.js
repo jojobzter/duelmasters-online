@@ -174,7 +174,13 @@ function loadCardDatabase(filePath) {
 // Card names are matched on this form, so curly vs straight apostrophes and stray
 // spacing can never stop a card's abilities from firing.
 function normalizeCardKey(name) {
-  return name.toLowerCase()
+  return name
+    // fold accented letters onto their plain ASCII base (e.g. "Überdragon" ->
+    // "Uberdragon") so a card whose image/deck filename picked up a stray
+    // diacritic (common with copy-pasted or OS-mangled filenames) still
+    // matches the card database instead of silently coming up blank.
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
     .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
     .replace(/_/g, "'")
     .replace(/[\u2013\u2014]/g, '-')
@@ -1976,6 +1982,13 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
   const targetCard = ctx && ctx.targetCard ? ctx.targetCard : null;
   const me = state.players[meIdx], opp = state.players[oppIdx];
   let defer = false;
+  // "grant X ownCreature; grant Y target" — the second clause's bare `target`
+  // selector means "the same creature the earlier grant clause landed on" (see
+  // Magma Gazer). clausesConsumed lets a grant clause fold a later `target`
+  // clause into its own single choice/prompt so it isn't processed twice;
+  // lastGrantPick remembers who that was when no prompt was needed at all.
+  const clausesConsumed = new Set();
+  let lastGrantPick = null;
 
   const selfRef = { key: cardKey, id: cardId };
   // "up to ownCreature[civ=Light].count" is a number that depends on the board —
@@ -1988,6 +2001,7 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
   };
 
   for (const e of clauses) {
+    if (clausesConsumed.has(e)) continue;   // already folded into an earlier grant's choice
     // a clause only fires when its own condition holds — "if self.brokeShieldThisTurn"
     // and friends were previously ignored outside static effects
     if (e.condition) {
@@ -2212,16 +2226,65 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const grantCount = resolveCount(e.count);
         // a keyword granted for the rest of the turn, recorded on the affected cards
         const selfKw = !!(e.selector && e.selector.selfOnly);
+        const isTargetRef = !!(e.selector && e.selector.zone === 'target' && !selfKw);
+
+        // "grant <keyword> target" — apply to whichever creature an earlier grant
+        // clause in this same trigger already resolved on (normally folded into
+        // that clause's own choice below; this only runs if that lookahead
+        // somehow missed it, e.g. a reordered effect string).
+        if (isTargetRef) {
+          const targets = lastGrantPick || [];
+          targets.forEach(c => {
+            c.tempGrants = c.tempGrants || [];
+            c.tempGrants.push({ keyword: String(e.keyword || '').toLowerCase(), arg: e.arg || null });
+          });
+          if (targets.length) logs.push(cardLabel(cardId) + ' granted ' + e.keyword + ' this turn.');
+          break;
+        }
+
         const zoneName = selfKw ? 'ownBattle' : (zoneNameOf(e.selector) || 'ownBattle');
         const pool = listForZone(me, opp, zoneName);
         const ex = filtersToEngine(e.selector);
-        let hit = selfKw ? pool.filter(c => c.key === cardKey) : pool.filter(c => matchesExtra(c.id, ex));
+        // A keyword grant always targets an actual creature — never the spell
+        // itself, which still briefly sits in the battle zone while its own
+        // onSummon effect (this one) is resolving.
+        const isBattleZone = zoneName === 'ownBattle' || zoneName === 'oppBattle' || zoneName === 'anyBattle';
+        let hit = selfKw ? pool.filter(c => c.key === cardKey)
+          : pool.filter(c => matchesExtra(c.id, ex) && (!isBattleZone || !isSpellCard(c.id)));
         const n = (grantCount === 'all') ? hit.length : (typeof grantCount === 'number' ? grantCount : hit.length);
-        hit.slice(0, n).forEach(c => {
+
+        // More matching creatures than the effect needs: the player has to pick
+        // which one(s), so defer to a prompt instead of silently grabbing
+        // whichever creature happens to be first. Any later "grant <keyword>
+        // target" clauses in this same trigger — referring back to this same
+        // pick — are folded into that one prompt rather than firing separately.
+        if (!selfKw && grantCount !== 'all' && hit.length > n) {
+          const grants = [{ keyword: String(e.keyword || '').toLowerCase(), arg: e.arg || null }];
+          for (const e2 of clauses) {
+            if (e2 === e || clausesConsumed.has(e2)) continue;
+            if (e2.action === 'grant' && e2.selector && e2.selector.zone === 'target' && !e2.selector.selfOnly) {
+              grants.push({ keyword: String(e2.keyword || '').toLowerCase(), arg: e2.arg || null });
+              clausesConsumed.add(e2);
+            }
+          }
+          me.pendingTargets.push({
+            id: newKey(), zone: zoneName, action: 'grantKeyword', grants,
+            filter: ex.filter || (isBattleZone ? 'creature' : null), maxPower: ex.maxPower, requireBlocker: ex.requireBlocker,
+            civ: ex.civ, negCiv: ex.negCiv, race: ex.race,
+            source: cardLabel(cardId), sourceKey: cardKey,
+            spellKey: isSpellCard(cardId) ? cardKey : null
+          });
+          defer = true;
+          break;
+        }
+
+        const picked = hit.slice(0, n);
+        picked.forEach(c => {
           c.tempGrants = c.tempGrants || [];
           c.tempGrants.push({ keyword: String(e.keyword || '').toLowerCase(), arg: e.arg || null });
         });
-        if (hit.length) logs.push(cardLabel(cardId) + ' granted ' + e.keyword + ' this turn.');
+        lastGrantPick = picked;
+        if (picked.length) logs.push(cardLabel(cardId) + ' granted ' + e.keyword + ' this turn.');
         break;
       }
       case 'buff': {
@@ -4387,6 +4450,15 @@ wss.on('connection', (ws) => {
             owner.shields.push({ id: card.id, key: card.key, faceUp: false, slot: nextShieldSlot(owner) });
             logText = 'used ' + eff.source + ' to put ' + label + " into its owner's shield zone.";
             break;
+          case 'grantKeyword': {
+            const kws = (eff.grants || []).map(g => g.keyword);
+            for (const g of (eff.grants || [])) {
+              card.tempGrants = card.tempGrants || [];
+              card.tempGrants.push({ keyword: g.keyword, arg: g.arg || null });
+            }
+            logText = 'used ' + eff.source + ' to grant ' + kws.join(' and ') + ' to ' + label + ' this turn.';
+            break;
+          }
           default:
             return;
         }
