@@ -543,6 +543,19 @@ input {
      MANA row instead leaves room to make the battle zone the largest thing on screen,
      which is what you actually read while deciding a play. */
   :root { --bz-card-w: calc(var(--card-w) * 1.15); --bz-card-h: calc(var(--card-h) * 1.15); }
+  /* battlefieldSlot() in server.js spaces creatures 13.8% of the battle-half's
+     width apart. --bz-card-w above is a fixed pixel value, so whether that
+     stays under 13.8% depends on how wide the battle-half actually renders —
+     and on a narrow phone (with `.battle-half { min-width: 0 }` below, so the
+     zone shrinks to fit the screen instead of forcing itself wider) it doesn't:
+     the pixel width ends up wider than 13.8% of the real container, and
+     adjacent creatures overlap. Sizing the card as a percentage of that same
+     container instead keeps it proportional to the column spacing at any
+     screen width, so this can't drift out of sync again. Height stays
+     pixel-based via --bz-card-h — row spacing (20 percentage points apart)
+     has plenty of headroom, so it was never the axis that overlapped. */
+  .battle-half .card { width: 12.8%; }
+  .battle-half .card.tapped { margin: 0 calc(12.8% * 0.29); }
   :root { --mana-card-w: calc(var(--card-w) * 0.72); --mana-card-h: calc(var(--card-h) * 0.72); }
   .screen { padding: 8px; }
   #table { padding: 8px; }
