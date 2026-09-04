@@ -82,10 +82,15 @@ const Bot = (() => {
     return (card.livePower != null) ? card.livePower : powerOf(card.id);
   }
 
-  function canAttackAtAll(id) { return !/cannot attack/.test(meta(id).attackRestriction || ''); }
+  // Only the bare "cannot attack" stops a creature attacking at all. "cannot attack
+  // creatures" (Vile Mulder, Avalanche Giant) still allows a run at shields, so a
+  // loose substring match wrongly benched those creatures entirely.
+  function canAttackAtAll(id) {
+    return (meta(id).attackRestriction || 'none').toLowerCase() !== 'cannot attack';
+  }
   function canAttackShields(id) {
-    const r = meta(id).attackRestriction || '';
-    return !/cannot attack/.test(r) && !/not players/.test(r) && !/blocker only/.test(r);
+    const r = (meta(id).attackRestriction || 'none').toLowerCase();
+    return r !== 'cannot attack' && !r.includes('not players') && !r.includes('blocker only');
   }
   // "untapped ok" may be scoped to one civilization, e.g. "not players/untapped ok:darkness"
   // (Aeris, Flight Elemental can only attack untapped Darkness creatures).
@@ -363,9 +368,13 @@ const Bot = (() => {
       const expendable = livePowerOf(atk) <= 2000 || bouncesAtEndOfTurn(atk.id);
 
       // a clean kill on a creature it beats
-      const targets = opp.battlezone.filter(v => {
+      // "cannot attack creatures" bars creature targets while still allowing shields —
+      // without this the bot would pick such a creature and have the attack refused.
+      const atkRestr = (meta(atk.id).attackRestriction || 'none').toLowerCase();
+      const mayHitCreatures = !atkRestr.includes('cannot attack creatures');
+      const targets = !mayHitCreatures ? [] : opp.battlezone.filter(v => {
         if (!v.tapped && !canAttackUntappedTarget(atk.id, v.id)) return false;
-        if (/blocker only/.test(meta(atk.id).attackRestriction || '') && !meta(v.id).blocker) return false;
+        if (atkRestr.includes('blocker only') && !meta(v.id).blocker) return false;
         return true;
       });
       const killable = targets.filter(v => myPow > livePowerOf(v));
