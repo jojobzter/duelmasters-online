@@ -231,7 +231,7 @@ input {
 .battle-zone { flex-direction: column; min-width: 0; min-height: calc(var(--bz-card-h) * 2.3 + 40px); padding: 6px; overflow: hidden; }
 /* The just-moved flash and the breakable outline are drawn OUTSIDE the card box, so
    the zone keeps a few pixels of padding for them instead of clipping them off. */
-.battle-half { position: relative; width: 100%; min-width: min(calc(var(--bz-card-w) * 7.6), 100%); min-height: calc(var(--bz-card-h) * 1.15 + 22px); padding: 8px 6px 10px; overflow: visible; }
+.battle-half { position: relative; width: 100%; min-width: min(calc(var(--bz-card-w) * 6.6), 100%); min-height: calc(var(--bz-card-h) * 1.15 + 22px); padding: 8px 6px 10px; overflow: visible; }
 .battle-divider { height: 1px; background: rgba(255,255,255,0.15); margin: 4px 0; }
 
 .card {
@@ -542,20 +542,7 @@ input {
   /* Battle zone cards were previously shrunk to 0.78 to avoid overlap. Shrinking the
      MANA row instead leaves room to make the battle zone the largest thing on screen,
      which is what you actually read while deciding a play. */
-  :root { --bz-card-w: calc(var(--card-w) * 1.15); --bz-card-h: calc(var(--card-h) * 1.15); }
-  /* battlefieldSlot() in server.js spaces creatures 13.8% of the battle-half's
-     width apart. --bz-card-w above is a fixed pixel value, so whether that
-     stays under 13.8% depends on how wide the battle-half actually renders —
-     and on a narrow phone (with `.battle-half { min-width: 0 }` below, so the
-     zone shrinks to fit the screen instead of forcing itself wider) it doesn't:
-     the pixel width ends up wider than 13.8% of the real container, and
-     adjacent creatures overlap. Sizing the card as a percentage of that same
-     container instead keeps it proportional to the column spacing at any
-     screen width, so this can't drift out of sync again. Height stays
-     pixel-based via --bz-card-h — row spacing (20 percentage points apart)
-     has plenty of headroom, so it was never the axis that overlapped. */
-  .battle-half .card { width: 12.8%; }
-  .battle-half .card.tapped { margin: 0 calc(12.8% * 0.29); }
+  :root { --bz-card-w: calc(var(--card-w) * 1.05); --bz-card-h: calc(var(--card-h) * 1.05); }
   :root { --mana-card-w: calc(var(--card-w) * 0.72); --mana-card-h: calc(var(--card-h) * 0.72); }
   .screen { padding: 8px; }
   #table { padding: 8px; }

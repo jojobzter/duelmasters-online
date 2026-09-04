@@ -35,12 +35,7 @@ function cardBaseName(id) { return id ? (id.split('/').pop() || id) : ''; }
 // Filenames often can't hold an apostrophe, so it arrives as '_'. Normalising it here
 // keeps both the display name and the ability lookup working.
 function normKeyClient(name) {
-  return (name || '')
-    // fold accented letters onto their plain ASCII base (e.g. "Überdragon" ->
-    // "Uberdragon") so a card whose image filename picked up a stray diacritic
-    // still matches the card sheet instead of showing no image at all.
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
+  return (name || '').toLowerCase()
     .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
     .replace(/_/g, "'")
     .replace(/\s+/g, ' ')
@@ -1739,8 +1734,6 @@ function zonePrompt(eff) {
     case 'toGrave': return eff.zone === 'ownShield'
       ? 'Choose one of your shields to put into your graveyard.'
       : 'Choose a card to put into your graveyard.';
-    case 'grantKeyword': return 'Choose one of your creatures to grant ' +
-      (eff.grants || []).map(g => g.keyword).join(' and ') + ' to.';
     default: return 'Choose a card.';
   }
 }
