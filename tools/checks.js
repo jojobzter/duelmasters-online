@@ -178,7 +178,10 @@ if (WHICH === 'server') {
           Civilization: 'Fire', Power: 5000, Race: 'Dragonoid' },
         { Name: 'Test EvoBase', Set: 'DM-01', 'Mana Cost': 1, Type: 'Creature',
           Civilization: 'Fire', Power: 1000, Race: 'Dragonoid' },
-        { Name: 'Test EvoCharger', Set: 'DM-01', 'Mana Cost': 1, Type: 'Spell',
+        { Name: 'Test Hulcus', Set: 'DM-01', 'Mana Cost': 1, Type: 'Creature',
+        Civilization: 'Darkness', Power: 2000, Race: 'Liquid People',
+        Effect: 'onSummon: draw 1' },
+      { Name: 'Test EvoCharger', Set: 'DM-01', 'Mana Cost': 1, Type: 'Spell',
           Civilization: 'Fire', Effect: 'onSummon: evoCharge, optional; resolvesTo mana' }
       ] }
     };
@@ -241,7 +244,7 @@ if (WHICH === 'server') {
     for (let t = 0; t < 3; t++) {
       st = latest(a);
       const h = st.players[meSeat].hand;
-      if (h.length) say(a, { type: 'chargeMana', key: h[0].key });
+      if (h.length) say(a, { type: 'chargeMana', key: h[0].key, force: true });
     }
     st = latest(a);
     const hand = st.players[meSeat].hand;
@@ -295,7 +298,7 @@ if (WHICH === 'server') {
     say2(a2, { type: 'claimTurn' });
     let s2 = L2(a2);
     const seat2 = s2.you;
-    for (let t = 0; t < 2; t++) { s2 = L2(a2); const h = s2.players[seat2].hand; if (h.length) say2(a2, { type: 'chargeMana', key: h[0].key }); }
+    for (let t = 0; t < 2; t++) { s2 = L2(a2); const h = s2.players[seat2].hand; if (h.length) say2(a2, { type: 'chargeMana', key: h[0].key, force: true }); }
     s2 = L2(a2);
     const h2 = s2.players[seat2].hand;
     if (h2.length) say2(a2, { type: 'summonCard', key: h2[0].key });
@@ -352,16 +355,16 @@ if (WHICH === 'server') {
         const k = kindOf(c);
         return charged[k] < 2 && counts[k] > 1;
       });
-      if (!pick) { say3(a3, { type: 'drawCard' }); continue; }
+      if (!pick) { say3(a3, { type: 'drawCard', force: true }); continue; }
       charged[kindOf(pick)]++;
-      say3(a3, { type: 'chargeMana', key: pick.key });
+      say3(a3, { type: 'chargeMana', key: pick.key, force: true });
     }
     // top up the hand if the pieces we need aren't there yet
     for (let d = 0; d < 6; d++) {
       s3 = L3(a3);
       const h = s3.players[seat3].hand;
       if (h.some(c => /Blasto/.test(c.id)) && h.some(c => /Ooze/.test(c.id))) break;
-      say3(a3, { type: 'drawCard' });
+      say3(a3, { type: 'drawCard', force: true });
     }
     s3 = L3(a3);
     const blastoCard = s3.players[seat3].hand.find(c => /Blasto/.test(c.id));
@@ -379,7 +382,7 @@ if (WHICH === 'server') {
     for (let d = 0; d < 8; d++) {
       s3 = L3(a3);
       if (s3.players[seat3].hand.some(c => /Ooze/.test(c.id))) break;
-      say3(a3, { type: 'drawCard' });
+      say3(a3, { type: 'drawCard', force: true });
     }
     s3 = L3(a3);
     const oozeCard = s3.players[seat3].hand.find(c => /Ooze/.test(c.id));
@@ -419,7 +422,7 @@ if (WHICH === 'server') {
     for (let i = 0; i < (tries || 12); i++) {
       const st = g.L(g.x);
       if (st.players[seat].hand.some(c => re.test(c.id))) return true;
-      g.say(g.x, { type: 'drawCard' });
+      g.say(g.x, { type: 'drawCard', force: true });
     }
     return false;
   }
@@ -438,8 +441,8 @@ if (WHICH === 'server') {
       const h = st.players[seat].hand;
       const counts = h.filter(c => /Wall|Cutter/.test(c.id)).length;
       const spare = counts > 2 ? h.find(c => /Wall|Cutter/.test(c.id)) : null;
-      if (spare) g.say(g.x, { type: 'chargeMana', key: spare.key });
-      else g.say(g.x, { type: 'drawCard' });
+      if (spare) g.say(g.x, { type: 'chargeMana', key: spare.key, force: true });
+      else g.say(g.x, { type: 'drawCard', force: true });
     }
     drawUntil(g, seat, /Wall/);
     st = g.L(g.x);
@@ -583,7 +586,88 @@ if (WHICH === 'server') {
     process.exit(1);
   }
 
-  // --- Evo Charger: goes to mana, and can slide a creature under an evolution creature
+  // --- one manual draw and one manual charge per turn ---
+// Card effects grant extra draws through a different code path, so they must not be
+// affected: Test Hulcus draws on summon and should still work after a manual draw.
+try {
+  const deck = [];
+  for (let i = 0; i < 20; i++) { deck.push('DM-01/Test Ooze'); deck.push('DM-01/Test Hulcus'); }
+  const g = freshGame(deck);
+  g.say(g.x, { type: 'claimTurn' });
+  let st = g.L(g.x); const seat = st.you;
+
+  const handSize = () => g.L(g.x).players[seat].hand.length;
+  const manaSize = () => g.L(g.x).players[seat].mana.length;
+
+  // first manual draw succeeds
+  const before = handSize();
+  g.say(g.x, { type: 'drawCard' });
+  const afterFirst = handSize();
+  // second is refused
+  let mark = g.x.inbox.length;
+  g.say(g.x, { type: 'drawCard' });
+  const afterSecond = handSize();
+  const rejD = g.x.inbox.slice(mark).find(m => m.type === 'summonRejected');
+  console.log('manual draw: ' + before + ' -> ' + afterFirst + ' -> ' + afterSecond +
+              (rejD ? '  (second refused)' : '  (second ALLOWED)'));
+  if (afterFirst !== before + 1) { console.error('FAIL: the first draw should work'); process.exit(1); }
+  if (afterSecond !== afterFirst) { console.error('FAIL: the second draw should be refused'); process.exit(1); }
+
+  // an explicit override still works, for a card the engine does not implement
+  g.say(g.x, { type: 'drawCard', force: true });
+  if (handSize() !== afterSecond + 1) { console.error('FAIL: an overridden draw should work'); process.exit(1); }
+  console.log('override draw works');
+
+  // charging is likewise once per turn
+  st = g.L(g.x);
+  const m0 = manaSize();
+  g.say(g.x, { type: 'chargeMana', key: st.players[seat].hand[0].key });
+  const m1 = manaSize();
+  st = g.L(g.x);
+  mark = g.x.inbox.length;
+  if (st.players[seat].hand.length) g.say(g.x, { type: 'chargeMana', key: st.players[seat].hand[0].key });
+  const m2 = manaSize();
+  const rejC = g.x.inbox.slice(mark).find(m => m.type === 'summonRejected');
+  console.log('manual charge: ' + m0 + ' -> ' + m1 + ' -> ' + m2 +
+              (rejC ? '  (second refused)' : '  (second ALLOWED)'));
+  if (m1 !== m0 + 1 || m2 !== m1) { console.error('FAIL: charging should be once per turn'); process.exit(1); }
+
+  // a card effect that draws must still work after the manual draw is spent
+  st = g.L(g.x);
+  for (let i = 0; i < 12; i++) {
+    st = g.L(g.x);
+    if (st.players[seat].hand.some(c => /Hulcus/.test(c.id))) break;
+    g.say(g.x, { type: 'drawCard', force: true });
+  }
+  st = g.L(g.x);
+  const hulcus = st.players[seat].hand.find(c => /Hulcus/.test(c.id));
+  if (hulcus) {
+    const h0 = handSize();
+    g.say(g.x, { type: 'summonCard', key: hulcus.key });
+    const h1 = handSize();
+    // -1 for the summoned card, +1 for its draw
+    console.log('effect-driven draw after the manual one: hand ' + h0 + ' -> ' + h1 +
+                (h1 === h0 ? '  (the effect still drew)' : '  (no draw)'));
+    if (h1 !== h0) { console.error('FAIL: a card effect must not be blocked by the manual limit'); process.exit(1); }
+  }
+
+  // and both reset when the turn passes
+  g.say(g.x, { type: 'endTurn' });
+  const after = g.L(g.x).players[seat];
+  console.log('after ending the turn: draws used ' + after.manualDrawsThisTurn +
+              ', charges used ' + after.manualChargesThisTurn);
+  if (after.manualDrawsThisTurn !== 0 || after.manualChargesThisTurn !== 0) {
+    console.error('FAIL: the per-turn counters should reset');
+    process.exit(1);
+  }
+  console.log('one manual draw and one manual charge per turn');
+} catch (e) {
+  console.error('manual-limit check threw:', e.message);
+  console.error((e.stack || '').split('\n')[1]);
+  process.exit(1);
+}
+
+// --- Evo Charger: goes to mana, and can slide a creature under an evolution creature
   try {
     const deck = [];
     for (let i = 0; i < 12; i++) { deck.push('DM-01/Test EvoBase'); deck.push('DM-01/Test Evo'); deck.push('DM-01/Test EvoCharger'); }
@@ -595,14 +679,14 @@ if (WHICH === 'server') {
       st = g.L(g.x);
       if (st.players[seat].mana.filter(m => !m.tapped).length >= 4) break;
       const h = st.players[seat].hand;
-      if (h.length > 3) g.say(g.x, { type: 'chargeMana', key: h[0].key });
-      else g.say(g.x, { type: 'drawCard' });
+      if (h.length > 3) g.say(g.x, { type: 'chargeMana', key: h[0].key, force: true });
+      else g.say(g.x, { type: 'drawCard', force: true });
     }
     // an evolution creature stacks onto a creature of the same race
     for (let i = 0; i < 12; i++) {
       st = g.L(g.x);
       if (st.players[seat].hand.some(c => /EvoBase/.test(c.id))) break;
-      g.say(g.x, { type: 'drawCard' });
+      g.say(g.x, { type: 'drawCard', force: true });
     }
     st = g.L(g.x);
     const base = st.players[seat].hand.find(c => /EvoBase/.test(c.id));
@@ -612,7 +696,7 @@ if (WHICH === 'server') {
     for (let i = 0; i < 12; i++) {
       st = g.L(g.x);
       if (st.players[seat].hand.some(c => /Test Evo$/.test(c.id))) break;
-      g.say(g.x, { type: 'drawCard' });
+      g.say(g.x, { type: 'drawCard', force: true });
     }
     st = g.L(g.x);
     const evoCard = st.players[seat].hand.find(c => /Test Evo$/.test(c.id));
@@ -626,7 +710,7 @@ if (WHICH === 'server') {
       for (let i = 0; i < 14; i++) {
         st = g.L(g.x);
         if (st.players[seat].hand.some(c => /Charger/.test(c.id))) break;
-        g.say(g.x, { type: 'drawCard' });
+        g.say(g.x, { type: 'drawCard', force: true });
       }
       st = g.L(g.x);
       const charger = st.players[seat].hand.find(c => /Charger/.test(c.id));
