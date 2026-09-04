@@ -222,7 +222,7 @@ if (WHICH === 'server') {
     const joined = a.inbox.find(m => m.type === 'joined');
     if (!joined) { console.error('no room was created'); process.exit(1); }
     say(b, { type: 'join', room: joined.room, name: 'B' });
-    say(a, { type: 'acceptJoin' });
+    say(a, { type: 'respondJoin', accept: true });
     const deck = new Array(40).fill('DM-01/Test Creature');
     say(a, { type: 'submitDeck', deck });
     say(b, { type: 'submitDeck', deck });
@@ -290,7 +290,7 @@ if (WHICH === 'server') {
     say2(a2, { type: 'create', name: 'A' });
     const j2 = a2.inbox.find(m => m.type === 'joined');
     say2(b2, { type: 'join', room: j2.room, name: 'B' });
-    say2(a2, { type: 'acceptJoin' });
+    say2(a2, { type: 'respondJoin', accept: true });
     const oozeDeck = new Array(40).fill('DM-01/Test Ooze');
     say2(a2, { type: 'submitDeck', deck: oozeDeck });
     say2(b2, { type: 'submitDeck', deck: oozeDeck });
@@ -306,8 +306,13 @@ if (WHICH === 'server') {
     const bz2 = s2.players[seat2].battlezone;
     if (!bz2.length) { console.log('(ooze check skipped — no creature summoned)'); }
     else {
+      // Attack a SPECIFIC shield, which is what clicking one does. The keyless form
+      // takes a different branch, and testing only that hid a real bug: the branch
+      // that breaks a named shield never ran the post-attack cleanup.
       const oppSeat2 = seat2 === 0 ? 1 : 0;
-      say2(a2, { type: 'declareAttack', key: bz2[0].key, target: { type: 'shield' } });
+      const theirShield = s2.players[oppSeat2].shields[0];
+      say2(a2, { type: 'declareAttack', key: bz2[0].key,
+                 target: theirShield ? { type: 'shield', key: theirShield.key } : { type: 'shield' } });
       const mid = L2(a2);
       const stillThere = mid.players[seat2].battlezone.some(c => c.key === bz2[0].key);
       const inGrave = mid.players[seat2].graveyard.some(c => c.key === bz2[0].key);
@@ -330,7 +335,7 @@ if (WHICH === 'server') {
     say3(a3, { type: 'create', name: 'A' });
     const j3 = a3.inbox.find(m => m.type === 'joined');
     say3(b3, { type: 'join', room: j3.room, name: 'B' });
-    say3(a3, { type: 'acceptJoin' });
+    say3(a3, { type: 'respondJoin', accept: true });
     // a deck of Blasto + Ooze (Darkness) so the condition can be met
     const mixed = [];
     for (let i = 0; i < 20; i++) { mixed.push('DM-01/Test Blasto'); mixed.push('DM-01/Test Ooze'); }
@@ -412,7 +417,7 @@ if (WHICH === 'server') {
     say(x, { type: 'create', name: 'A' });
     const j = x.inbox.find(m => m.type === 'joined');
     say(y, { type: 'join', room: j.room, name: 'B' });
-    say(x, { type: 'acceptJoin' });
+    say(x, { type: 'respondJoin', accept: true });
     say(x, { type: 'submitDeck', deck });
     say(y, { type: 'submitDeck', deck });
     const L = (sock) => { const m = (sock || x).inbox.filter(v => v.type === 'state').pop(); return m && m.state; };
@@ -474,8 +479,31 @@ if (WHICH === 'server') {
         console.log('wall attacking shields AFTER Diamond Cutter:  ' + (rejAfter ? 'refused — ' + rejAfter.reason : 'allowed (correct)'));
         if (rejAfter) { console.error('FAIL: Diamond Cutter should open the shields to it'); process.exit(1); }
 
-        // and the grant must not survive into the next turn
+        // The attack is still open: with a real opponent there are shields to break,
+        // so finish it before the turn can end.
+        {
+          const cur = g.L(g.x);
+          if (cur.combat) {
+            if (cur.combat.phase === 'blocking') g.say(g.y, { type: 'declareBlock' });
+            const c2 = g.L(g.x).combat;
+            if (c2 && c2.phase === 'breaking') {
+              const sh = g.L(g.x).players[seat === 0 ? 1 : 0].shields[0];
+              if (sh) g.say(g.x, { type: 'breakShield', key: sh.key });
+              else g.say(g.x, { type: 'cancelCombat' });
+            }
+          }
+        }
+        // The wall just broke a shield, so the opponent may be holding a Shield Trigger
+        // decision — the turn cannot end until they answer it.
+        {
+          const ov = g.L(g.y);
+          const pend = (ov && ov.players[ov.you] && ov.players[ov.you].pendingShieldTriggers) || [];
+          for (const k of pend) g.say(g.y, { type: 'shieldTriggerDecline', key: k });
+        }
+        const markE = g.x.inbox.length;
         g.say(g.x, { type: 'endTurn' });
+        const rejE = g.x.inbox.slice(markE).find(m => m.type === 'summonRejected');
+        if (rejE) { console.error('FAIL: could not end the turn — ' + rejE.reason.slice(0, 70)); process.exit(1); }
         st = g.L(g.x);
         const kwNext = (st.players[seat].liveKeywords || {})[bzWall.key] || [];
         console.log('wall keywords after the turn ends: ' + (kwNext.join(',') || '(none — expired correctly)'));
@@ -774,6 +802,43 @@ if (WHICH === 'bot') {
     };
   }
 
+  function vileMulderCheck() {
+  // --- a creature that "cannot attack creatures" must still attack shields ---
+  // A loose substring match on the restriction benched Vile Mulder entirely: the
+  // phrase contains "cannot attack", but only the bare form stops it attacking at all.
+  {
+    DB['vile mulder'] = { power: 7000, type: 'Creature', attackRestriction: 'cannot attack creatures' };
+    const sent2 = [];
+    Bot.stop();
+    Bot.start({ seatIdx: 1, deck: [], send: (m) => sent2.push(m) });
+    const board = {
+      you: 1, turnNumber: 5, activeTurn: 1, combat: null, gameOver: null,
+      endGameRequestBy: null, surrenderBy: null, rematch: [false, false],
+      players: [
+        { battlezone: [{ key: 'ts', id: 'DM/Their Small' }], shields: [{ key: 's1' }, { key: 's2' }],
+          mana: [], graveyard: [], hand: [], deckCount: 20, handCount: 0,
+          pendingPromptCount: 0, pendingShieldTriggers: [] },
+        { battlezone: [{ key: 'vm', id: 'DM/Vile Mulder', tapped: false, summonedTurn: 1 }],
+          shields: [{ key: 's3' }], mana: [], graveyard: [], hand: [], deckCount: 0, handCount: 0,
+          pendingTargets: [], pendingDiscards: [], pendingShieldTriggers: [], pendingPromptCount: 0 }
+      ]
+    };
+    let ticks = 0;
+    const step = () => {
+      Bot.onState(board);
+      if (++ticks < 5) return setTimeout(step, 700);
+      setTimeout(() => {
+        const atk = sent2.find(m => m.type === 'declareAttack');
+        if (!atk) { console.error('FAIL: a "cannot attack creatures" creature never attacked'); process.exit(1); }
+        if (atk.target.type !== 'shield') { console.error('FAIL: it attacked a creature, which it may not do'); process.exit(1); }
+        console.log('"cannot attack creatures" still attacks shields');
+        process.exit(0);
+      }, 600);
+    };
+    step();
+  }
+}
+
   const cases = [
     ['bounce (Aqua Surfer)', 'returnToHand', 'anyBattle', 'tb'],
     ['destroy',              'destroy',      'anyBattle', 'tb'],
@@ -787,7 +852,8 @@ if (WHICH === 'bot') {
   (function next(i) {
     if (i >= cases.length) {
       console.log(failed ? failed + ' bot targeting failure(s)' : 'bot targets the opponent for every removal effect');
-      process.exit(failed ? 1 : 0);
+      if (failed) process.exit(1);
+      return vileMulderCheck();
     }
     const [label, action, zone, expect] = cases[i];
     const sent = [];
