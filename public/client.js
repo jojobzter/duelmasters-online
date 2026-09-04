@@ -3,6 +3,15 @@
 // Cross Gear crossing state — declared up here because the selection resolver reads
 // it far earlier in the file, and a `let` below its first use throws at load.
 let crossingGearKey = null;
+// The manual draw and mana charge are once per turn. The label says so rather than
+// letting the click be refused, and a second click still sends it so a card effect
+// the engine doesn't implement can be played by hand.
+function manualUsed(what) {
+  const st = seats[activeSeat] && seats[activeSeat].state;
+  if (!st || st.activeTurn === null || st.activeTurn === undefined) return false;
+  const me = st.players[st.you];
+  return (what === 'draw' ? (me.manualDrawsThisTurn || 0) : (me.manualChargesThisTurn || 0)) >= 1;
+}
 // set when the server warns that a creature must attack; a second press overrides
 let endTurnWarned = false;
 // card names come from filenames, so escape before putting them in markup
@@ -2470,7 +2479,21 @@ function renderState(state) {
             clearSelection();
           }],
           ['Charge Selected to Mana (' + keys.length + ')', () => {
-            keys.forEach(k => sendMsg({ type: 'chargeMana', key: k }));
+            // Charging a selection is still one charge per turn. Rather than quietly
+            // sending several and having all but one refused, say what will happen.
+            if (manualUsed('charge')) {
+              if (!confirm('You have already charged mana this turn.\n\nCharge all ' + keys.length + ' anyway?')) return;
+              keys.forEach(k => sendMsg({ type: 'chargeMana', key: k, force: true }));
+            } else if (keys.length > 1) {
+              if (!confirm('Only one card may be charged per turn.\n\nCharge all ' + keys.length + ' anyway?')) {
+                sendMsg({ type: 'chargeMana', key: keys[0] });   // just the first
+                clearSelection();
+                return;
+              }
+              keys.forEach((k, i) => sendMsg({ type: 'chargeMana', key: k, force: i > 0 }));
+            } else {
+              sendMsg({ type: 'chargeMana', key: keys[0] });
+            }
             clearSelection();
           }],
           ['Return Selected to Deck & Shuffle (' + keys.length + ')', () => {
@@ -2482,7 +2505,14 @@ function renderState(state) {
       }
       clearSelection();
       const items = [
-        ['Charge Mana', () => sendMsg({ type: 'chargeMana', key: c.key })],
+        [manualUsed('charge') ? 'Charge Mana (already charged)' : 'Charge Mana', () => {
+          if (manualUsed('charge')) {
+            if (!confirm('You have already charged mana this turn.\n\nCharge anyway?')) return;
+            sendMsg({ type: 'chargeMana', key: c.key, force: true });
+            return;
+          }
+          sendMsg({ type: 'chargeMana', key: c.key });
+        }],
         [(isCrossGearById(c.id) ? 'Generate' : isSpellById(c.id) ? 'Cast' : 'Summon'), () => {
           if (isEvolutionById(c.id)) {
             const st = seats[activeSeat] && seats[activeSeat].state;
@@ -3042,11 +3072,16 @@ function renderDeckZone(elId, count, isMine, canSearch) {
     e.preventDefault();
     if (!isMine) return;
     const items = [
-      ['Draw a Card', () => {
+      [manualUsed('draw') ? 'Draw a Card (already drawn)' : 'Draw a Card', () => {
         // Off-turn draws are legitimate (shield triggers, forced draws) — just confirm
         // so an accidental misclick during the opponent's turn doesn't slip through.
         if (isOffTurnForMe()) {
           if (!confirm("It's not your turn. Draw anyway?\n\n(Legitimate for shield triggers and forced draws — this will be flagged in the move log.)")) return;
+        }
+        if (manualUsed('draw')) {
+          if (!confirm('You have already drawn this turn.\n\nOnly a card effect grants an extra draw. Draw anyway?')) return;
+          sendMsg({ type: 'drawCard', force: true });
+          return;
         }
         sendMsg({ type: 'drawCard' });
       }],
