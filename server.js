@@ -3246,7 +3246,8 @@ function emptyPlayerState() {
     pendingTargets: [], pendingDiscards: [], pendingManaDiscards: 0, pendingSearch: null, pendingMulti: null,
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
-    pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: [], pendingMultiQueue: []
+    pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: [], pendingMultiQueue: [],
+    manualDrawsThisTurn: 0, manualChargesThisTurn: 0
   };
 }
 
@@ -3344,6 +3345,8 @@ function viewFor(room, viewerIdx) {
     pendingShieldTriggers: isSelf ? (p.pendingShieldTriggers || []) : undefined,
     // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
     pendingPromptCount: pendingPromptTotal(p),
+    manualDrawsThisTurn: p.manualDrawsThisTurn || 0,
+    manualChargesThisTurn: p.manualChargesThisTurn || 0,
     attackBind: s.attackBind || null,
     truceCiv: p.truceCiv || null,
     brokeShieldThisTurn: !!p.brokeShieldThisTurn
@@ -3637,6 +3640,18 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'drawCard': {
+        // A player draws once per turn by hand. Extra draws come from card effects,
+        // which the engine performs itself on a different path and so are unaffected.
+        // The limit only applies once turn order is established — in free play there
+        // are no turns to count against.
+        if (s.activeTurn !== null && s.activeTurn !== undefined && !msg.force) {
+          if ((me.manualDrawsThisTurn || 0) >= 1) {
+            send(ws, { type: 'summonRejected',
+              reason: 'You have already drawn this turn.\n\nOnly card effects grant extra draws, and the engine handles those itself. Draw again to override if a card allows it.' });
+            return;
+          }
+        }
+        me.manualDrawsThisTurn = (me.manualDrawsThisTurn || 0) + 1;
         // fires below, after the card is actually drawn
         const c = me.deck.shift();
         if (c) {
@@ -3752,6 +3767,8 @@ wss.on('connection', (ws) => {
 
         // per-turn counters reset as the turn passes
         me.spellsCastThisTurn = 0; me.turboRushActive = false; me.brokeShieldThisTurn = false; me.diamondCutterActive = false;
+        // the once-per-turn manual actions are available again next turn
+        for (const p of s.players) { p.manualDrawsThisTurn = 0; p.manualChargesThisTurn = 0; }
         for (const c of me.battlezone) { c.brokeShieldThisTurn = false; c.attackedThisTurn = false; }
         s.creaturesEnteredThisTurn = 0;
 
@@ -3829,6 +3846,14 @@ wss.on('connection', (ws) => {
       }
 
       case 'chargeMana': {
+        // One card to mana per turn by hand, same reasoning as the draw above.
+        if (s.activeTurn !== null && s.activeTurn !== undefined && !msg.force) {
+          if ((me.manualChargesThisTurn || 0) >= 1) {
+            send(ws, { type: 'summonRejected',
+              reason: 'You have already charged mana this turn.\n\nCharge again to override if a card allows an extra one.' });
+            return;
+          }
+        }
         // Reality Void: the opponent's mana charge is locked out for a turn
         if (s.manaLockUntil && s.manaLockUntil.forIdx === idx && (s.turnNumber || 0) <= s.manaLockUntil.untilTurn) {
           send(ws, { type: 'summonRejected', reason: s.manaLockUntil.source + ' stops you charging mana this turn.' });
@@ -3844,6 +3869,7 @@ wss.on('connection', (ws) => {
         // tapped as a printed ability of their own.
         const arrivesTapped = civsOf(c.id).length > 1 || entersManaTapped(c.id);
         me.mana.push({ id: c.id, key: c.key, tapped: arrivesTapped, x: mSlot.x, y: mSlot.y });
+        me.manualChargesThisTurn = (me.manualChargesThisTurn || 0) + 1;
         logText = 'charged ' + cardLabel(c.id) + ' to their mana zone' + (arrivesTapped ? ' (tapped).' : '.');
         fireBoardWide(s, 'onoppmanacharge', extraLogs,
           { onlySide: oppIdx, event: { cardId: c.id, key: c.key, ownerIdx: idx } });
