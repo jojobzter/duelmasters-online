@@ -4971,6 +4971,10 @@ wss.on('connection', (ws) => {
             }
             fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'hit');
           }
+          // This whole branch resolves the attack without ever opening a combat, so
+          // endCombat never ran — anything that deferred itself until "after the
+          // attack" (Marrow Ooze destroying itself) has to be resolved here instead.
+          resolvePostAttack(s, idx, extraLogs);
         }
         break;
       }
