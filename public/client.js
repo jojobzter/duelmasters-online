@@ -49,7 +49,10 @@ function cardBaseName(id) { return id ? (id.split('/').pop() || id) : ''; }
 // Filenames often can't hold an apostrophe, so it arrives as '_'. Normalising it here
 // keeps both the display name and the ability lookup working.
 function normKeyClient(name) {
-  return (name || '').toLowerCase()
+  // Accents folded to plain letters, matching the server — "Überdragon" and
+  // "Uberdragon" have to be the same card.
+  return (name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
     .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
     .replace(/_/g, "'")
     .replace(/\s+/g, ' ')
