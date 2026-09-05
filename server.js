@@ -174,7 +174,11 @@ function loadCardDatabase(filePath) {
 // Card names are matched on this form, so curly vs straight apostrophes and stray
 // spacing can never stop a card's abilities from firing.
 function normalizeCardKey(name) {
-  return name.toLowerCase()
+  // Accents are folded to their plain letters, so a sheet entry spelled "Überdragon"
+  // matches an image filed as "Uberdragon". Filenames rarely carry the accent, and a
+  // mismatch means the card silently has no abilities.
+  return name.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
     .replace(/[\u2018\u2019\u02BC\u00B4`]/g, "'")
     .replace(/_/g, "'")
     .replace(/[\u2013\u2014]/g, '-')
@@ -3500,15 +3504,25 @@ function cleanupRoom(room) {
   if (!room.sockets[0] && !room.sockets[1] && !room.pendingJoin) rooms.delete(room.code);
 }
 
+const MAX_ROOMS = 500;            // a public instance should not grow without bound
+const MAX_MESSAGE_BYTES = 64 * 1024;
+
 wss.on('connection', (ws) => {
   connMeta.set(ws, { roomCode: null, idx: null });
 
   ws.on('message', (raw) => {
+    // An oversized frame is the cheapest denial-of-service there is, so drop it
+    // before parsing rather than after.
+    if (raw && raw.length > MAX_MESSAGE_BYTES) return;
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     const meta = connMeta.get(ws);
 
     if (msg.type === 'create') {
+      if (rooms.size >= MAX_ROOMS) {
+        send(ws, { type: 'summonRejected', reason: 'The server is full — please try again shortly.' });
+        return;
+      }
       const roomCode = newRoomCode();
       const room = { code: roomCode, sockets: [ws, null], pendingJoin: null, decks: [null, null], state: freshMatchState() };
       rooms.set(roomCode, room);
@@ -3557,7 +3571,24 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'submitDeck') {
       if (!Array.isArray(msg.deck) || !msg.deck.length) return;
-      room.decks[idx] = msg.deck.slice(0, 40);
+      // The client is not trusted with deck legality — a modified one could send
+      // forty copies of the same card. Enforce the same rules the deck builder does:
+      // 40 cards, at most 4 of any one NAME (not id, so reprints still count together).
+      const seen = new Map();
+      const legal = [];
+      for (const raw of msg.deck) {
+        if (typeof raw !== 'string' || legal.length >= 40) continue;
+        const name = normalizeCardKey(cardLabel(raw));
+        const n = (seen.get(name) || 0) + 1;
+        if (n > 4) continue;
+        seen.set(name, n);
+        legal.push(raw);
+      }
+      if (legal.length < msg.deck.slice(0, 40).length) {
+        send(ws, { type: 'summonRejected',
+          reason: 'Your deck was adjusted to the 4-copy limit before dealing.' });
+      }
+      room.decks[idx] = legal;
       dealPlayer(room, idx);
       broadcastState(room);
       logMsg(room, idx, 'joined the table and drew their opening hand.');
@@ -4687,7 +4718,13 @@ wss.on('connection', (ws) => {
           ownGrave:  { owner: me,  list: me.graveyard },
           ownMana:   { owner: me,  list: me.mana },
           oppMana:   { owner: opp, list: opp.mana },
-          ownHand:   { owner: me,  list: me.hand }
+          ownHand:   { owner: me,  list: me.hand },
+          oppHand:   { owner: opp, list: opp.hand },
+          ownShield: { owner: me,  list: me.shields },
+          oppShield: { owner: opp, list: opp.shields },
+          oppGrave:  { owner: opp, list: opp.graveyard },
+          ownCrossGear: { owner: me,  list: me.crossGear },
+          oppCrossGear: { owner: opp, list: opp.crossGear }
         })[z];
         const done = [];
         for (const k of keys) {
@@ -4737,7 +4774,44 @@ wss.on('connection', (ws) => {
               card.unblockableThisTurn = true;
               done.push(label);
               break;
-            default: break;
+            // Destinations the single-target path already handled but this one didn't,
+            // so a multi-select silently matched the cards and then did nothing —
+            // Überdragon Bajula's mana destruction was picked and then ignored.
+            case 'toGrave': {
+              list.splice(i, 1);
+              owner.graveyard.push({ id: card.id, key: card.key });
+              if (owner !== me) fireBoardWide(s, 'onoppmanatograve', extraLogs, { onlySide: idx });
+              done.push(label);
+              break;
+            }
+            case 'toOwnerMana': {
+              list.splice(i, 1);
+              const slotO = manaSlot(owner);
+              owner.mana.push({ id: card.id, key: card.key, tapped: false, x: slotO.x, y: slotO.y });
+              done.push(label);
+              break;
+            }
+            case 'toOwnerShield': {
+              list.splice(i, 1);
+              owner.shields.push({ id: card.id, key: card.key, faceUp: false, slot: nextShieldSlot(owner) });
+              done.push(label);
+              break;
+            }
+            case 'toTopOfDeck': {
+              list.splice(i, 1);
+              owner.deck.unshift(card.id);
+              done.push(label);
+              break;
+            }
+            case 'untap':
+              card.tapped = false;
+              done.push(label);
+              break;
+            default:
+              // An action with no case here would look like it worked while doing
+              // nothing at all, so say so rather than failing silently.
+              extraLogs.push('(' + pm.source + ': "' + pm.action + '" is not implemented for multi-select)');
+              break;
           }
         }
         const verb = { destroy: 'destroyed', tap: 'tapped', returnToHand: 'returned to hand',
