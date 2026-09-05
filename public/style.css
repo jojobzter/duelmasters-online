@@ -624,3 +624,7 @@ input {
   contain-intrinsic-size: 140px 200px;
 }
 #card-grid { contain: layout paint; }
+
+
+/* confirmation that a deck was written to the my decks folder */
+.saved-ok { color: #7fd4a0; }

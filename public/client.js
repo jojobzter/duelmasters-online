@@ -1,5 +1,10 @@
 // ====================== Card image loading ======================
 
+// The "my decks" subfolder, kept from the scan so saving a deck can write a .txt
+// back into it. Null when the browser has no File System Access API, or when the
+// cards folder was picked with the older <input webkitdirectory> fallback.
+let myDecksDirHandle = null;
+
 // Cross Gear crossing state — declared up here because the selection resolver reads
 // it far earlier in the file, and a `let` below its first use throws at load.
 let crossingGearKey = null;
@@ -106,8 +111,11 @@ async function scanDirHandle(dirHandle) {
   statusEl.textContent = 'Scanning folders...';
   const jobs = [];
   deckFilesFound = [];
+  myDecksDirHandle = null;
   for await (const [setName, setHandle] of dirHandle.entries()) {
     if (setHandle.kind !== 'directory') continue;
+    // remember this one so saved decks can be written back into it
+    if (/^my\s*decks$/i.test(setName)) myDecksDirHandle = setHandle;
     for await (const [fileName, fileHandle] of setHandle.entries()) {
       if (fileHandle.kind !== 'file') continue;
       // a "my decks" folder of .txt decklists is picked up in the same pass
@@ -214,6 +222,41 @@ document.getElementById('btn-load-folder').addEventListener('click', loadFolder)
 // re-grant with a single confirmation click on a remembered folder — much less
 // friction than re-navigating the whole folder picker every time.
 let rememberedFolderHandle = null;
+
+// Writes a deck out as a plain decklist, the same format the loader reads back.
+// Best-effort: a failure never blocks the save, it just reports why.
+async function writeDeckFile(name, cards) {
+  if (!myDecksDirHandle) return { ok: false, why: 'no "my decks" folder in your cards folder' };
+  try {
+    if (myDecksDirHandle.queryPermission) {
+      let perm = await myDecksDirHandle.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') perm = await myDecksDirHandle.requestPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') return { ok: false, why: 'write permission was declined' };
+    }
+    const counts = new Map();
+    for (const id of cards) {
+      const label = cardBaseName(id);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    const body = [...counts.entries()].map(([n, c]) => c + 'x' + n).join('\n') + '\n';
+    const safe = name.replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 60) || 'deck';
+    const fh = await myDecksDirHandle.getFileHandle(safe + '.txt', { create: true });
+    const w = await fh.createWritable();
+    await w.write(body);
+    await w.close();
+    return { ok: true, file: safe + '.txt' };
+  } catch (e) {
+    return { ok: false, why: (e && e.message) || 'the browser refused the write' };
+  }
+}
+
+// Removes a deck's file when the deck itself is deleted, so the folder doesn't
+// accumulate decks the player has thrown away.
+async function deleteDeckFile(name) {
+  if (!myDecksDirHandle) return;
+  const safe = name.replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 60) || 'deck';
+  try { await myDecksDirHandle.removeEntry(safe + '.txt'); } catch (e) { /* never existed */ }
+}
 async function reloadRememberedFolder() {
   if (!rememberedFolderHandle) return;
   const statusEl = document.getElementById('load-status');
@@ -560,9 +603,11 @@ function refreshSavedDecks() {
     });
     const delBtn = document.createElement('button');
     delBtn.textContent = 'Delete';
-    delBtn.addEventListener('click', () => {
+    delBtn.addEventListener('click', async () => {
       delete decks[name]; setSavedDecks(decks);
       if (selectedDeckName === name) { selectedDeckName = null; localStorage.removeItem('dm_selected_deck'); }
+      // remove its file too, or it would reappear the next time the folder is scanned
+      await deleteDeckFile(name);
       refreshSavedDecks(); updateSelectedDeckDisplay();
     });
     row.appendChild(selectBtn); row.appendChild(loadBtn); row.appendChild(shareBtn); row.appendChild(delBtn);
@@ -571,13 +616,23 @@ function refreshSavedDecks() {
   updateSelectedDeckDisplay();
 }
 
-document.getElementById('btn-save-deck').addEventListener('click', () => {
+document.getElementById('btn-save-deck').addEventListener('click', async () => {
   const name = (document.getElementById('deck-name').value || '').trim();
   if (!name) { alert('Name your deck first.'); return; }
   if (currentDeck.length !== 40) { if (!confirm('Deck has ' + currentDeck.length + ' cards, not 40. Save anyway?')) return; }
   const decks = getSavedDecks();
   decks[name] = currentDeck.slice();
   setSavedDecks(decks);
+  // also write it into the "my decks" folder, so it survives clearing browser data
+  // and can be shared as a plain file
+  const written = await writeDeckFile(name, decks[name]);
+  const status = document.getElementById('saved-decks-status');
+  if (status) {
+    status.textContent = written.ok
+      ? 'Saved. Also written to my decks/' + written.file
+      : 'Saved in this browser. Not written to a file — ' + written.why + '.';
+    status.className = written.ok ? 'hint saved-ok' : 'hint';
+  }
   // clear the working list so the editor is ready for the next deck
   currentDeck = [];
   document.getElementById('deck-name').value = '';
