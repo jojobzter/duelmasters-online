@@ -116,6 +116,33 @@ if (WHICH === 'server') {
   const path = require('path');
   const Module = require('module');
 
+  // The server caps a deck at four copies of any one NAME, so test decks need ten
+  // distinct names to reach forty cards. Each stub card becomes "<name> 1".."<name> 10"
+  // with identical properties; the tests match on a substring so nothing else changes.
+  // Builds a legal 40-card deck from the numbered variants of the given base names:
+  // four of each variant, cycling through the names until the deck is full.
+  function legalDeck(...bases) {
+    const out = [];
+    outer:
+    for (let n = 1; n <= 10; n++) {
+      for (const b of bases) {
+        for (let c = 0; c < 4; c++) {
+          if (out.length >= 40) break outer;
+          out.push('DM-01/' + b + ' ' + n);
+        }
+      }
+    }
+    return out;
+  }
+
+  function expandVariants(cards) {
+    const out = [];
+    for (const c of cards) {
+      for (let i = 1; i <= 10; i++) out.push(Object.assign({}, c, { Name: c.Name + ' ' + i }));
+    }
+    return out;
+  }
+
   // --- stub express / ws so the server can start without network deps ---
   const routes = {};
   const fakeApp = {
@@ -140,7 +167,7 @@ if (WHICH === 'server') {
     if (request === 'http') return { createServer: () => ({ listen: () => {}, on: () => {} }) };
     if (request === 'xlsx') return {
       readFile: () => ({ SheetNames: ['Cards'], Sheets: { Cards: {} } }),
-      utils: { sheet_to_json: () => [
+      utils: { sheet_to_json: () => expandVariants([
         { Name: 'Test Creature', Set: 'DM-01', 'Mana Cost': 1, Type: 'Creature',
           Civilization: 'Fire', Power: 3000, Race: 'Dragonoid',
           'Speed Attacker (yes/No)': 'Yes' },
@@ -183,7 +210,7 @@ if (WHICH === 'server') {
         Effect: 'onSummon: draw 1' },
       { Name: 'Test EvoCharger', Set: 'DM-01', 'Mana Cost': 1, Type: 'Spell',
           Civilization: 'Fire', Effect: 'onSummon: evoCharge, optional; resolvesTo mana' }
-      ] }
+      ]) }
     };
     return origLoad.apply(this, arguments);
   };
@@ -223,7 +250,7 @@ if (WHICH === 'server') {
     if (!joined) { console.error('no room was created'); process.exit(1); }
     say(b, { type: 'join', room: joined.room, name: 'B' });
     say(a, { type: 'respondJoin', accept: true });
-    const deck = new Array(40).fill('DM-01/Test Creature');
+    const deck = legalDeck('Test Creature');
     say(a, { type: 'submitDeck', deck });
     say(b, { type: 'submitDeck', deck });
     const latest = (sock) => {
@@ -291,7 +318,7 @@ if (WHICH === 'server') {
     const j2 = a2.inbox.find(m => m.type === 'joined');
     say2(b2, { type: 'join', room: j2.room, name: 'B' });
     say2(a2, { type: 'respondJoin', accept: true });
-    const oozeDeck = new Array(40).fill('DM-01/Test Ooze');
+    const oozeDeck = legalDeck('Test Ooze');
     say2(a2, { type: 'submitDeck', deck: oozeDeck });
     say2(b2, { type: 'submitDeck', deck: oozeDeck });
     const L2 = (s) => { const m = s.inbox.filter(x => x.type === 'state').pop(); return m && m.state; };
@@ -338,7 +365,7 @@ if (WHICH === 'server') {
     say3(a3, { type: 'respondJoin', accept: true });
     // a deck of Blasto + Ooze (Darkness) so the condition can be met
     const mixed = [];
-    for (let i = 0; i < 20; i++) { mixed.push('DM-01/Test Blasto'); mixed.push('DM-01/Test Ooze'); }
+    mixed.push(...legalDeck('Test Blasto', 'Test Ooze'));
     say3(a3, { type: 'submitDeck', deck: mixed });
     say3(b3, { type: 'submitDeck', deck: mixed });
     const L3 = (s) => { const m = s.inbox.filter(x => x.type === 'state').pop(); return m && m.state; };
@@ -434,7 +461,7 @@ if (WHICH === 'server') {
 
   try {
     const deck = [];
-    for (let i = 0; i < 14; i++) { deck.push('DM-01/Test Wall'); deck.push('DM-01/Test Cutter'); deck.push('DM-01/Test Garkago'); }
+    deck.push(...legalDeck('Test Wall', 'Test Cutter', 'Test Garkago'));
     const g = freshGame(deck);
     g.say(g.x, { type: 'claimTurn' });
     let st = g.L(g.x); const seat = st.you, opp = seat === 0 ? 1 : 0;
@@ -619,7 +646,7 @@ if (WHICH === 'server') {
 // affected: Test Hulcus draws on summon and should still work after a manual draw.
 try {
   const deck = [];
-  for (let i = 0; i < 20; i++) { deck.push('DM-01/Test Ooze'); deck.push('DM-01/Test Hulcus'); }
+  deck.push(...legalDeck('Test Ooze', 'Test Hulcus'));
   const g = freshGame(deck);
   g.say(g.x, { type: 'claimTurn' });
   let st = g.L(g.x); const seat = st.you;
@@ -698,7 +725,7 @@ try {
 // --- Evo Charger: goes to mana, and can slide a creature under an evolution creature
   try {
     const deck = [];
-    for (let i = 0; i < 12; i++) { deck.push('DM-01/Test EvoBase'); deck.push('DM-01/Test Evo'); deck.push('DM-01/Test EvoCharger'); }
+    deck.push(...legalDeck('Test EvoBase', 'Test Evo', 'Test EvoCharger'));
     const g = freshGame(deck);
     g.say(g.x, { type: 'claimTurn' });
     let st = g.L(g.x); const seat = st.you;
@@ -723,14 +750,14 @@ try {
     const bzBase = st.players[seat].battlezone.find(c => /EvoBase/.test(c.id));
     for (let i = 0; i < 12; i++) {
       st = g.L(g.x);
-      if (st.players[seat].hand.some(c => /Test Evo$/.test(c.id))) break;
+      if (st.players[seat].hand.some(c => /Test Evo \d/.test(c.id))) break;
       g.say(g.x, { type: 'drawCard', force: true });
     }
     st = g.L(g.x);
-    const evoCard = st.players[seat].hand.find(c => /Test Evo$/.test(c.id));
+    const evoCard = st.players[seat].hand.find(c => /Test Evo \d/.test(c.id));
     if (bzBase && evoCard) g.say(g.x, { type: 'summonCard', key: evoCard.key, baseKey: bzBase.key });
     st = g.L(g.x);
-    const evo = st.players[seat].battlezone.find(c => /Test Evo$/.test(c.id));
+    const evo = st.players[seat].battlezone.find(c => /Test Evo \d/.test(c.id));
     if (!evo) { console.log('(evo charger check skipped — no evolution creature in play)'); }
     else {
       const stackBefore = (evo.under || []).length;
@@ -753,7 +780,7 @@ try {
           const manaCreature = st.players[seat].mana.find(m => !/Charger/.test(m.id));
           g.say(g.x, { type: 'effectTarget', effectId: prompt.id, key: manaCreature.key });
           st = g.L(g.x);
-          const evo2 = st.players[seat].battlezone.find(c => /Test Evo$/.test(c.id));
+          const evo2 = st.players[seat].battlezone.find(c => /Test Evo \d/.test(c.id));
           const stackAfter = (evo2.under || []).length;
           const inMana = st.players[seat].mana.some(m => /Charger/.test(m.id));
           console.log('evolution stack: ' + stackBefore + ' -> ' + stackAfter +
