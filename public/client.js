@@ -2137,9 +2137,21 @@ function isEvolutionById(id) { return /evolution/i.test(cardMetaFor(id).type || 
 function racesOfId(id) {
   return (cardMetaFor(id).race || '').toLowerCase().split('/').map(r => r.trim()).filter(Boolean);
 }
+// Mirrors evolutionSourceMatches() in server.js — the sheet's "Evolution Source"
+// column overrides the race match, so cards like Uberdragon Bajula (an Armored
+// Dragon that evolves from any Dragon) light up the right creatures.
 function canEvolveOntoClient(evoId, baseId) {
-  const a = racesOfId(evoId), b = racesOfId(baseId);
-  return a.length && b.length && a.some(r => b.includes(r));
+  const evoRaces = racesOfId(evoId), baseRaces = racesOfId(baseId);
+  if (!baseRaces.length) return false;
+  const s = (cardMetaFor(evoId).evolutionSource || '').trim();
+  if (!s) return evoRaces.length > 0 && evoRaces.some(r => baseRaces.includes(r));
+  const contains = /^race\s+contains\s+(.+)$/i.exec(s);
+  if (contains) {
+    const needle = contains[1].trim().toLowerCase();
+    return !!needle && baseRaces.some(r => r.includes(needle));
+  }
+  return s.toLowerCase().split('/').map(r => r.trim()).filter(Boolean)
+    .some(r => baseRaces.includes(r));
 }
 let multiTableChosen = new Set();
 
