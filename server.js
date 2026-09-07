@@ -116,10 +116,7 @@ function loadCardDatabase(filePath) {
         tripleBreaker: yes(row['Triple Breaker']),
         attackRestriction: (txt(row['Attack restriction']) || 'none').toLowerCase(),
         lightStealth: yes(row['Light Stealth']),
-        effectText: txt(row['Effect']),
-        // What this evolution creature may be stacked onto, when that is broader or
-        // narrower than its own race. Blank means "same race as itself".
-        evolutionSource: txt(row['Evolution Source'])
+        effectText: txt(row['Effect'])
       };
       // Parse the Effect column into structured abilities. Anything unreadable is
       // collected and reported at startup rather than silently ignored.
@@ -600,27 +597,11 @@ function isEvolutionCard(id) {
   const t = metaOf(id).type || '';
   return /evolution/i.test(t);
 }
-// An evolution creature normally stacks onto one of your creatures sharing a race
-// with it, but plenty of cards say otherwise: Uberdragon Bajula is an Armored Dragon
-// that evolves from ANY Dragon. The sheet's "Evolution Source" column overrides the
-// race match when it is filled in.
-//   "race contains Dragon"          -> any race with Dragon in its name
-//   "Liquid People / Wild Veggies"  -> either of those exact races
-//   blank                           -> the creature's own race, as before
-function evolutionSourceMatches(spec, evoRaces, baseRaces) {
-  if (!baseRaces.length) return false;
-  const s = (spec || '').trim();
-  if (!s) return evoRaces.length ? evoRaces.some(r => baseRaces.includes(r)) : false;
-  const contains = /^race\s+contains\s+(.+)$/i.exec(s);
-  if (contains) {
-    const needle = contains[1].trim().toLowerCase();
-    return !!needle && baseRaces.some(r => r.includes(needle));
-  }
-  return s.toLowerCase().split('/').map(r => r.trim()).filter(Boolean)
-    .some(r => baseRaces.includes(r));
-}
+// An evolution creature stacks onto one of your creatures sharing a race with it.
 function canEvolveOnto(evoId, baseId) {
-  return evolutionSourceMatches(metaOf(evoId).evolutionSource, racesOf(evoId), racesOf(baseId));
+  const evoRaces = racesOf(evoId), baseRaces = racesOf(baseId);
+  if (!evoRaces.length || !baseRaces.length) return false;
+  return evoRaces.some(r => baseRaces.includes(r));
 }
 // Cards stacked under an evolution creature travel with it. Being DESTROYED sends the
 // whole stack to the graveyard; any other way of leaving the battlezone (bounced to
