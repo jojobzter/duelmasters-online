@@ -17,6 +17,9 @@ const Bot = (() => {
   let send = null;              // send(msg) on the bot's seat
   let thinkingTimer = null;
   let turnState = { turn: -1, drew: false, charged: false };
+  // Actions the server has refused this turn. Without this the bot can retry the same
+  // illegal attack indefinitely and never end its turn.
+  let refusedThisTurn = new Set();
   let unaffordable = new Set(); // cards rejected this turn, so it stops retrying
   let lastActionSig = '';
   let repeatCount = 0;
@@ -85,6 +88,12 @@ const Bot = (() => {
   // Only the bare "cannot attack" stops a creature attacking at all. "cannot attack
   // creatures" (Vile Mulder, Avalanche Giant) still allows a run at shields, so a
   // loose substring match wrongly benched those creatures entirely.
+  // "unblockable" may be printed or granted; the effect index knows either way
+  function isUnblockable(id) {
+    const described = (effectOf(id).described) || [];
+    return described.some(dd => dd.action === 'grant' && /unblockable/i.test(dd.keyword || ''));
+  }
+
   function canAttackAtAll(id) {
     return (meta(id).attackRestriction || 'none').toLowerCase() !== 'cannot attack';
   }
@@ -346,6 +355,7 @@ const Bot = (() => {
     const me = myState(state), opp = oppState(state);
     const ready = me.battlezone.filter(c =>
       !c.tapped && canAttackAtAll(c.id) && !isSummoningSick(state, c) && !isSpell(c.id) &&
+      !refusedThisTurn.has('atk:' + c.key) &&
       !unaffordable.has('atk:' + c.key));
     if (!ready.length) return null;
 
@@ -353,10 +363,38 @@ const Bot = (() => {
     const strongestBlocker = blockers.length
       ? blockers.slice().sort((a, b) => livePowerOf(b) - livePowerOf(a))[0] : null;
 
-    // LETHAL: no shields and nothing can block — swing for the win immediately
-    if (!opp.shields.length && !blockers.length) {
-      const finisher = ready.find(c => canAttackShields(c.id));
-      if (finisher) return { key: finisher.key, target: { type: 'shield' } };
+    // ---- Can this turn simply win? ----
+    // Work out how many shields the attackers can break between them, allowing for
+    // the fact that each untapped blocker stops one attack. Winning needs every shield
+    // broken AND one further attack to connect with the player. The old check only
+    // fired when the opponent had no shields and no blockers at all, so the bot
+    // routinely traded creatures on a turn it could have won outright.
+    const canGoFace = ready.filter(c => canAttackShields(c.id));
+    const breakersOf = (c) => {
+      const m = meta(c.id);
+      if (m.tripleBreaker) return 3;
+      if (m.doubleBreaker) return 2;
+      return 1;
+    };
+    // an unblockable attacker cannot be stopped, so blockers do not reduce it
+    const unblockable = canGoFace.filter(c => isUnblockable(c.id));
+    const blockableAttacks = Math.max(0, canGoFace.length - unblockable.length - blockers.length);
+    const swings = unblockable.length + blockableAttacks;
+    const totalBreak = canGoFace
+      .slice()
+      .sort((a, b) => breakersOf(b) - breakersOf(a))
+      .slice(0, swings)
+      .reduce((n, c) => n + breakersOf(c), 0);
+    if (swings > 0 && totalBreak > opp.shields.length) {
+      // enough to clear the shields and still land a hit — go straight at them
+      const order = canGoFace.slice().sort((a, b) => breakersOf(b) - breakersOf(a));
+      const finisher = order.find(c => isUnblockable(c.id)) || order[0];
+      if (finisher) {
+        return { key: finisher.key,
+                 target: opp.shields.length
+                   ? { type: 'shield', key: opp.shields[0].key }
+                   : { type: 'shield' } };
+      }
     }
 
     ready.sort((a, b) => livePowerOf(b) - livePowerOf(a));
@@ -404,8 +442,16 @@ const Bot = (() => {
     const blockers = untappedBlockers(me);
     if (!blockers.length) return null;
 
-    const wouldLoseGame = cb.target.type === 'shield' && me.shields.length === 0;
-    const lastShield = cb.target.type === 'shield' && me.shields.length === 1;
+    // How many shields this attack actually takes. A double breaker at two shields is
+    // just as fatal as any attack at zero, and the old check missed that entirely —
+    // it only chump-blocked once the shields were already gone.
+    const atkMeta = meta(atk.id);
+    const breaks = atkMeta.tripleBreaker ? 3 : atkMeta.doubleBreaker ? 2 : 1;
+    const hittingShields = cb.target.type === 'shield';
+    const wouldLoseGame = hittingShields && me.shields.length === 0;
+    // this swing empties the shield zone, so the next one wins unless we stop it
+    const emptiesShields = hittingShields && me.shields.length > 0 && breaks >= me.shields.length;
+    const lastShield = emptiesShields;
 
     // a blocker that survives and kills the attacker is always worth it
     const winners = blockers.filter(b => livePowerOf(b) > atkPow);
@@ -419,8 +465,9 @@ const Bot = (() => {
       trades.sort((a, b) => livePowerOf(a) - livePowerOf(b));
       return trades[0].key;
     }
-    // chump-block only to stay alive
-    if (wouldLoseGame) {
+    // Chump-block to stay alive, and also to stop the swing that would strip the last
+    // shields — a creature is worth less than the game.
+    if (wouldLoseGame || emptiesShields) {
       blockers.sort((a, b) => livePowerOf(a) - livePowerOf(b));
       return blockers[0].key;
     }
@@ -585,6 +632,7 @@ const Bot = (() => {
 
     if (turnState.turn !== state.turnNumber) {
       turnState = { turn: state.turnNumber, drew: false, charged: false };
+      refusedThisTurn = new Set();
       unaffordable = new Set();
     }
 
@@ -643,6 +691,7 @@ const Bot = (() => {
       // a fresh match has started — clear everything from the last one
       votedRematch = false;
       turnState = { turn: -1, drew: false, charged: false };
+      refusedThisTurn = new Set();
       unaffordable = new Set();
       rejectedTargets = new Set();
       lastActionSig = '';
@@ -803,12 +852,26 @@ const Bot = (() => {
   function noteUnaffordable(key) { if (key) unaffordable.add(key); }
 
   return {
+    // The host forwards the server's refusals so the bot can stop repeating one.
+    onRejected(reason) {
+      const m = /^(.+?) (?:has summoning sickness|can't attack|cannot attack)/.exec(reason || '');
+      if (m) {
+        // match by name, since the message names the card rather than its key
+        const nm = m[1].toLowerCase();
+        for (const c of (lastState ? myState(lastState).battlezone : [])) {
+          if (displayName(c.id).toLowerCase() === nm) refusedThisTurn.add('atk:' + c.key);
+        }
+      }
+      // a refusal of any kind means the last plan failed; let the next tick replan
+      thinkingTimer = null;
+    },
     start(opts) {
       active = true;
       seatIdx = opts.seatIdx;
       deck = opts.deck;
       send = opts.send;
       turnState = { turn: -1, drew: false, charged: false };
+      refusedThisTurn = new Set();
       unaffordable = new Set();
       // Heartbeat: the bot normally reacts to state pushes, but some things (a
       // rejected action, a prompt that arrived without a state change) produce none.

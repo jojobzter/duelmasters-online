@@ -35,13 +35,35 @@
     <div class="deckbuilder">
       <div class="card-browser">
         <input id="card-search" placeholder="Search cards / set (e.g. DM-2)..." />
-        <div class="filter-row">
-          <span class="filter-row-label">Civilization:</span>
-          <div id="civ-filters" class="filter-chips"></div>
-        </div>
-        <div class="filter-row">
-          <span class="filter-row-label">Type:</span>
-          <div id="type-filters" class="filter-chips"></div>
+        <!-- Collapsed by default: on a phone the filters would otherwise push the
+             card grid off the screen entirely. -->
+        <button id="btn-toggle-filters" class="filters-toggle" type="button">
+          Filters <span id="filter-count" class="filter-count"></span>
+        </button>
+        <div id="filter-panel" class="filter-panel">
+          <div class="filter-row">
+            <span class="filter-row-label">Civilization</span>
+            <div id="civ-filters" class="filter-chips"></div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label">Type</span>
+            <div id="type-filters" class="filter-chips"></div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label">Cost</span>
+            <div id="cost-filters" class="filter-chips"></div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label">Ability</span>
+            <div id="kw-filters" class="filter-chips"></div>
+          </div>
+          <div class="filter-row">
+            <span class="filter-row-label">Race</span>
+            <select id="race-filter" class="race-select"><option value="">Any race</option></select>
+          </div>
+          <div class="filter-row">
+            <button id="btn-clear-filters" class="clear-filters" type="button">Clear all filters</button>
+          </div>
         </div>
         <div id="card-grid" class="card-grid"></div>
       </div>

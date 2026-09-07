@@ -628,3 +628,38 @@ input {
 
 /* confirmation that a deck was written to the my decks folder */
 .saved-ok { color: #7fd4a0; }
+
+
+/* ---- deck-builder filters -------------------------------------------------
+   Collapsed by default. On a phone an always-open panel pushed the card grid
+   off screen, which is why the filters appeared to be missing entirely. */
+.filters-toggle {
+  width: 100%; text-align: left; margin-top: 6px;
+  background: #232a36; color: #cfe0ff; border: 1px solid #39424f;
+  border-radius: 6px; padding: 9px 12px; font-size: 0.9em; cursor: pointer;
+}
+.filters-toggle::after { content: ' \25BE'; float: right; color: #9aa0a8; }
+.filters-toggle.open::after { content: ' \25B4'; }
+.filter-count { color: #7fd4a0; font-weight: 600; margin-left: 4px; }
+.filter-count.on { color: #ffd166; }
+
+.filter-panel { display: none; padding: 8px 2px 2px; }
+.filter-panel.open { display: block; }
+
+.race-select {
+  background: #1b2029; color: #dfe6f0; border: 1px solid #39424f;
+  border-radius: 6px; padding: 7px 8px; font-size: 0.88em; max-width: 100%;
+}
+.clear-filters {
+  background: transparent; color: #9aa0a8; border: 1px solid #39424f;
+  border-radius: 6px; padding: 6px 10px; font-size: 0.82em; cursor: pointer;
+}
+.clear-filters:hover { color: #dfe6f0; }
+
+/* Touch targets need to be big enough to hit reliably on a phone. */
+@media (max-width: 760px) {
+  .filter-chip { padding: 8px 12px; font-size: 0.9em; }
+  .filter-row { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .filter-row-label { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.04em; }
+  .race-select { width: 100%; padding: 10px 8px; font-size: 0.95em; }
+}

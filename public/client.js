@@ -4,6 +4,11 @@
 // back into it. Null when the browser has no File System Access API, or when the
 // cards folder was picked with the older <input webkitdirectory> fallback.
 let myDecksDirHandle = null;
+// Deck-builder filters. Civilization and Type already existed; cost, race and the
+// keyword toggles are new, and all of them feed one predicate.
+const activeCostFilters = new Set();     // 1..6, where 7 means "7 or more"
+const activeKeywordFilters = new Set();  // blocker, speedAttacker, doubleBreaker, ...
+let activeRaceFilter = '';
 
 // Cross Gear crossing state — declared up here because the selection resolver reads
 // it far earlier in the file, and a `let` below its first use throws at load.
@@ -374,6 +379,7 @@ function buildFilterUI(civs, types) {
   const civWrap = document.getElementById('civ-filters');
   const typeWrap = document.getElementById('type-filters');
   if (!civWrap || !typeWrap) return;
+  buildExtraFilters();
   civWrap.innerHTML = '';
   civs.forEach(civ => {
     const btn = document.createElement('button');
@@ -384,6 +390,7 @@ function buildFilterUI(civs, types) {
     btn.addEventListener('click', () => {
       if (activeCivFilters.has(civ)) activeCivFilters.delete(civ); else activeCivFilters.add(civ);
       btn.classList.toggle('active');
+      updateFilterCount();
       refreshCardGrid();
     });
     civWrap.appendChild(btn);
@@ -397,6 +404,7 @@ function buildFilterUI(civs, types) {
     btn.addEventListener('click', () => {
       if (activeTypeFilters.has(type)) activeTypeFilters.delete(type); else activeTypeFilters.add(type);
       btn.classList.toggle('active');
+      updateFilterCount();
       refreshCardGrid();
     });
     typeWrap.appendChild(btn);
@@ -405,6 +413,75 @@ function buildFilterUI(civs, types) {
 
 // Cards missing from the spreadsheet, or missing a civ/type, always pass through
 // unfiltered — incomplete data should never hide a card, only unlock filtering for it.
+// Cost buckets, ability toggles and the race list. Built from the loaded card data so
+// the race list only offers races that actually exist in the player's collection.
+function buildExtraFilters() {
+  const costWrap = document.getElementById('cost-filters');
+  const kwWrap = document.getElementById('kw-filters');
+  const raceSel = document.getElementById('race-filter');
+  if (!costWrap || !kwWrap || !raceSel) return;
+
+  costWrap.innerHTML = '';
+  for (let c = 1; c <= 7; c++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'filter-chip';
+    btn.textContent = c === 7 ? '7+' : String(c);
+    btn.addEventListener('click', () => {
+      if (activeCostFilters.has(c)) activeCostFilters.delete(c); else activeCostFilters.add(c);
+      btn.classList.toggle('active');
+      updateFilterCount(); refreshCardGrid();
+    });
+    costWrap.appendChild(btn);
+  }
+
+  const KEYWORDS = [
+    ['blocker', 'Blocker'], ['speedAttacker', 'Speed Attacker'],
+    ['doubleBreaker', 'Double Breaker'], ['tripleBreaker', 'Triple Breaker'],
+    ['shieldTrigger', 'Shield Trigger'], ['slayer', 'Slayer'],
+    ['evolution', 'Evolution'], ['hasEffect', 'Has an ability']
+  ];
+  kwWrap.innerHTML = '';
+  for (const [key, label] of KEYWORDS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'filter-chip';
+    btn.textContent = label;
+    btn.addEventListener('click', () => {
+      if (activeKeywordFilters.has(key)) activeKeywordFilters.delete(key); else activeKeywordFilters.add(key);
+      btn.classList.toggle('active');
+      updateFilterCount(); refreshCardGrid();
+    });
+    kwWrap.appendChild(btn);
+  }
+
+  const races = new Set();
+  for (const meta of cardMetaDB.values()) {
+    for (const r of String(meta.race || '').split('/')) {
+      const t = r.trim();
+      if (t) races.add(t);
+    }
+  }
+  raceSel.innerHTML = '<option value="">Any race</option>';
+  [...races].sort().forEach(r => {
+    const o = document.createElement('option');
+    o.value = r; o.textContent = r;
+    raceSel.appendChild(o);
+  });
+  raceSel.value = activeRaceFilter;
+  raceSel.onchange = () => { activeRaceFilter = raceSel.value; updateFilterCount(); refreshCardGrid(); };
+}
+
+// A count on the collapsed button, so it is obvious that filters are hiding cards.
+function updateFilterCount() {
+  const el = document.getElementById('filter-count');
+  if (!el) return;
+  const n = activeCivFilters.size + activeTypeFilters.size + activeCostFilters.size +
+            activeKeywordFilters.size + (activeRaceFilter ? 1 : 0);
+  el.textContent = n ? '(' + n + ')' : '';
+  el.className = n ? 'filter-count on' : 'filter-count';
+}
+
 function cardPassesFilters(id) {
   const meta = cardMetaDB.get(cardBaseName(id).toLowerCase());
   if (activeCivFilters.size) {
@@ -412,6 +489,25 @@ function cardPassesFilters(id) {
   }
   if (activeTypeFilters.size) {
     if (!meta || !meta.type || !activeTypeFilters.has(meta.type)) return false;
+  }
+  if (activeCostFilters.size) {
+    const c = meta && meta.cost != null ? meta.cost : null;
+    if (c == null) return false;
+    // the 7 chip means "7 or more", so big finishers are all reachable from one chip
+    const bucket = c >= 7 ? 7 : c;
+    if (!activeCostFilters.has(bucket)) return false;
+  }
+  if (activeRaceFilter) {
+    const races = String((meta && meta.race) || '').split('/').map(r => r.trim());
+    if (!races.includes(activeRaceFilter)) return false;
+  }
+  if (activeKeywordFilters.size) {
+    if (!meta) return false;
+    for (const k of activeKeywordFilters) {
+      if (k === 'evolution') { if (!/evolution/i.test(meta.type || '')) return false; }
+      else if (k === 'hasEffect') { if (!meta.effectText) return false; }
+      else if (!meta[k]) return false;
+    }
   }
   return true;
 }
@@ -491,6 +587,24 @@ function refreshCardGridSoon() {
 }
 
 document.getElementById('card-search').addEventListener('input', refreshCardGridSoon);
+
+// Filters start collapsed so the card grid is visible immediately on a phone.
+document.getElementById('btn-toggle-filters').addEventListener('click', () => {
+  const panel = document.getElementById('filter-panel');
+  const open = panel.classList.toggle('open');
+  document.getElementById('btn-toggle-filters').classList.toggle('open', open);
+});
+
+document.getElementById('btn-clear-filters').addEventListener('click', () => {
+  activeCivFilters.clear(); activeTypeFilters.clear();
+  activeCostFilters.clear(); activeKeywordFilters.clear();
+  activeRaceFilter = '';
+  const sel = document.getElementById('race-filter');
+  if (sel) sel.value = '';
+  document.querySelectorAll('.filter-chip.active').forEach(b => b.classList.remove('active'));
+  updateFilterCount();
+  refreshCardGrid();
+});
 
 function refreshDeckList() {
   const list = document.getElementById('deck-list');
@@ -2137,21 +2251,9 @@ function isEvolutionById(id) { return /evolution/i.test(cardMetaFor(id).type || 
 function racesOfId(id) {
   return (cardMetaFor(id).race || '').toLowerCase().split('/').map(r => r.trim()).filter(Boolean);
 }
-// Mirrors evolutionSourceMatches() in server.js — the sheet's "Evolution Source"
-// column overrides the race match, so cards like Uberdragon Bajula (an Armored
-// Dragon that evolves from any Dragon) light up the right creatures.
 function canEvolveOntoClient(evoId, baseId) {
-  const evoRaces = racesOfId(evoId), baseRaces = racesOfId(baseId);
-  if (!baseRaces.length) return false;
-  const s = (cardMetaFor(evoId).evolutionSource || '').trim();
-  if (!s) return evoRaces.length > 0 && evoRaces.some(r => baseRaces.includes(r));
-  const contains = /^race\s+contains\s+(.+)$/i.exec(s);
-  if (contains) {
-    const needle = contains[1].trim().toLowerCase();
-    return !!needle && baseRaces.some(r => r.includes(needle));
-  }
-  return s.toLowerCase().split('/').map(r => r.trim()).filter(Boolean)
-    .some(r => baseRaces.includes(r));
+  const a = racesOfId(evoId), b = racesOfId(baseId);
+  return a.length && b.length && a.some(r => b.includes(r));
 }
 let multiTableChosen = new Set();
 
