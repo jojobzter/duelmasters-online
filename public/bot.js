@@ -129,11 +129,23 @@ const Bot = (() => {
   function untappedMana(state) { return myState(state).mana.filter(m => !m.tapped); }
   function manaCivs(id) { return meta(id).civs || []; }
 
-  function canAfford(state, cardId) { return canAffordWith(untappedMana(state), cardId); }
-  function canAffordWith(pool, cardId) {
+  // The server publishes what each card in hand really costs after any reduction, so
+  // a Cocco Lupia discount is actually usable. Without this the bot only ever compared
+  // against the printed cost and simply never tried the cheaper play.
+  function realCost(state, cardId, cardKey) {
     const m = meta(cardId);
-    if (m.cost == null) return true;                 // unknown — let the server judge
-    if (pool.length < m.cost) return false;
+    const live = state && myState(state) && myState(state).liveCosts;
+    if (live && cardKey != null && live[cardKey] != null) return live[cardKey];
+    return m.cost;
+  }
+  function canAfford(state, cardId, cardKey) {
+    return canAffordWith(untappedMana(state), cardId, realCost(state, cardId, cardKey));
+  }
+  function canAffordWith(pool, cardId, costOverride) {
+    const m = meta(cardId);
+    const cost = (costOverride != null) ? costOverride : m.cost;
+    if (cost == null) return true;                   // unknown — let the server judge
+    if (pool.length < cost) return false;
     const need = m.civs || [];
     if (!need.length) return true;
     // assign one distinct mana card to each required civilization
@@ -313,7 +325,7 @@ const Bot = (() => {
   // value spells with whatever mana is left.
   function pickPlay(state) {
     const me = myState(state), opp = oppState(state);
-    const affordable = me.hand.filter(c => !unaffordable.has(c.key) && canAfford(state, c.id));
+    const affordable = me.hand.filter(c => !unaffordable.has(c.key) && canAfford(state, c.id, c.key));
     if (!affordable.length) return null;
 
     // Everything below is judged by cardValue, which reads each card's actual
