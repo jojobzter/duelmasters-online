@@ -412,12 +412,34 @@ function parseAction(body, mods) {
                reveal: !!mods.reveal };
     }
     case 'grant': {
-      const kw = rest[0] || '';
-      const kwm = kw.match(/^([a-zA-Z]+)(?:\[(.*)\])?$/);
+      // A bracketed argument may contain spaces — "saver[race=Armored Dragon]" is one
+      // token conceptually but three after a whitespace split, which truncated the race
+      // to "Armored" and turned the rest into a nonsense selector. Re-join the bracket.
+      let kwEnd = 0;
+      let kw = rest[0] || '';
+      if (kw.includes('[') && !kw.includes(']')) {
+        while (kwEnd + 1 < rest.length && !kw.includes(']')) kw += ' ' + rest[++kwEnd];
+      }
+      rest = rest.slice(kwEnd);
+      // Several keywords may be granted together with "+", e.g.
+      // "powerAttacker[+4000]+doubleBreaker" — Magma Gazer gives one creature both, and
+      // splitting them into separate clauses let them land on different creatures.
+      const parts = kw.split('+').filter(Boolean);
+      const keywords = [];
+      for (let i = 0; i < parts.length; i++) {
+        let piece = parts[i];
+        // a bracketed argument may itself contain the "+" we just split on
+        if (piece.includes('[') && !piece.includes(']') && parts[i + 1]) piece += '+' + parts[++i];
+        const m2 = piece.match(/^([a-zA-Z]+)(?:\[(.*?)\]?)?$/);
+        keywords.push({ keyword: m2 ? m2[1] : piece, arg: m2 && m2[2] ? m2[2] : null });
+      }
       const c = parseCount(rest.slice(1));
+      const chooses = /\bchoose\b/i.test(rest.slice(1).join(' '));
       return { action: 'grant',
-               keyword: kwm ? kwm[1] : kw,
-               arg: kwm && kwm[2] ? kwm[2] : null,
+               keyword: keywords[0].keyword,
+               arg: keywords[0].arg,
+               keywords,                       // the full list, when more than one
+               chooses,
                count: c.count, optional: !!c.optional,
                selector: parseSelector(c.rest) || { name: c.rest } };
     }

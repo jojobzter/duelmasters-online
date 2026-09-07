@@ -1219,6 +1219,11 @@ function kwArg(set, name) {
     const m = String(k).match(/\[(.*)\]?$/);
     if (m) return m[1].replace(/\]$/, '');
   }
+  // grantedKeywords stores the bare keyword and keeps its argument alongside, so a
+  // set built that way has no brackets to read. Without this, every keyword that
+  // carries an argument — saver[race=...], unblockableBy[...], breakerCap[...] —
+  // silently behaved as though it had none.
+  if (set && set.args && set.args[name] != null) return set.args[name];
   return null;
 }
 
@@ -2355,10 +2360,31 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const pool = listForZone(me, opp, zoneName);
         const ex = filtersToEngine(e.selector);
         let hit = selfKw ? pool.filter(c => c.key === cardKey) : pool.filter(c => matchesExtra(c.id, ex));
+        // every keyword in the clause, so a card granting two of them puts BOTH on the
+        // same creature rather than one each on whoever happens to be first
+        const kwList = (e.keywords && e.keywords.length)
+          ? e.keywords
+          : [{ keyword: e.keyword, arg: e.arg }];
+
+        // "grant X choose 1 ownCreature" — the player picks who gets it
+        if (e.chooses && !selfKw) {
+          const base = {
+            id: newKey(), zone: zoneName, action: 'grantKeywords',
+            grantList: kwList.map(k => ({ keyword: String(k.keyword || '').toLowerCase(), arg: k.arg || null })),
+            source: cardLabel(cardId), sourceKey: cardKey,
+            spellKey: isSpellCard(cardId) ? cardKey : null
+          };
+          if (legalTargetCount(me, opp, base) > 0) { me.pendingTargets.push(base); defer = true; }
+          else logs.push(cardLabel(cardId) + ': no creature to grant it to.');
+          break;
+        }
+
         const n = (grantCount === 'all') ? hit.length : (typeof grantCount === 'number' ? grantCount : hit.length);
         hit.slice(0, n).forEach(c => {
           c.tempGrants = c.tempGrants || [];
-          c.tempGrants.push({ keyword: String(e.keyword || '').toLowerCase(), arg: e.arg || null });
+          for (const k of kwList) {
+            c.tempGrants.push({ keyword: String(k.keyword || '').toLowerCase(), arg: k.arg || null });
+          }
         });
         if (kwBase(e.keyword) === 'cyclone') applyCyclone(state, meIdx, logs);
         if (hit.length) logs.push(cardLabel(cardId) + ' granted ' + e.keyword + ' this turn.');
@@ -3349,6 +3375,15 @@ function viewFor(room, viewerIdx) {
     pendingShieldTriggers: isSelf ? (p.pendingShieldTriggers || []) : undefined,
     // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
     pendingPromptCount: pendingPromptTotal(p),
+    // what each card in hand really costs right now, after Cocco Lupia and friends
+    liveCosts: (isSelf ? p.hand : []).reduce((acc, c) => {
+      const base = (cardMeta(c.id) || {}).cost;
+      if (base == null) return acc;
+      const adj = costAdjustment(s, s.players.indexOf(p), c.id);
+      const real = adj.delta ? Math.max(adj.floor || 0, base + adj.delta) : base;
+      if (real !== base) acc[c.key] = real;
+      return acc;
+    }, {}),
     manualDrawsThisTurn: p.manualDrawsThisTurn || 0,
     manualChargesThisTurn: p.manualChargesThisTurn || 0,
     attackBind: s.attackBind || null,
@@ -4605,6 +4640,13 @@ wss.on('connection', (ws) => {
             applySharedTap(s, s.players.indexOf(owner), card);
             logText = 'used ' + eff.source + ' to tap ' + label + '.';
             break;
+          case 'grantKeywords': {
+            card.tempGrants = card.tempGrants || [];
+            for (const k of (eff.grantList || [])) card.tempGrants.push({ keyword: k.keyword, arg: k.arg });
+            const names = (eff.grantList || []).map(k => k.keyword + (k.arg ? ' ' + k.arg : '')).join(' and ');
+            logText = 'used ' + eff.source + ' to give ' + label + ' ' + names + ' this turn.';
+            break;
+          }
           case 'untap':
             card.tapped = false;
             logText = 'used ' + eff.source + ' to untap ' + label + '.';
@@ -5318,4 +5360,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log('Duel Masters table running on port ' + PORT));
 
 // exported for server-test.js so the real message handlers can be driven in tests
-module.exports = Object.assign(module.exports || {}, { __wss: wss });
+// exported so the test harness can drive and inspect a real game
+module.exports = Object.assign(module.exports || {}, { __wss: wss, __rooms: rooms });
