@@ -371,6 +371,23 @@ const Bot = (() => {
       !unaffordable.has('atk:' + c.key));
     if (!ready.length) return null;
 
+    // A creature with "attacks each turn if able" has to swing, and the server will
+    // not let the turn end while it sits there. Send it in first rather than weighing
+    // whether the attack is a good idea — it isn't optional.
+    const mustSwing = ready.find(c => {
+      const kw = (me.liveKeywords && me.liveKeywords[c.key]) || [];
+      return kw.some(k => /^mustattack/i.test(k)) ||
+             /attacks each turn/i.test(meta(c.id).effectText || '');
+    });
+    if (mustSwing) {
+      const target = opp.shields.length
+        ? { type: 'shield', key: opp.shields[0].key }
+        : { type: 'shield' };
+      if (canAttackShields(mustSwing.id)) return { key: mustSwing.key, target };
+      const victim = opp.battlezone.slice().sort((a, b) => livePowerOf(b) - livePowerOf(a))[0];
+      if (victim) return { key: mustSwing.key, target: { type: 'creature', key: victim.key } };
+    }
+
     const blockers = untappedBlockers(opp);
     const strongestBlocker = blockers.length
       ? blockers.slice().sort((a, b) => livePowerOf(b) - livePowerOf(a))[0] : null;
@@ -682,7 +699,7 @@ const Bot = (() => {
       return true;
     }
 
-    act(() => { if (lastState && lastState.activeTurn === lastState.you) send({ type: 'endTurn' }); }, DELAY.normal);
+    act(() => { if (lastState && lastState.activeTurn === lastState.you) { send({ type: 'endTurn', force: forceEndTurn }); forceEndTurn = false; } }, DELAY.normal);
     return true;
   }
 
@@ -754,7 +771,7 @@ const Bot = (() => {
         // out of useful moves — end the turn rather than sitting there
         if (state.activeTurn === state.you && !state.combat) {
           repeatCount = 0;
-          act(() => { if (lastState && lastState.activeTurn === lastState.you) send({ type: 'endTurn' }); }, DELAY.fast);
+          act(() => { if (lastState && lastState.activeTurn === lastState.you) { send({ type: 'endTurn', force: forceEndTurn }); forceEndTurn = false; } }, DELAY.fast);
         }
         return;
       }
@@ -836,6 +853,8 @@ const Bot = (() => {
   // A rejected action (usually not enough mana). Mark the card the bot ACTUALLY tried
   // — not a guess — and wake it straight away, because a rejection produces no state
   // update, so without this the bot would simply stop mid-turn.
+  let forceEndTurn = false;
+
   function onRejected() {
     if (!active) return;
     // A refused free cast means the trigger can't be used at all. Decline it, or the
@@ -866,6 +885,13 @@ const Bot = (() => {
   return {
     // The host forwards the server's refusals so the bot can stop repeating one.
     onRejected(reason) {
+      // "X must attack if it is able" — attack with it if we can, otherwise override
+      // on the retry. Looping on this refusal is what froze the bot mid-turn.
+      if (/must attack if it is able/i.test(reason || '')) {
+        forceEndTurn = true;
+        onRejected();
+        return;
+      }
       const m = /^(.+?) (?:has summoning sickness|can't attack|cannot attack)/.exec(reason || '');
       if (m) {
         // match by name, since the message names the card rather than its key
@@ -916,7 +942,7 @@ const Bot = (() => {
         if (thinkingTimer) { clearTimeout(thinkingTimer); thinkingTimer = null; }
         const cb = st.combat;
         if (cb && cb.attackerIdx === st.you) send({ type: 'cancelCombat' });
-        else if (st.activeTurn === st.you) send({ type: 'endTurn' });
+        else if (st.activeTurn === st.you) { send({ type: 'endTurn', force: forceEndTurn }); forceEndTurn = false; }
       }, 1500);
     },
     stop() {
