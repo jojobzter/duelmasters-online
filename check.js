@@ -14,6 +14,7 @@ const CHECKS = [
   ['client',  ['../public/client.js'], 'client.js loads without throwing'],
   ['server',  [],                      'server handlers run a real game end to end'],
   ['bot',     [],                      'the bot targets the opponent, not itself'],
+  ['deadlock',[],                      'the bot can always end its turn'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']
@@ -42,7 +43,7 @@ let failed = 0;
     // exit 2 means the check could not run (a missing optional dependency)
     const status = code === 0 ? 'ok  ' : code === 2 ? 'skip' : 'FAIL';
     if (code && code !== 2) failed++;
-    console.log(status + '  ' + name.padEnd(8) + blurb);
+    console.log(status + '  ' + name.padEnd(9) + blurb);
     if (code) out.trim().split('\n').slice(-4).forEach(l => console.log('        ' + l));
     run(i + 1);
   });

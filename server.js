@@ -3859,9 +3859,19 @@ wss.on('connection', (ws) => {
         if (s.combat) { send(ws, { type: 'summonRejected', reason: 'Finish resolving the current attack first.' }); return; }
         // a creature under "must attack" should not be left sitting untapped
         {
+          // A creature only has to attack if it CAN. Something with no legal target —
+          // no shields left it may hit, no creature it is allowed to attack — must not
+          // hold the turn open, or neither player can ever proceed.
+          const canActuallyAttack = (c) => {
+            if (opp.shields.length && canAttackShields(c.id)) return true;
+            if (!opp.shields.length && canAttackShields(c.id)) return true;   // direct attack
+            return opp.battlezone.some(v =>
+              !attackTargetForbidden(s, oppIdx, v, c) &&
+              (v.tapped || canAttackUntappedNow(s, idx, c, oppIdx, v)));
+          };
           const idle = me.battlezone.find(c =>
             !c.tapped && mustAttack(s, idx, c) && !hasSummoningSickness(s, idx, c) &&
-            !attackerForbidden(s, idx, c));
+            !attackerForbidden(s, idx, c) && canActuallyAttack(c));
           if (idle && !msg.force) {
             send(ws, { type: 'summonRejected',
               reason: cardLabel(idle.id) + ' must attack if it is able. Attack with it first, or end the turn again to override.' });
