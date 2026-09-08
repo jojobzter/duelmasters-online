@@ -118,8 +118,19 @@ const Bot = (() => {
     if (card.under && card.under.length) return false;
     if (isEvolution(card.id)) return false;
     if (meta(card.id).speedAttacker) return false;
+    // Speed Attacker is often GRANTED rather than printed — Totto Pipicchi gives it to
+    // every Dragon on BOTH sides. Reading only the printed flag meant the bot thought a
+    // creature was sick while the server knew it was ready, and the two disagreed.
+    if (liveKw(state, card).some(k => /^speedattacker/i.test(k))) return false;
     if (myState(state).turboRushActive) return false;
     return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
+  }
+
+  // The keywords the server says this creature currently has. The single source of
+  // truth for anything that can be granted, so the bot never disagrees with the engine.
+  function liveKw(state, card) {
+    const mine = myState(state);
+    return (mine && mine.liveKeywords && mine.liveKeywords[card.key]) || [];
   }
 
   // ---- mana: what can it actually afford right now? -------------------------
@@ -374,11 +385,9 @@ const Bot = (() => {
     // A creature with "attacks each turn if able" has to swing, and the server will
     // not let the turn end while it sits there. Send it in first rather than weighing
     // whether the attack is a good idea — it isn't optional.
-    const mustSwing = ready.find(c => {
-      const kw = (me.liveKeywords && me.liveKeywords[c.key]) || [];
-      return kw.some(k => /^mustattack/i.test(k)) ||
-             /attacks each turn/i.test(meta(c.id).effectText || '');
-    });
+    const mustSwing = ready.find(c =>
+      liveKw(state, c).some(k => /^mustattack/i.test(k)) ||
+      /attacks each turn/i.test(meta(c.id).effectText || ''));
     if (mustSwing) {
       const target = opp.shields.length
         ? { type: 'shield', key: opp.shields[0].key }
