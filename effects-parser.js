@@ -574,6 +574,16 @@ function parseAction(body, mods) {
       return { action: 'untap', count: c.count, optional: !!c.optional,
                selector: sel || { name: c.rest } };
     }
+    case 'destroyeither': {
+      // "destroyEither 1@5000 or 2@2000 oppCreature"
+      const txt = rest.join(' ');
+      const m2 = txt.match(/^(\d+)@(\d+)\s+or\s+(\d+)@(\d+)\s+(.+)$/i);
+      if (!m2) return null;
+      return { action: 'destroyEither',
+               modes: [ { count: parseInt(m2[1], 10), maxPower: parseInt(m2[2], 10) },
+                        { count: parseInt(m2[3], 10), maxPower: parseInt(m2[4], 10) } ],
+               selector: parseSelector(m2[5].trim()) || { name: m2[5].trim() } };
+    }
     case 'uncross': {
       const c = parseCount(rest);
       return { action: 'uncross', count: c.count,

@@ -1133,7 +1133,12 @@ function currentPower(card, ownerIdx) {
   return effectivePower(__stateRef, ownerIdx, card, false);
 }
 
-function legalTargetCount(me, opp, eff) {
+function legalTargetCount(me, opp, eff) { return legalTargetList(me, opp, eff).length; }
+
+// The same computation, returning the cards themselves. The handler previously only
+// asked "is anything legal?" and then trusted whatever key arrived, so a filtered
+// effect could be pointed at a card it was never allowed to hit.
+function legalTargetList(me, opp, eff) {
   __stateRef = (me && me.__state) || __stateRef;
   const zones = {
     oppBattle: opp.battlezone, ownBattle: me.battlezone, ownHand: me.hand,
@@ -1149,6 +1154,9 @@ function legalTargetCount(me, opp, eff) {
   if (eff.filter === 'creature') list = list.filter(c => !isSpellCard(c.id));
   if (eff.filter === 'spell') list = list.filter(c => isSpellCard(c.id));
   if (eff.filter === 'nonEvolution') list = list.filter(c => !/evolution/i.test((cardMeta(c.id) || {}).type || ''));
+  // a multicoloured card is one printed with more than one civilization
+  if (eff.filter === 'monocolored') list = list.filter(c => civsOf(c.id).length <= 1);
+  if (eff.filter === 'multicolored') list = list.filter(c => civsOf(c.id).length > 1);
   if (eff.requireBlocker) list = list.filter(c => isBlocker(c.id));
   if (eff.maxPower != null) list = list.filter(c => {
     const ownerIdx = opp.battlezone.includes(c) ? state0Index(opp) : state0Index(me);
@@ -1162,7 +1170,7 @@ function legalTargetCount(me, opp, eff) {
   if (eff.zone === 'oppBattle' || eff.zone === 'anyBattle') {
     list = list.filter(c => !(opp.battlezone.includes(c) && isUnchoosable(c.id)));
   }
-  return list.length;
+  return list;
 }
 
 function isUnchoosable(id) {
@@ -2066,6 +2074,9 @@ function filtersToEngine(sel) {
     else if (f.key === 'blocker' && !f.negate) out.requireBlocker = true;
     else if (f.key === 'untapped') out.filter = 'untapped';
     else if (f.key === 'evolution' && f.negate) out.filter = 'nonEvolution';
+    // Roulette Beam only hits single-civilization creatures. A multicoloured card is
+    // simply one that lists more than one civilization.
+    else if (f.key === 'multicolored') out.filter = f.negate ? 'monocolored' : 'multicolored';
     else if (f.key === 'creature') out.filter = 'creature';
     else if (f.key === 'spell') out.filter = 'spell';
     else if (f.key === 'civ') { if (f.negate) out.negCiv = f.value; else out.civ = f.value; }
@@ -2633,6 +2644,31 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       case 'shuffleDeck': {
         me.deck = shuffle(me.deck);
         logs.push('shuffled their deck.');
+        break;
+      }
+      case 'destroyEither': {
+        // One prompt covering both shapes: pick up to the largest count, from every
+        // creature either mode could legally hit. The selection is validated against
+        // the modes on resolution, so "two big ones" cannot slip through.
+        const modes = e.modes || [];
+        const widest = Math.max(...modes.map(m => m.maxPower));
+        const most = Math.max(...modes.map(m => m.count));
+        const zoneName2 = zoneNameOf(e.selector) || 'oppBattle';
+        const list2 = listForZone(me, opp, zoneName2)
+          .filter(c => { const pw = effectivePower(state, opp === me ? meIdx : oppIdx, c, false);
+                         return pw == null || pw <= widest; });
+        if (!list2.length) { logs.push(cardLabel(cardId) + ': nothing it can destroy.'); break; }
+        me.pendingMulti = {
+          id: newKey(), zone: zoneName2, action: 'destroy',
+          keys: list2.map(c => c.key), max: most,
+          modes,                                   // validated when the player answers
+          source: cardLabel(cardId), sourceKey: cardKey,
+          spellKey: isSpellCard(cardId) ? cardKey : null,
+          prompt: 'Destroy 1 creature with power ' + modes[0].maxPower +
+                  ' or less, OR ' + modes[1].count + ' creatures with power ' +
+                  modes[1].maxPower + ' or less.'
+        };
+        defer = true;
         break;
       }
       case 'uncross': {
@@ -3430,11 +3466,17 @@ function battlefieldSlot(me) {
 
 // Single row — overlap is fine and preferred over wrapping to a second row.
 function manaSlot(me) {
-  const slot = me.mana.length;
-  // Mana cards are smaller now, so a wider step still fits the row and stops the
-  // fan from bunching up into an unreadable pile.
+  // Positions must be found, not counted. Using the array length meant that when a
+  // card LEFT the mana zone — bounced, destroyed, moved — the next charge reused a
+  // position that was still occupied, and the cards stacked on top of each other.
   const cols = 12;
-  const col = slot % cols;
+  const step = 8;
+  const taken = new Set((me.mana || []).map(m => m.x).filter(x => x != null));
+  let col = 0;
+  for (let i = 0; i < cols; i++) {
+    if (!taken.has(2 + i * step)) { col = i; break; }
+    col = (me.mana.length) % cols;      // every column full: fall back to wrapping
+  }
   // y is a small inset, not 0: absolutely positioned cards measure from the zone's
   // border, so y=0 makes the card sit flush against the edge and look like it's
   // spilling out of the zone.
@@ -4519,11 +4561,20 @@ wss.on('connection', (ws) => {
         if (i === -1) return;
         const eff = me.pendingTargets[i];
         // if the board changed and nothing is legal any more, drop the prompt
-        if (legalTargetCount(me, opp, eff) === 0) {
+        const legal = legalTargetList(me, opp, eff);
+        if (legal.length === 0) {
           me.pendingTargets.splice(i, 1);
           resolveSpellCard(me, eff, extraLogs);
           logText = 'had no legal target for ' + eff.source + '.';
           break;
+        }
+        // The chosen card must be one of them. Checking only that SOMETHING was legal
+        // let a filtered effect be pointed at a card it could never hit — Roulette Beam
+        // happily destroyed a multicoloured creature it is not allowed to touch.
+        if (msg.key && !legal.some(c => c.key === msg.key)) {
+          send(ws, { type: 'summonRejected',
+            reason: eff.source + " can't target that card." });
+          return;
         }
         let destroyedCost = null;
         const zones = {
@@ -4753,6 +4804,26 @@ wss.on('connection', (ws) => {
         if (!pm || pm.id !== msg.effectId) return;
         let keys = Array.isArray(msg.keys) ? msg.keys.filter(k => pm.keys.includes(k)) : [];
         if (pm.max) keys = keys.slice(0, pm.max);
+        // A modal removal only allows certain shapes — one big creature OR several
+        // small ones. Check the picks fit one of them before destroying anything.
+        if (pm.modes && keys.length) {
+          const powerOfKey = (k) => {
+            for (let pi = 0; pi < s.players.length; pi++) {
+              const c = s.players[pi].battlezone.find(x => x.key === k);
+              if (c) return effectivePower(s, pi, c, false);
+            }
+            return null;
+          };
+          const picked = keys.map(powerOfKey);
+          const fits = pm.modes.some(mode =>
+            keys.length <= mode.count && picked.every(p => p == null || p <= mode.maxPower));
+          if (!fits) {
+            const shapes = pm.modes.map(mo => mo.count + ' at ' + mo.maxPower + ' or less').join(', or ');
+            send(ws, { type: 'summonRejected',
+              reason: pm.source + ': choose ' + shapes + '.' });
+            return;
+          }
+        }
         const zoneOf = z => ({
           oppBattle: { owner: opp, list: opp.battlezone },
           ownBattle: { owner: me,  list: me.battlezone },
