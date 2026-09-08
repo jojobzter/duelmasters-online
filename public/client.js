@@ -1968,6 +1968,11 @@ function isSummoningSick(state, card) {
   if (isEvolutionById(card.id)) return false;    // evolutions can attack the turn they arrive
   if (cardMetaFor(card.id).speedAttacker) return false;
   const mine = state.players[state.you];
+  // Speed Attacker can be GRANTED as well as printed — Totto Pipicchi gives it to every
+  // Dragon. The server already allows the attack; without this the client refused to
+  // offer it, so the creature looked summoning-sick even though it wasn't.
+  const kw = (mine && mine.liveKeywords && mine.liveKeywords[card.key]) || [];
+  if (kw.some(k => /^speedattacker/i.test(k))) return false;
   if (mine && mine.turboRushActive) return false;
   return card.summonedTurn != null && card.summonedTurn === state.turnNumber;
 }
@@ -2066,7 +2071,14 @@ function openBlockModal(state) {
     (lightStealth ? " It has Light Stealth — you can't block it while you have Light cards in your mana zone." : ' Block with a Blocker, or let it through.');
   const grid = document.getElementById('block-grid');
   grid.innerHTML = '';
-  const blockers = lightStealth ? [] : me.battlezone.filter(c => !c.tapped && cardMetaFor(c.id).blocker);
+  // Blocker can be granted too, so read the server's live keyword list as well as the
+  // printed metadata — same blind spot that hid granted Speed Attacker.
+  const hasKwC = (owner, c, name) => {
+    const kw = (owner && owner.liveKeywords && owner.liveKeywords[c.key]) || [];
+    return kw.some(k => new RegExp('^' + name, 'i').test(k));
+  };
+  const blockers = lightStealth ? [] : me.battlezone.filter(c =>
+    !c.tapped && (cardMetaFor(c.id).blocker || hasKwC(me, c, 'blocker')));
   blockers.forEach(c => {
     const d = document.createElement('div');
     d.className = 'pick';
