@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -896,6 +896,99 @@ if (WHICH === 'bot') {
       next(i + 1);
     }, 900);
   })(0);
+
+}
+
+if (WHICH === 'deadlock') {
+  // A bot must always be able to end its turn. This reproduces the exact board that
+  // froze a live game: a "must attack" creature made non-sick by the OPPONENT's Totto
+  // Pipicchi, which the bot considered summoning-sick and so never attacked with.
+  // Reproduce the freeze: opponent has a mustAttack creature made non-sick by MY Totto.
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const log=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js');
+  console.log=log;
+  const wss=server.__wss, rooms=server.__rooms;
+
+  // real bot, with the timer stub so it runs instantly
+  const botSrc = fs.readFileSync('/home/claude/duelmasters/public/bot.js','utf8');
+  const pending=new Map(); let nextId=1; const order=[];
+  function makeBot(){
+    const setTimeout=(fn)=>{const id=nextId++;pending.set(id,fn);order.push(id);return id;};
+    const clearTimeout=(id)=>pending.delete(id);
+    return eval('(function(setTimeout, clearTimeout){'+botSrc+'; return Bot; })')(setTimeout,clearTimeout);
+  }
+  function drain(limit){let ran=0;while(order.length&&ran<(limit||500)){const id=order.shift();const fn=pending.get(id);if(!fn)continue;pending.delete(id);try{fn();}catch(e){}ran++;}return ran;}
+  const norm=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  const META=new Map();
+  for(const r of CARDS) if(r.Name){const y=v=>/^(y|yes|true|1)$/i.test(String(v==null?'':v).trim());
+   const n=v=>{const x=parseInt(String(v==null?'':v).replace(/[^0-9-]/g,''),10);return Number.isFinite(x)?x:null;};
+   if(!META.has(norm(r.Name))) META.set(norm(r.Name),{name:String(r.Name).trim(),cost:n(r['Mana Cost']),power:n(r.Power),
+    type:String(r.Type||''),race:String(r.Race||''),civs:String(r.Civilization||'').split('/').map(s=>s.trim()).filter(Boolean),
+    blocker:y(r['Blocker (Yes/No)']),doubleBreaker:y(r['Double Breaker']),tripleBreaker:y(r['Triple Breaker']),
+    speedAttacker:y(r['Speed Attacker (yes/No)']),shieldTrigger:y(r['Shield Trigger (Yes/No)']),slayer:y(r.Slayer),
+    attackRestriction:String(r['Attack restriction']||'none'),effectText:r.Effect?String(r.Effect):''});}
+  global.cardMetaFor=id=>META.get(norm(String(id).split('/').pop()))||{};
+  global.displayName=id=>String(id).split('/').pop();
+  global.fetch=()=>Promise.reject(new Error('offline'));
+
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;if(this.onMsg)this.onMsg(m);},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const names=['Totto Pipicchi','Deadly Fighter Braid Claw','Gonta, the Warrior Savage','Cragsaur',
+               'Immortal Baron, Vorg','Crimson Hammer','Bolshack Dragon','Comet Missile','Chitta Peloru','Cocco Lupia'];
+  const deck=[]; for(const n of names) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+
+  const bot = makeBot();
+  bot.start({ seatIdx:1, deck, send:(m)=>say(b,m) });
+  b.onMsg = (m)=>{ if(m.type==='state') bot.onState(m.state); };
+  b.onMsg2 = null;
+  // feed rejections to the bot, as the real client does
+  const origSend = b.send.bind(b);
+
+  const room=rooms.get(j.room), S=room.state;
+  S.turnNumber=12; S.activeTurn=1;              // the COMPUTER's turn
+  S.players[0].battlezone = [{ key:'totto', id:'X/Totto Pipicchi', tapped:false, summonedTurn:10 }];
+  S.players[0].shields = [{key:'s1',id:'X/Cragsaur',faceUp:false,slot:0},{key:'s2',id:'X/Cragsaur',faceUp:false,slot:1}];
+  S.players[1].battlezone = [
+    { key:'braid', id:'X/Deadly Fighter Braid Claw', tapped:false, summonedTurn:12 },  // summoned THIS turn
+    { key:'gonta', id:'X/Gonta, the Warrior Savage', tapped:true,  summonedTurn:9 }    // already attacked
+  ];
+  S.players[1].hand = [];
+  S.players[1].mana = [];
+
+  say(b,{type:'drawCard',force:true});
+  const view = b.lastState;
+  const kw = (view.players[view.you].liveKeywords||{})['braid']||[];
+  console.log('Braid Claw keywords the bot receives:', JSON.stringify(kw));
+  console.log('summonedTurn', S.players[1].battlezone[0].summonedTurn, '= turnNumber', S.turnNumber, '-> printed-sick');
+  console.log();
+
+  // let the bot run and see whether it ever ends its turn
+  let passes = 0, ended = false;
+  for (let i = 0; i < 60; i++) {
+    bot.onState(b.lastState);
+    const ran = drain(400);
+    passes += ran;
+    if (S.activeTurn !== 1) { ended = true; break; }
+    if (ran === 0) break;
+  }
+  console.log('bot actions run:', passes, '| turn ended:', ended);
+  console.log(ended ? 'no deadlock' : 'DEADLOCK — the bot cannot end its turn');
+  process.exit(ended?0:1);
 
 }
 
