@@ -20,7 +20,41 @@ let META_CACHE = new Map();
 let STATIC_CACHE = new Map();
 
 const app = express();
-app.use(express.static(path.join(__dirname, 'public')));
+// index.html is served with fresh version stamps on its script and stylesheet links,
+// computed from the files' current contents. A deploy therefore changes the URLs, and
+// no browser or proxy can serve a stale client against a new server.
+app.get(['/', '/index.html'], (req, res) => {
+  const pubDir = path.join(__dirname, 'public');
+  let html = fs.readFileSync(path.join(pubDir, 'index.html'), 'utf8');
+  for (const asset of ['client.js', 'bot.js', 'style.css']) {
+    let stamp = '0';
+    try {
+      stamp = crypto.createHash('md5')
+        .update(fs.readFileSync(path.join(pubDir, asset)))
+        .digest('hex').slice(0, 8);
+    } catch (e) { /* missing file: leave the link alone */ }
+    html = html.replace(new RegExp(asset.replace('.', '\\.') + '(\\?v=[a-f0-9]+)?', 'g'),
+                        asset + '?v=' + stamp);
+  }
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(html);
+});
+
+// Static files are served with a validation check rather than blind caching. Without
+// this the browser kept an old client.js after a deploy, so engine fixes appeared not
+// to work at all — the server was correct and the page running against it was stale.
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: true,
+  lastModified: true,
+  setHeaders: (res, filePath) => {
+    // HTML, JS and CSS must be revalidated every load; images and sounds may be cached
+    if (/\.(html|js|css)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+    } else {
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+    }
+  }
+}));
 
 // ---- Card database (name -> {name, cost, type, civs[]}), loaded from any
 // .xlsx file sitting in the carddata/ folder — no specific filename required.
