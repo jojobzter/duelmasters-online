@@ -1992,7 +1992,12 @@ function untappedAttackCivC(id) {
   if (!m) return null;
   return m[1] || true;
 }
-function canAttackUntappedTargetC(id, targetId) {
+function canAttackUntappedTargetC(id, targetId, attackerKey, me) {
+  // "Attack untapped creatures" can be GRANTED as well as printed — Chitta Peloru
+  // gives it to every Dragon. This read only the printed restriction, so the client
+  // refused to offer the target even though the server would have allowed it.
+  const kw = (me && me.liveKeywords && attackerKey && me.liveKeywords[attackerKey]) || [];
+  if (kw.some(k => /^(attackuntapped|ignoreattackrestrictions)/i.test(k))) return true;
   const c = untappedAttackCivC(id);
   if (!c) return false;
   if (c === true) return true;
@@ -2020,8 +2025,10 @@ function openAttackTargetModal(card, state) {
   const name = displayName(card.id);
   document.getElementById('attack-target-title').textContent = 'Attack with ' + name;
   const legal = opp.battlezone.filter(c => {
-    if (!c.tapped && !canAttackUntappedTargetC(card.id, c.id)) return false;
-    if (blockerOnlyC(card.id) && !cardMetaFor(c.id).blocker) return false;
+    if (!c.tapped && !canAttackUntappedTargetC(card.id, c.id, card.key, me)) return false;
+    // a granted Blocker counts too, same as a printed one
+    if (blockerOnlyC(card.id) && !cardMetaFor(c.id).blocker &&
+        !((opp.liveKeywords || {})[c.key] || []).some(k => /^blocker/i.test(k))) return false;
     return true;
   });
   document.getElementById('attack-target-sub').textContent =
@@ -2313,7 +2320,7 @@ function selectableKeysFor(state, me, opp) {
     if (!card) { attackMode = null; return null; }
     const keys = new Set();
     opp.battlezone.forEach(c => {
-      if (!c.tapped && !canAttackUntappedTargetC(card.id, c.id)) return;
+      if (!c.tapped && !canAttackUntappedTargetC(card.id, c.id, card.key, me)) return;
       if (blockerOnlyC(card.id) && !isBlockerById(c.id)) return;
       keys.add(c.key);
     });
