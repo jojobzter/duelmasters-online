@@ -1947,6 +1947,12 @@ function openTargetPickModal(eff, me, opp) {
     });
     grid.appendChild(d);
   });
+  // A mandatory effect offers no way out — hide the skip button rather than let the
+  // player press something the server will refuse.
+  {
+    const skipBtn = document.getElementById('btn-target-pick-skip');
+    if (skipBtn) skipBtn.style.display = (eff.optional === false && valid.length) ? 'none' : '';
+  }
   document.getElementById('target-pick-modal').style.display = 'flex';
 }
 document.getElementById('btn-target-pick-skip').addEventListener('click', () => {
