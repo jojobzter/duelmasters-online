@@ -2318,6 +2318,11 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           civ: ex.civ, negCiv: ex.negCiv, race: ex.race,
           source: cardLabel(cardId), sourceKey: cardKey,
           altZones: zoneNames.length > 1 ? zoneNames : null,
+          // Whether the player may decline. Without this every prompt looked optional
+          // and a mandatory drawback — Aqua Escort returning one of YOUR creatures —
+          // could be skipped entirely.
+          // the flag arrives either on the clause or in its modifier bag
+          optional: !!(e.optional || (e.mods && e.mods.optional)),
           spellKey: isSpellCard(cardId) ? cardKey : null
         };
 
@@ -5023,6 +5028,14 @@ wss.on('connection', (ws) => {
         const i = me.pendingTargets.findIndex(t => t.id === msg.effectId);
         if (i === -1) return;
         const eff = me.pendingTargets[i];
+        // A mandatory effect cannot be declined while a legal target exists. Aqua
+        // Escort MUST return one of your creatures; the skip button applied to every
+        // prompt regardless, so the drawback could simply be ignored.
+        if (!eff.optional && legalTargetCount(me, opp, eff) > 0) {
+          send(ws, { type: 'summonRejected',
+            reason: eff.source + ' is not optional — you must choose a target.' });
+          return;
+        }
         logText = "didn't use " + eff.source + '.';
         me.pendingTargets.splice(i, 1);
         resolveSpellCard(me, eff, extraLogs);
