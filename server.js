@@ -1154,7 +1154,8 @@ function pendingPromptTotal(p) {
   return (p.pendingTargets || []).length + (p.pendingDiscards || []).length +
     (p.pendingMulti ? 1 : 0) + (p.pendingMultiQueue || []).length + (p.pendingSearch ? 1 : 0) +
     (p.pendingRaceChoices || []).length + (p.pendingTruce ? 1 : 0) +
-    (p.pendingShieldTriggers || []).length + (p.pendingManaDiscards || 0);
+    (p.pendingShieldTriggers || []).length + (p.pendingManaDiscards || 0) +
+    (p.pendingSilentSkills || []).length;
 }
 
 // Counts the targets an effect could legally hit right now. Used so an effect with
@@ -1456,6 +1457,13 @@ function selectorMatches(state, srcOwnerIdx, srcCard, sel, cardOwnerIdx, card) {
       case 'tapped': ok = !!card.tapped; break;
       case 'untapped': ok = !card.tapped; break;
       case 'blocker': ok = isBlocker(card.id); break;
+      // "ownCreature[silentSkill]" — Burnwisp Lizard and Mystic Magician single out
+      // creatures that HAVE a Silent Skill, so the flag has to be readable as a filter.
+      case 'silentskill':
+        ok = hasSheetTrigger(card.id, 'silentskill') || hasSheetTrigger(card.id, 'tapability') ||
+             hasKw(selfGrantedKeywords(card.id), 'silentskill');
+        break;
+      case 'multicolored': ok = civsOf(card.id).length > 1; break;
       case 'evolution': ok = /evolution/i.test((cardMeta(card.id) || {}).type || ''); break;
       case 'creature': ok = !isSpellCard(card.id); break;
       case 'spell': ok = isSpellCard(card.id); break;
@@ -2899,6 +2907,13 @@ function discardRedirect(state, ownerIdx, card, logs) {
 // THE guard. If the spreadsheet describes this card for this trigger, the sheet is
 // authoritative and every hardcoded path for it must stand down — otherwise the
 // effect happens twice.
+// Does this card have a Silent Skill? Either spelling in the sheet counts:
+//   "silentSkill: <effect>"  or  "static: grant silentSkill self; tapAbility: <effect>"
+function hasSilentSkill(cardId) {
+  if (hasSheetTrigger(cardId, 'silentskill')) return true;
+  return hasKw(selfGrantedKeywords(cardId), 'silentskill');
+}
+
 function hasSheetTrigger(cardId, trigger) {
   const m = cardMeta(cardId) || {};
   return (m.parsedEffects || []).some(e => e.trigger === trigger);
@@ -3352,6 +3367,7 @@ function emptyPlayerState() {
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
     pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: [], pendingMultiQueue: [],
+    pendingSilentSkills: [],
     manualDrawsThisTurn: 0, manualChargesThisTurn: 0
   };
 }
@@ -3448,6 +3464,7 @@ function viewFor(room, viewerIdx) {
     })),
     pendingShieldTriggerCount: (p.pendingShieldTriggers || []).length,
     pendingShieldTriggers: isSelf ? (p.pendingShieldTriggers || []) : undefined,
+    pendingSilentSkills: isSelf ? (p.pendingSilentSkills || []) : undefined,
     // visible to BOTH players: lets an opponent (or the bot) know you're mid-decision
     pendingPromptCount: pendingPromptTotal(p),
     // what each card in hand really costs right now, after Cocco Lupia and friends
@@ -3984,11 +4001,26 @@ wss.on('connection', (ws) => {
           m.tapped = false; untapped++;
         }
         if (heldMana) extraLogs.push('mana stayed tapped (' + heldMana + ').');
+        // SILENT SKILL. The real rule: at the start of your turn, a creature that is
+        // ALREADY TAPPED may be kept tapped instead of untapping, and its Silent Skill
+        // fires. It is a replacement for untapping — not a tap ability, and not
+        // something used instead of attacking. So a creature must attack (or otherwise
+        // become tapped) on one turn before the skill is available on the next.
+        opp.pendingSilentSkills = [];
         for (const c of opp.battlezone) {
           const held = untapBlockedFor(s, oppIdx, 'creature', c);
+          if (c.tapped && hasSilentSkill(c.id) && !held) {
+            opp.pendingSilentSkills.push({ key: c.key, id: c.id, source: cardLabel(c.id) });
+            c.atkResolved = false;
+            continue;                       // left tapped until the choice is answered
+          }
           if (c.tapped && !skipsAutoUntap(c.id) && !held) { c.tapped = false; untapped++; }
           else if (c.tapped && held) extraLogs.push(cardLabel(c.id) + ' stayed tapped (' + held + ').');
           c.atkResolved = false;
+        }
+        if (opp.pendingSilentSkills.length) {
+          extraLogs.push('Silent Skill: ' + opp.pendingSilentSkills.map(x => x.source).join(', ') +
+                         ' may stay tapped to use their ability.');
         }
         // Miraculous Truce expires at the start of its caster's next turn
         if (opp.truceUntilTurn != null && s.turnNumber >= opp.truceUntilTurn) { opp.truceCiv = null; opp.truceUntilTurn = null; }
@@ -5022,6 +5054,25 @@ wss.on('connection', (ws) => {
         if (!c || !c.tapped) return;
         c.tapped = false;
         logText = 'untapped ' + cardLabel(c.id) + ' at end of turn.';
+        break;
+      }
+      case 'silentSkillChoice': {
+        // Answer for one creature: keep it tapped and use the skill, or untap normally.
+        const idxSS = (me.pendingSilentSkills || []).findIndex(x => x.key === msg.key);
+        if (idxSS === -1) return;
+        const entry = me.pendingSilentSkills[idxSS];
+        me.pendingSilentSkills.splice(idxSS, 1);
+        const card = me.battlezone.find(c => c.key === entry.key);
+        if (!card) { logText = cardLabel(entry.id) + ' had already left the battle zone.'; break; }
+        if (msg.use) {
+          // stays tapped; the ability resolves after the rest of the untap step
+          firePar(s, idx, card, 'silentskill', extraLogs);
+          firePar(s, idx, card, 'tapability', extraLogs);
+          logText = 'kept ' + cardLabel(card.id) + ' tapped to use its Silent Skill.';
+        } else {
+          card.tapped = false;
+          logText = 'untapped ' + cardLabel(card.id) + ' normally.';
+        }
         break;
       }
       case 'effectTargetSkip': {
