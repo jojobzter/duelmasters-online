@@ -713,6 +713,16 @@ const Bot = (() => {
   }
 
   // ---- main loop ------------------------------------------------------------
+  // Silent Skill: keep the creature tapped and use the ability whenever it is offered.
+  // The creature has already attacked, so staying tapped costs nothing this turn.
+  function answerSilentSkill(state) {
+    const mine = myState(state);
+    const pend = (mine && mine.pendingSilentSkills) || [];
+    if (!pend.length) return false;
+    act(() => send({ type: 'silentSkillChoice', key: pend[0].key, use: true }), DELAY.fast);
+    return true;
+  }
+
   function onState(state) {
     if (!active || !state) return;
     lastState = state;
@@ -746,6 +756,9 @@ const Bot = (() => {
       return;
     }
     if (state.endGameRequestBy === null) answeredEndGameBy = null;
+
+    // A Silent Skill choice holds up the whole turn until it is answered.
+    if (answerSilentSkill(state)) return;
     if (state.surrenderBy !== null && state.surrenderBy !== state.you && answeredSurrenderBy !== state.surrenderBy) {
       answeredSurrenderBy = state.surrenderBy;
       act(() => send({ type: 'acceptSurrender' }), DELAY.fast);

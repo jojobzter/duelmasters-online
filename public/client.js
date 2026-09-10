@@ -1185,9 +1185,30 @@ function handleSeatMessage(seatIndex, msg) {
   if (msg.type === 'state') {
     seat.state = msg.state;
     if (isBotGame && seatIndex === 1) { Bot.onState(msg.state); return; }
+    askSilentSkill(msg.state);
     if (seatIndex === activeSeat) renderState(msg.state);
     return;
   }
+}
+
+// SILENT SKILL. At the start of your turn a creature that is already TAPPED may stay
+// tapped and use its ability instead of untapping. One question per creature.
+let silentSkillAsking = false;
+function askSilentSkill(state) {
+  if (silentSkillAsking || !state) return;
+  const mine = state.players[state.you];
+  const pend = (mine && mine.pendingSilentSkills) || [];
+  if (!pend.length) return;
+  const entry = pend[0];
+  silentSkillAsking = true;
+  // let the board render first, so the player can see the position they are deciding on
+  setTimeout(() => {
+    const use = confirm('Silent Skill — ' + entry.source + ' is tapped.\n\n' +
+      'Keep it tapped and use its Silent Skill?\n\n' +
+      'OK = use the skill (it stays tapped)\nCancel = untap it as normal');
+    silentSkillAsking = false;
+    sendMsg({ type: 'silentSkillChoice', key: entry.key, use: !!use });
+  }, 60);
 }
 
 function showSeatSwitcher() {
