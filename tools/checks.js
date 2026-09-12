@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1234,6 +1234,83 @@ if (WHICH === 'survivor') {
   check('power attacker spreads from Blazosaur Q', /powerattacker/i.test(gg2.kw), true);
   console.log();
   console.log(fail ? fail+' failure(s)' : 'Survivor sharing works');
+  process.exit(fail?1:0);
+
+}
+
+if (WHICH === 'slayer') {
+  // Slayer can be GRANTED as well as printed — Gigaling Q shares it with every
+  // Survivor. Battle resolution read only the printed flag, so a shared Slayer did
+  // nothing on either side of a battle.
+  // Gigaling Q shares Slayer with every Survivor — including when the Survivor is the
+  // DEFENDER, which is exactly the case in the reported game.
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const lg=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js');
+  console.log=lg;
+  const wss=server.__wss, rooms=server.__rooms;
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const deck=[]; for(const n of ['Gigaling Q','Factory Shell Q','Gonta, the Warrior Savage','Cragsaur','Comet Missile','Aqua Guard','Spiral Gate','Aqua Hulcus','Energy Stream','Bolshack Dragon']) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+  say(a,{type:'claimTurn'});
+  const S=rooms.get(j.room).state;
+  let pass=0,fail=0;
+  const check=(l,g,w)=>{const ok=g===w;console.log((ok?'  ok   ':'  FAIL ')+l.padEnd(62)+'got '+g);ok?pass++:fail++;};
+
+  // the reported situation: their 4000 attacks my 2000 Survivor, with Gigaling Q out
+  const setup = (withGigaling) => {
+    S.combat=null; S.turnNumber=9; S.activeTurn=1;
+    S.players[0].battlezone=[{key:'fs',id:'X/Factory Shell Q',tapped:true,summonedTurn:2}];
+    if (withGigaling) S.players[0].battlezone.push({key:'gg',id:'X/Gigaling Q',tapped:false,summonedTurn:2});
+    S.players[1].battlezone=[{key:'gonta',id:'X/Gonta, the Warrior Savage',tapped:false,summonedTurn:2}];
+    S.players[0].graveyard=[]; S.players[1].graveyard=[];
+    const mk2=b.inbox.length;
+    say(b,{type:'declareAttack',key:'gonta',target:{type:'creature',key:'fs'}});
+    const rj=b.inbox.slice(mk2).find(m=>m.type==='summonRejected');
+    if (rj) console.log('     refused: ' + rj.reason.split('\n')[0]);
+    if (S.combat) console.log('     combat pending: ' + S.combat.phase);
+    return {
+      defenderDead: !S.players[0].battlezone.some(c=>c.key==='fs'),
+      attackerDead: !S.players[1].battlezone.some(c=>c.key==='gonta')
+    };
+  };
+
+  const without = setup(false);
+  console.log('     no Gigaling Q: defender died ' + without.defenderDead + ', attacker died ' + without.attackerDead);
+  check('without Gigaling Q the attacker survives', without.attackerDead, false);
+
+  const withIt = setup(true);
+  console.log('     with Gigaling Q: defender died ' + withIt.defenderDead + ', attacker died ' + withIt.attackerDead);
+  check('the defending Survivor still dies to the bigger creature', withIt.defenderDead, true);
+  check('shared Slayer takes Gonta down with it', withIt.attackerDead, true);
+
+  // and the other way round: a Survivor ATTACKING with shared slayer
+  S.combat=null; S.turnNumber=10; S.activeTurn=0;
+  S.players[0].battlezone=[
+    {key:'fs',id:'X/Factory Shell Q',tapped:false,summonedTurn:2},
+    {key:'gg',id:'X/Gigaling Q',     tapped:false,summonedTurn:2}
+  ];
+  S.players[1].battlezone=[{key:'big',id:'X/Bolshack Dragon',tapped:true,summonedTurn:2}];
+  say(a,{type:'declareAttack',key:'fs',target:{type:'creature',key:'big'}});
+  const bigDead = !S.players[1].battlezone.some(c=>c.key==='big');
+  console.log('     attacking into a 6000: the 6000 died ' + bigDead);
+  check('shared Slayer works when the Survivor attacks too', bigDead, true);
+  console.log();
+  console.log(fail ? fail+' failure(s)' : 'shared Slayer works on both sides of a battle');
   process.exit(fail?1:0);
 
 }
