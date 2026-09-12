@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -989,6 +989,88 @@ if (WHICH === 'deadlock') {
   console.log('bot actions run:', passes, '| turn ended:', ended);
   console.log(ended ? 'no deadlock' : 'DEADLOCK — the bot cannot end its turn');
   process.exit(ended?0:1);
+
+}
+
+if (WHICH === 'vortex') {
+  // A Vortex evolution is put on TWO creatures, one of each named race. Getting this
+  // wrong makes the game's strongest cards far too easy to play.
+  // Vortex evolution: TWO bases, one of each named race, both stacked underneath.
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const log=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js');
+  console.log=log;
+  const wss=server.__wss, rooms=server.__rooms;
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const deck=[]; for(const n of ['Cruel Naga, Avatar of Fate','Gigaslug','Aqua Guard','Cragsaur','Crimson Hammer','Comet Missile','Spiral Gate','Aqua Hulcus','Energy Stream','Bolshack Dragon']) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+  say(a,{type:'claimTurn'});
+  const room=rooms.get(j.room), S=room.state;
+  S.turnNumber=9; S.activeTurn=0;
+  let pass=0,fail=0;
+  const check=(l,g,w)=>{const ok=g===w;console.log((ok?'  ok   ':'  FAIL ')+l.padEnd(62)+'got '+g);ok?pass++:fail++;};
+  // Cruel Naga needs a Merfolk AND a Chimera. Gigaslug is a Chimera; find a Merfolk.
+  const merfolk = CARDS.find(c => c.Race && String(c.Race).includes('Merfolk') && !String(c.Type||'').includes('Evolution'));
+  console.log('     using Merfolk: ' + (merfolk ? merfolk.Name : 'NONE FOUND') + '   Chimera: Gigaslug');
+  const setup = (bz) => {
+    S.players[0].battlezone = bz;
+    S.players[0].hand = [{key:'naga',id:'X/Cruel Naga, Avatar of Fate'}];
+    S.players[0].mana = [];
+    for (let n=0;n<4;n++) S.players[0].mana.push({key:'mw'+n,id:'X/Aqua Guard',tapped:false});      // Water
+    for (let n=0;n<4;n++) S.players[0].mana.push({key:'md'+n,id:'X/Gigaslug',tapped:false});        // Darkness
+  };
+  const tryEvolve = (k1,k2) => {
+    const mark=a.inbox.length;
+    const msg={type:'summonCard',key:'naga'};
+    if (k1) msg.baseKey=k1; if (k2) msg.baseKey2=k2;
+    say(a,msg);
+    const rej=a.inbox.slice(mark).find(m=>m.type==='summonRejected');
+    return { ok: S.players[0].battlezone.some(c=>/Cruel Naga/.test(c.id)), why: rej && rej.reason.split('\n')[0] };
+  };
+  // only ONE base supplied -> refused
+  setup([{key:'ch',id:'X/Gigaslug',tapped:false,summonedTurn:2},
+         {key:'mf',id:'X/'+merfolk.Name,tapped:false,summonedTurn:2}]);
+  let r = tryEvolve('ch', null);
+  check('refused when only one base is given', !r.ok, true);
+  if (r.why) console.log('        ' + r.why);
+  // the SAME creature twice -> refused
+  setup([{key:'ch',id:'X/Gigaslug',tapped:false,summonedTurn:2},
+         {key:'mf',id:'X/'+merfolk.Name,tapped:false,summonedTurn:2}]);
+  r = tryEvolve('ch','ch');
+  check('refused when the same creature is given twice', !r.ok, true);
+  // two creatures that do NOT cover both races -> refused
+  setup([{key:'ch',id:'X/Gigaslug',tapped:false,summonedTurn:2},
+         {key:'ch2',id:'X/Gigaslug',tapped:false,summonedTurn:2}]);
+  r = tryEvolve('ch','ch2');
+  check('refused when the two do not cover both races', !r.ok, true);
+  if (r.why) console.log('        ' + r.why);
+  // a correct pair -> allowed, and BOTH are consumed
+  setup([{key:'ch',id:'X/Gigaslug',tapped:false,summonedTurn:2},
+         {key:'mf',id:'X/'+merfolk.Name,tapped:false,summonedTurn:2}]);
+  r = tryEvolve('ch','mf');
+  check('allowed with a Merfolk and a Chimera', r.ok, true);
+  const naga = S.players[0].battlezone.find(c=>/Cruel Naga/.test(c.id));
+  console.log('     battlezone: ' + S.players[0].battlezone.map(c=>c.id.split('/').pop()).join(', '));
+  console.log('     stacked underneath: ' + (naga && naga.under ? naga.under.map(u=>u.id.split('/').pop()).join(', ') : 'none'));
+  check('both bases were consumed from the battle zone', S.players[0].battlezone.length === 1, true);
+  check('both are stacked under the Vortex creature', !!(naga && naga.under && naga.under.length === 2), true);
+  console.log();
+  console.log(fail ? fail+' failure(s)' : 'Vortex evolution works properly');
+  process.exit(fail?1:0);
 
 }
 
