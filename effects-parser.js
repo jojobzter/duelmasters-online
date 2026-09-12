@@ -31,6 +31,7 @@ const TRIGGERS = new Set([
   'onownmanatograve', 'onowncreatureblocked', 'onevolve', 'onowncreaturebreak',
   'onanyspellcast', 'onwouldleavebattlezone', 'onoppdraw', 'onownmanaenter',
   'onanyfreeplay', 'onowncreaturetomana', 'onowncreaturewouldbedestroyed',
+  'onanycreatureevolve',
   // added with DM-08
   'onowncreatureenter', 'onowncreatureattacked', 'onshieldwouldbreak', 'onturnstart',
   'onoppturnstart', 'onowncreatureattack', 'onanycast', 'onownshieldtriggercast'
@@ -154,6 +155,12 @@ function parseCount(words) {
   if ((m = text.match(/^choose\s+/i))) text = text.slice(m[0].length);
   if ((m = text.match(/^all\b/i))) return { count: 'all', rest: text.slice(m[0].length).trim() };
   if ((m = text.match(/^any number of\b/i))) return { count: 'all', optional: true, rest: text.slice(m[0].length).trim() };
+  // "1+anyGrave[name=self].count" — a fixed base plus a counted amount. The Cloned
+  // cycle reads "choose one, then one more for each copy in each graveyard".
+  if ((m = text.match(/^(?:up to\s+)?(\d+)\s*\+\s*([a-zA-Z][\w\[\]=,.!~ ]*?\.count)\s/i))) {
+    return { count: { dynamic: m[2].trim(), plus: parseInt(m[1], 10) },
+             optional: /^up to/i.test(text), rest: text.slice(m[0].length).trim() };
+  }
   if ((m = text.match(/^up to ([a-zA-Z][\w\[\]=,.!~ ]*?\.count)\s/i))) {
     return { count: { dynamic: m[1].trim() }, optional: true, rest: text.slice(m[0].length).trim() };
   }
@@ -548,6 +555,18 @@ function parseAction(body, mods) {
       const c = parseCount(rest);
       return { action: 'shuffleIntoDeck', count: c.count,
                selector: parseSelector(c.rest) || { name: c.rest } };
+    }
+    case 'destroysharingpower': {
+      const m2 = rest.join(' ').match(/max\s*(\d+)/i);
+      return { action: 'destroySharingPower', maxPower: m2 ? parseInt(m2[1], 10) : null,
+               selector: { name: 'anyCreature', side: 'any', zone: 'battle', filters: [] } };
+    }
+    case 'vortex': {
+      // "vortex Merfolk+Chimera" — a Vortex evolution needs ONE of each race, not one
+      // creature matching either. Recorded as a property so the summon path can check it.
+      const spec = rest.join(' ').replace(/\s+/g, '');
+      const parts = spec.split('+').filter(Boolean);
+      return { action: 'vortexEvolution', races: parts };
     }
     case 'evocharge': {
       // the shared "Evo Charger" half: put a creature from mana under one of your

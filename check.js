@@ -15,6 +15,7 @@ const CHECKS = [
   ['server',  [],                      'server handlers run a real game end to end'],
   ['bot',     [],                      'the bot targets the opponent, not itself'],
   ['deadlock',[],                      'the bot can always end its turn'],
+  ['vortex',  [],                      'Vortex evolutions need two bases, not one'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']

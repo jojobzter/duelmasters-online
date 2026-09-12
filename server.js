@@ -632,6 +632,19 @@ function isEvolutionCard(id) {
   return /evolution/i.test(t);
 }
 // An evolution creature stacks onto one of your creatures sharing a race with it.
+// A Vortex evolution is put on TWO creatures, one of each named race — not one
+// creature matching either. Returns the required races, or null for a normal evolution.
+function vortexRaces(cardId) {
+  for (const e of ((cardMeta(cardId) || {}).parsedEffects || [])) {
+    if (e.action === 'vortexEvolution' && e.races && e.races.length >= 2) return e.races;
+  }
+  return null;
+}
+// does this creature satisfy one named race of a Vortex requirement?
+function matchesVortexRace(baseId, race) {
+  return racesOf(baseId).includes(String(race).toLowerCase());
+}
+
 function canEvolveOnto(evoId, baseId) {
   const evoRaces = racesOf(evoId), baseRaces = racesOf(baseId);
   if (!evoRaces.length || !baseRaces.length) return false;
@@ -1236,6 +1249,7 @@ const HANDLED_KEYWORDS = new Set([
   'breakshieldonblock', 'shieldbreakchoice', 'returnondestroy', 'tomanaondestroy',
   'ondestroy->hand', 'saver', 'untappermana', 'darknessstealth', 'wavestriker',
   'sharedtap', 'evolutionanyrace', 'silentskill', 'sharedability', 'race',
+  'shieldchooser',
   'shieldtriggercross', 'crossedgear', 'unblockable',
   'copystats', 'strikeback', 'cyclone', 'protectedfrom', 'immunetooppspellremoval',
   'breakercap', 'mustbeattacked', 'cannotattack', 'preventoppblock', 'negateshieldtrigger',
@@ -1464,10 +1478,38 @@ function selectorMatches(state, srcOwnerIdx, srcCard, sel, cardOwnerIdx, card) {
              hasKw(selfGrantedKeywords(card.id), 'silentskill');
         break;
       case 'multicolored': ok = civsOf(card.id).length > 1; break;
+      // "ownCreature[waveStriker]" — Wave Striker cards count each other, so the
+      // keyword has to be readable as a filter the same way silentSkill is.
+      case 'wavestriker': ok = hasKw(selfGrantedKeywords(card.id), 'wavestriker'); break;
+      // "anyCreature[lowestPower]" — Punch Trooper Bronks destroys the smallest
+      // creature in the battle zone, with the controller choosing among any tie.
+      case 'lowestpower': {
+        const all = state.players[0].battlezone.concat(state.players[1].battlezone);
+        let lo = null;
+        for (const c2 of all) {
+          const oi = state.players[0].battlezone.includes(c2) ? 0 : 1;
+          const pw2 = effectivePower(state, oi, c2, false);
+          if (pw2 == null) continue;
+          if (lo === null || pw2 < lo) lo = pw2;
+        }
+        const myOi = state.players[0].battlezone.includes(card) ? 0 : 1;
+        const mine2 = effectivePower(state, myOi, card, false);
+        ok = lo !== null && mine2 === lo;
+        break;
+      }
       case 'evolution': ok = /evolution/i.test((cardMeta(card.id) || {}).type || ''); break;
       case 'creature': ok = !isSpellCard(card.id); break;
       case 'spell': ok = isSpellCard(card.id); break;
-      case 'name': ok = normalizeCardKey(cardLabel(card.id)) === normalizeCardKey(String(f.value)); break;
+      case 'name': {
+        // "name=self" means "another copy of THIS card" — the Cloned cycle counts its
+        // own copies in both graveyards. Taken literally it looked for a card called
+        // "self" and always found none.
+        const want = /^self$/i.test(String(f.value))
+          ? normalizeCardKey(cardLabel(srcCard.id))
+          : normalizeCardKey(String(f.value));
+        ok = normalizeCardKey(cardLabel(card.id)) === want;
+        break;
+      }
       case 'cost': {
         const c = (cardMeta(card.id) || {}).cost;
         if (c == null) { ok = true; break; }
@@ -1548,6 +1590,23 @@ function conditionHolds(state, srcOwnerIdx, srcCard, condition, ctx) {
       default: return hp === v2;
     }
   }
+  // "You can summon this only if you have cast a spell this turn" (Yuluk, Moontear,
+  // Gariel). Both spellings appear in the sheet. Without this the condition fell
+  // through to the unknown-condition default and the restriction never applied.
+  // "oppDrewThisTurn>=2" — Gigavrand watches how many cards the opponent drew.
+  const dt = condition.match(/^oppDrewThisTurn\s*(>=|<=|=|>|<)\s*(\d+)$/i);
+  if (dt) {
+    const n3 = state.players[srcOwnerIdx === 0 ? 1 : 0].drewThisTurn || 0;
+    const v3 = parseInt(dt[2], 10);
+    switch (dt[1]) {
+      case '>=': return n3 >= v3; case '<=': return n3 <= v3;
+      case '>': return n3 > v3;   case '<': return n3 < v3;
+      default: return n3 === v3;
+    }
+  }
+  if (/^(castspellthisturn|spellcastthisturn)$/.test(c)) {
+    return (state.players[srcOwnerIdx].spellsCastThisTurn || 0) > 0;
+  }
   if (/^self\.tapped$/.test(c)) return !!srcCard.tapped;
   if (/^self\.untapped$/.test(c)) return !srcCard.tapped;
   if (/^self\.brokeshieldthisturn$/.test(c)) return !!srcCard.brokeShieldThisTurn;
@@ -1568,7 +1627,33 @@ function conditionHolds(state, srcOwnerIdx, srcCard, condition, ctx) {
     }
   }
 
+  // A bare selector with no comparison means "at least one of these exists" —
+  // Mad Guitar needs a Demon Command in play, written without an explicit count.
+  const bare = condition.match(/^([a-zA-Z]+\[[^\]]*\]|[a-zA-Z]+)$/);
+  if (bare && !/^(self|target)\./.test(condition)) {
+    const n0 = countSelector(state, srcOwnerIdx, srcCard, bare[1]);
+    if (Number.isFinite(n0)) return n0 >= 1;
+  }
+
   // "<selector>.count >= N"
+  // "ownCreature.distinctCivs>=5" — how many different civilizations you control
+  const dc = condition.match(/^(\S+)\.distinctCivs\s*(>=|<=|=|>|<)\s*(\d+)$/i);
+  if (dc) {
+    const sel = parseSelector(dc[1]) || { name: dc[1] };
+    const zones = { own: state.players[srcOwnerIdx].battlezone,
+                    opp: state.players[srcOwnerIdx === 0 ? 1 : 0].battlezone };
+    const list = sel.side === 'opp' ? zones.opp
+               : sel.side === 'own' ? zones.own : zones.own.concat(zones.opp);
+    const seen = new Set();
+    for (const c of list) for (const v of civsOf(c.id)) seen.add(v);
+    const n2 = seen.size, v2 = parseInt(dc[3], 10);
+    switch (dc[2]) {
+      case '>=': return n2 >= v2; case '<=': return n2 <= v2;
+      case '>': return n2 > v2;   case '<': return n2 < v2;
+      default: return n2 === v2;
+    }
+  }
+
   const cm = condition.match(/^(\S+)\.count\s*(>=|<=|=|>|<)\s*(\d+)$/i);
   if (cm) {
     const n = countSelector(state, srcOwnerIdx, srcCard, cm[1]);
@@ -2177,7 +2262,9 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
   // work it out now, otherwise it stays an object and every count check fails.
   const resolveCount = (c) => {
     if (c && typeof c === 'object' && c.dynamic) {
-      return countSelector(state, meIdx, selfRef, c.dynamic);
+      // a "plus" base is added on top: "1+anyGrave[name=self].count" means one, and
+      // one more for each copy found
+      return countSelector(state, meIdx, selfRef, c.dynamic) + (c.plus || 0);
     }
     return c;
   };
@@ -2208,7 +2295,7 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const rc = resolveCount(e.count);
         const n = typeof rc === 'number' ? rc : 1;
         let drawn = 0;
-        for (let i = 0; i < n; i++) { const c = me.deck.shift(); if (!c) break; me.hand.push({ id: c, key: newKey() }); drawn++; }
+        for (let i = 0; i < n; i++) { const c = me.deck.shift(); if (!c) break; me.hand.push({ id: c, key: newKey() }); drawn++; me.drewThisTurn = (me.drewThisTurn || 0) + 1; }
         logs.push('drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + ' with ' + cardLabel(cardId) + '.');
         break;
       }
@@ -2334,9 +2421,21 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           spellKey: isSpellCard(cardId) ? cardKey : null
         };
 
+        // MELOPPE: whoever would choose among SHIELDS, the other player chooses
+        // instead. Applied before the oppChoice handling below, so the two compose —
+        // a shield choice that was already the opponent's comes back to us.
+        let shieldSwap = false;
+        if (/Shield$/i.test(zoneName || '')) {
+          const meHasIt = me.battlezone.some(c => hasKw(grantedKeywords(state, meIdx, c), 'shieldchooser'));
+          const oppHasIt = opp.battlezone.some(c => hasKw(grantedKeywords(state, oppIdx, c), 'shieldchooser'));
+          // only one side's Meloppe matters for a given shield zone; two cancel out
+          if (meHasIt !== oppHasIt) shieldSwap = true;
+        }
+
         // "oppChoice" means the OPPONENT picks, from their own side. The prompt goes
         // to them, the zone flips to their perspective, and this card doesn't wait.
-        if (e.mods && e.mods.oppchoice) {
+        const oppPicks = !!(e.mods && e.mods.oppchoice) !== shieldSwap;
+        if (oppPicks) {
           const flipped = { oppBattle: 'ownBattle', ownBattle: 'oppBattle',
                             oppMana: 'ownMana', ownMana: 'oppMana',
                             oppHand: 'ownHand', ownHand: 'oppHand',
@@ -2344,7 +2443,8 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
           const forOpp = Object.assign({}, base, { zone: flipped, spellKey: null });
           if (legalTargetCount(opp, me, forOpp) > 0) {
             opp.pendingTargets.push(forOpp);
-            logs.push(cardLabel(cardId) + ': their opponent must choose.');
+            logs.push(cardLabel(cardId) + ': their opponent must choose.' +
+                      (shieldSwap ? ' (shield choice swapped)' : ''));
           } else {
             logs.push(cardLabel(cardId) + ': their opponent had no legal choice.');
           }
@@ -2682,6 +2782,31 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         logs.push(cardLabel(cardId) + ': each player names one creature — nothing else may attack.');
         break;
       }
+      case 'destroySharingPower': {
+        // The card says "choose a number up to N, destroy all creatures of that power".
+        // Pointing at a creature names the number, which reuses the normal prompt.
+        const cap = e.maxPower || 6000;
+        const pool = state.players[0].battlezone.concat(state.players[1].battlezone)
+          .filter(c => {
+            const oi = state.players[0].battlezone.includes(c) ? 0 : 1;
+            const pw2 = effectivePower(state, oi, c, false);
+            return pw2 != null && pw2 <= cap;
+          });
+        if (!pool.length) { logs.push(cardLabel(cardId) + ': no creature at ' + cap + ' or less.'); break; }
+        me.pendingTargets.push({
+          id: newKey(), zone: 'anyBattle', action: 'destroyAllAtThisPower',
+          maxPower: cap, source: cardLabel(cardId), sourceKey: cardKey,
+          optional: false,
+          spellKey: isSpellCard(cardId) ? cardKey : null
+        });
+        defer = true;
+        break;
+      }
+      case 'vortexEvolution':
+        // A declaration, not something that happens at resolution time: the two-base
+        // requirement is enforced when the card is summoned. Listed here so the
+        // coverage audit can see it is deliberately handled elsewhere.
+        break;
       case 'freeCast': {
         // "cast: free if ..." is a cost waiver, applied when the card is played.
         // Reaching it here means the condition held, so there is nothing further to do.
@@ -2909,6 +3034,11 @@ function discardRedirect(state, ownerIdx, card, logs) {
 // effect happens twice.
 // Does this card have a Silent Skill? Either spelling in the sheet counts:
 //   "silentSkill: <effect>"  or  "static: grant silentSkill self; tapAbility: <effect>"
+// The cast conditions the engine actually understands. Anything outside this is
+// logged at play time rather than silently permitted.
+const KNOWN_CAST_CONDITIONS =
+  /castspellthisturn|spellcastthisturn|\.count\s*[<>=]|distinctCivs|ownCrossGear|oppShield|ownShield|self\.|^[a-zA-Z]+\[/i;
+
 function hasSilentSkill(cardId) {
   if (hasSheetTrigger(cardId, 'silentskill')) return true;
   return hasKw(selfGrantedKeywords(cardId), 'silentskill');
@@ -3283,6 +3413,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
       const c = me.deck.shift();
       if (!c) break;
       me.hand.push({ id: c, key: newKey() });
+      me.drewThisTurn = (me.drewThisTurn || 0) + 1;
       drawn++;
     }
     extraLog.push('drew ' + drawn + ' card' + (drawn === 1 ? '' : 's') + ' with ' + cardLabel(cardId) + '.');
@@ -3367,7 +3498,7 @@ function emptyPlayerState() {
     spellsCastThisTurn: 0, turboRushActive: false, brokeShieldThisTurn: false, diamondCutterActive: false,
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
     pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: [], pendingMultiQueue: [],
-    pendingSilentSkills: [],
+    pendingSilentSkills: [], drewThisTurn: 0,
     manualDrawsThisTurn: 0, manualChargesThisTurn: 0
   };
 }
@@ -3492,6 +3623,7 @@ function viewFor(room, viewerIdx) {
     soundMap: s.soundMap,
     activeTurn: s.activeTurn,
     turnNumber: s.turnNumber,
+    shieldCount: s.shieldCount || 6,
     combat: s.combat,
     players: [mask(s.players[0], viewerIdx === 0), mask(s.players[1], viewerIdx === 1)],
     you: viewerIdx
@@ -3607,7 +3739,10 @@ function dealPlayer(room, idx) {
   const s = room.state;
   const deck = shuffle(room.decks[idx]);
   const p = s.players[idx];
-  p.shields = deck.splice(0, 6).map((id, i) => ({ id, key: newKey(), targeted: false, faceUp: false, slot: i }));
+  // 5 or 6 shields, chosen when the room is made. 5 is the original tournament rule;
+  // 6 is the later standard. Both players always get the same number.
+  const nShields = (room.state.shieldCount === 5) ? 5 : 6;
+  p.shields = deck.splice(0, nShields).map((id, i) => ({ id, key: newKey(), targeted: false, faceUp: false, slot: i }));
   p.hand = deck.splice(0, 5).map(id => ({ id, key: newKey() }));
   p.deck = deck;
   p.battlezone = []; p.mana = []; p.graveyard = []; p.showingHand = false;
@@ -3621,6 +3756,7 @@ function freshMatchState() {
     // whose turn the players have agreed it is. null until someone ends a turn.
     activeTurn: null,
     turnNumber: 0,
+    shieldCount: 6,          // 5 or 6; set from the create/join options
     creaturesEnteredThisTurn: 0,
     combat: null,          // the in-progress attack, if any
     players: [emptyPlayerState(), emptyPlayerState()]
@@ -3658,6 +3794,8 @@ wss.on('connection', (ws) => {
       }
       const roomCode = newRoomCode();
       const room = { code: roomCode, sockets: [ws, null], pendingJoin: null, decks: [null, null], state: freshMatchState() };
+      // the host picks 5 or 6 shields when making the table
+      room.state.shieldCount = (msg.shieldCount === 5) ? 5 : 6;
       rooms.set(roomCode, room);
       meta.roomCode = roomCode; meta.idx = 0;
       meta.name = (msg.name || '').trim().slice(0, 24) || null;
@@ -3704,22 +3842,33 @@ wss.on('connection', (ws) => {
 
     if (msg.type === 'submitDeck') {
       if (!Array.isArray(msg.deck) || !msg.deck.length) return;
-      // The client is not trusted with deck legality — a modified one could send
-      // forty copies of the same card. Enforce the same rules the deck builder does:
-      // 40 cards, at most 4 of any one NAME (not id, so reprints still count together).
+      // Deck SIZE is no longer capped — play whatever size you like. The 4-copy rule
+      // per card NAME still stands, since that is a real format rule rather than a
+      // limit on how big a deck may be. A sane upper bound remains so a modified
+      // client cannot send a million cards and exhaust the server.
+      const MAX_DECK = 400;
       const seen = new Map();
       const legal = [];
+      let trimmedCopies = 0;
       for (const raw of msg.deck) {
-        if (typeof raw !== 'string' || legal.length >= 40) continue;
+        if (typeof raw !== 'string' || legal.length >= MAX_DECK) continue;
         const name = normalizeCardKey(cardLabel(raw));
         const n = (seen.get(name) || 0) + 1;
-        if (n > 4) continue;
+        if (n > 4) { trimmedCopies++; continue; }
         seen.set(name, n);
         legal.push(raw);
       }
-      if (legal.length < msg.deck.slice(0, 40).length) {
+      // a deck must at least cover the opening deal
+      const needed = ((room.state.shieldCount === 5) ? 5 : 6) + 5;
+      if (legal.length < needed) {
         send(ws, { type: 'summonRejected',
-          reason: 'Your deck was adjusted to the 4-copy limit before dealing.' });
+          reason: 'That deck is too small — it needs at least ' + needed +
+                  ' cards to deal shields and an opening hand.' });
+        return;
+      }
+      if (trimmedCopies) {
+        send(ws, { type: 'summonRejected',
+          reason: trimmedCopies + ' card(s) over the 4-copy limit were removed before dealing.' });
       }
       room.decks[idx] = legal;
       dealPlayer(room, idx);
@@ -3942,7 +4091,7 @@ wss.on('connection', (ws) => {
         // per-turn counters reset as the turn passes
         me.spellsCastThisTurn = 0; me.turboRushActive = false; me.brokeShieldThisTurn = false; me.diamondCutterActive = false;
         // the once-per-turn manual actions are available again next turn
-        for (const p of s.players) { p.manualDrawsThisTurn = 0; p.manualChargesThisTurn = 0; }
+        for (const p of s.players) { p.manualDrawsThisTurn = 0; p.manualChargesThisTurn = 0; p.drewThisTurn = 0; }
         for (const c of me.battlezone) { c.brokeShieldThisTurn = false; c.attackedThisTurn = false; }
         s.creaturesEnteredThisTurn = 0;
 
@@ -4076,6 +4225,11 @@ wss.on('connection', (ws) => {
           const castCond = (cm.parsedEffects || []).find(e => e.trigger === 'cast');
           if (castCond && castCond.condition) {
             const fake = { id: cardId, key: '__playing__' };
+            if (!KNOWN_CAST_CONDITIONS.test(castCond.condition)) {
+              // Better to say so than to let an unrecognised restriction wave the card
+              // through, which is how Yuluk became a 1-mana 2500 with no drawback.
+              console.warn('unrecognised cast condition on ' + cardLabel(cardId) + ': ' + castCond.condition);
+            }
             if (!conditionHolds(s, idx, fake, castCond.condition, null)) {
               send(ws, { type: 'summonRejected', reason: cardLabel(cardId) + " can't be cast right now — its condition isn't met (" + castCond.condition + ")." });
               return;
@@ -4149,7 +4303,42 @@ wss.on('connection', (ws) => {
         // Evolution creatures are never summoned onto empty ground — they stack onto
         // one of your creatures that shares a race with them.
         let evoBase = null;
-        if (isEvolutionCard(cardId)) {
+        const vRaces = isEvolutionCard(cardId) ? vortexRaces(cardId) : null;
+        let evoBase2 = null;
+        if (vRaces) {
+          // VORTEX EVOLUTION: two bases, one of each named race, and they must be two
+          // different creatures. Both end up stacked under the new creature.
+          const need = vRaces.join(' and a ');
+          const forRace = (r) => me.battlezone.filter(b => !isSpellCard(b.id) && matchesVortexRace(b.id, r));
+          if (!forRace(vRaces[0]).length || !forRace(vRaces[1]).length) {
+            send(ws, { type: 'summonRejected',
+              reason: cardLabel(cardId) + ' is a Vortex evolution — you need a ' + need +
+                      ' creature in your battle zone.' });
+            return;
+          }
+          if (!msg.baseKey || !msg.baseKey2) {
+            send(ws, { type: 'summonRejected',
+              reason: cardLabel(cardId) + ' needs TWO creatures to evolve from: a ' + need + '.' });
+            return;
+          }
+          if (msg.baseKey === msg.baseKey2) {
+            send(ws, { type: 'summonRejected',
+              reason: cardLabel(cardId) + ' needs two DIFFERENT creatures.' });
+            return;
+          }
+          const b1 = me.battlezone.find(b => b.key === msg.baseKey);
+          const b2 = me.battlezone.find(b => b.key === msg.baseKey2);
+          if (!b1 || !b2) { send(ws, { type: 'summonRejected', reason: 'Those creatures are no longer in play.' }); return; }
+          // either order is fine, as long as between them they cover both races
+          const ok = (matchesVortexRace(b1.id, vRaces[0]) && matchesVortexRace(b2.id, vRaces[1])) ||
+                     (matchesVortexRace(b1.id, vRaces[1]) && matchesVortexRace(b2.id, vRaces[0]));
+          if (!ok) {
+            send(ws, { type: 'summonRejected',
+              reason: cardLabel(cardId) + ' needs a ' + need + ' — those two do not cover both.' });
+            return;
+          }
+          evoBase = b1; evoBase2 = b2;
+        } else if (isEvolutionCard(cardId)) {
           // "evolutionAnyRace" lets a card evolve from anything you control
           const anyRace = hasKw(selfGrantedKeywords(cardId), 'evolutionanyrace');
           const legal = anyRace
@@ -4179,6 +4368,12 @@ wss.on('connection', (ws) => {
           inheritTapped = !!evoBase.tapped;
           stack = (evoBase.under || []).concat([{ id: evoBase.id, key: evoBase.key }]);
           removeBattleCard(me, evoBase.key);
+          // a Vortex evolution consumes a second creature, which joins the same stack
+          if (evoBase2) {
+            inheritTapped = inheritTapped || !!evoBase2.tapped;
+            stack = stack.concat(evoBase2.under || [], [{ id: evoBase2.id, key: evoBase2.key }]);
+            removeBattleCard(me, evoBase2.key);
+          }
         } else {
           const slot = battlefieldSlot(me);
           x = slot.x; y = slot.y;
@@ -4201,6 +4396,9 @@ wss.on('connection', (ws) => {
         onCreatureEnteredBattlezone(s, c.key, c.id, extraLogs);
         if (evoBase) {
           firePar(s, idx, me.battlezone[me.battlezone.length - 1], 'onevolve', extraLogs);
+          // Copper Locust watches BOTH players evolve, so this fires board-wide
+          fireBoardWide(s, 'onanycreatureevolve', extraLogs,
+            { event: { cardId: c.id, key: c.key, ownerIdx: idx } });
           extraLogs.push('evolved ' + cardLabel(c.id) + ' from ' + cardLabel(evoBase.id) + '.');
         }
         if (isSpellCard(c.id)) {
@@ -4772,6 +4970,25 @@ wss.on('connection', (ws) => {
             applySharedTap(s, s.players.indexOf(owner), card);
             logText = 'used ' + eff.source + ' to tap ' + label + '.';
             break;
+          case 'destroyAllAtThisPower': {
+            const oiSel = s.players[0].battlezone.includes(card) ? 0 : 1;
+            const target = effectivePower(s, oiSel, card, false);
+            let killed = 0;
+            for (let pi = 0; pi < 2; pi++) {
+              const pl = s.players[pi];
+              for (const c2 of pl.battlezone.slice()) {
+                if (effectivePower(s, pi, c2, false) !== target) continue;
+                const k = pl.battlezone.findIndex(x => x.key === c2.key);
+                if (k === -1) continue;
+                pl.battlezone.splice(k, 1);
+                battleCardToGrave(pl, c2);
+                killed++;
+              }
+            }
+            logText = 'used ' + eff.source + ' to destroy every creature with power ' +
+                      target + ' (' + killed + ' destroyed).';
+            break;
+          }
           case 'grantKeywords': {
             card.tempGrants = card.tempGrants || [];
             for (const k of (eff.grantList || [])) card.tempGrants.push({ keyword: k.keyword, arg: k.arg });
