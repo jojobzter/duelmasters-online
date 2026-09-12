@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1070,6 +1070,87 @@ if (WHICH === 'vortex') {
   check('both are stacked under the Vortex creature', !!(naga && naga.under && naga.under.length === 2), true);
   console.log();
   console.log(fail ? fail+' failure(s)' : 'Vortex evolution works properly');
+  process.exit(fail?1:0);
+
+}
+
+if (WHICH === 'postattack') {
+  // A creature that destroys itself "after attacking" must stay on the table for the
+  // WHOLE attack, including its own shield-break prompt — and must then actually die.
+  // Marrow Ooze destroys itself AFTER its attack — not while its own shield-break
+  // prompt is still open.
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const log=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js');
+  console.log=log;
+  const wss=server.__wss, rooms=server.__rooms;
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const deck=[]; for(const n of ['Marrow Ooze, the Twister','Writhing Bone Ghoul','Cragsaur','Crimson Hammer','Comet Missile','Aqua Guard','Spiral Gate','Aqua Hulcus','Energy Stream','Bolshack Dragon']) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+  say(a,{type:'claimTurn'});
+  const room=rooms.get(j.room), S=room.state;
+  S.turnNumber=9; S.activeTurn=0;
+  let pass=0,fail=0;
+  const check=(l,g,w)=>{const ok=g===w;console.log((ok?'  ok   ':'  FAIL ')+l.padEnd(62)+'got '+g);ok?pass++:fail++;};
+
+  // attack "shields" WITHOUT naming one — exactly what the screenshot shows
+  S.players[0].battlezone=[{key:'ooze',id:'X/Marrow Ooze, the Twister',tapped:false,summonedTurn:2}];
+  S.players[1].battlezone=[];
+  S.players[1].shields=[
+    {key:'s1',id:'X/Cragsaur',faceUp:false,slot:0},
+    {key:'s2',id:'X/Cragsaur',faceUp:false,slot:1}
+  ];
+  say(a,{type:'declareAttack',key:'ooze',target:{type:'shield'}});
+  console.log('     combat phase: ' + (S.combat ? S.combat.phase + ', shieldsToBreak ' + S.combat.shieldsToBreak : 'none'));
+  const aliveDuring = S.players[0].battlezone.some(c=>/Marrow/.test(c.id));
+  console.log('     Marrow Ooze still on the table while breaking: ' + aliveDuring);
+  check('the attacker survives while its break prompt is open', aliveDuring, true);
+  check('combat is waiting in the breaking phase', !!(S.combat && S.combat.phase === 'breaking'), true);
+
+  // now click a shield to finish the attack
+  const shieldsBefore = S.players[1].shields.length;
+  say(a,{type:'breakShield',key:'s1'});
+  console.log('     shields: ' + shieldsBefore + ' -> ' + S.players[1].shields.length);
+  check('the shield actually broke', S.players[1].shields.length === shieldsBefore - 1, true);
+  check('and NOW Marrow Ooze is destroyed', !S.players[0].battlezone.some(c=>/Marrow/.test(c.id)), true);
+  check('it went to the graveyard', S.players[0].graveyard.some(c=>/Marrow/.test(c.id)), true);
+
+  // A DOUBLE BREAKER must survive until BOTH shields are broken.
+  S.combat = null;
+  S.players[0].battlezone=[{key:'db',id:'X/Bolshack Dragon',tapped:false,summonedTurn:2}];
+  S.players[0].battlezone[0].pendingSelfAction = null;
+  S.players[1].shields=[
+    {key:'t1',id:'X/Cragsaur',faceUp:false,slot:0},
+    {key:'t2',id:'X/Cragsaur',faceUp:false,slot:1},
+    {key:'t3',id:'X/Cragsaur',faceUp:false,slot:2}
+  ];
+  say(a,{type:'declareAttack',key:'db',target:{type:'shield'}});
+  console.log('     double breaker: shieldsToBreak ' + (S.combat ? S.combat.shieldsToBreak : '-'));
+  say(a,{type:'breakShield',key:'t1'});
+  const midway = !!S.combat;
+  console.log('     after 1 of 2 shields, combat still open: ' + midway);
+  check('a double breaker keeps breaking after the first shield', midway, true);
+  say(a,{type:'breakShield',key:'t2'});
+  console.log('     after both, shields left: ' + S.players[1].shields.length + ', combat: ' + (S.combat?'open':'closed'));
+  check('both shields broke', S.players[1].shields.length === 1, true);
+  check('combat closed once the breaking finished', !S.combat, true);
+
+  console.log();
+  console.log(fail ? fail+' failure(s)' : 'Marrow Ooze now survives its own attack');
   process.exit(fail?1:0);
 
 }
