@@ -17,6 +17,7 @@ const CHECKS = [
   ['deadlock',[],                      'the bot can always end its turn'],
   ['vortex',  [],                      'Vortex evolutions need two bases, not one'],
   ['postattack',[],                    'a self-destroying attacker finishes its attack first'],
+  ['survivor',[],                      'Survivors share every ability with each other'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']

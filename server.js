@@ -767,6 +767,13 @@ function breakerCount(state, ownerIdx, card) {
   const kw = grantedKeywords(state, ownerIdx, card);
   let extra = 0;
   if (hasKw(kw, 'extrabreaker') || hasKw(kw, 'additionalbreaker')) extra += 1;
+  // crewBreaker[<selector>] — one more shield for each creature the selector counts.
+  // Q-tronic Gargantua breaks one extra per other Survivor in your battle zone.
+  const crew = kwArg(kw, 'crewbreaker');
+  if (crew) {
+    const n = countSelector(state, ownerIdx, card, String(crew));
+    if (Number.isFinite(n) && n > 0) extra += n;
+  }
   const bump = kwArg(kw, 'breaker');
   if (bump) { const n = parseInt(String(bump).replace(/[^0-9]/g, ''), 10); if (Number.isFinite(n)) extra += n; }
   const cap = kwArg(kw, 'breakercap');
@@ -1242,6 +1249,7 @@ function isUnchoosable(id) {
 const HANDLED_KEYWORDS = new Set([
   'blocker', 'unblockable', 'unblockableby', 'lockblock', 'mustblock', 'blockervsdragon',
   'speedattacker', 'slayer', 'doublebreaker', 'triplebreaker', 'extrabreaker',
+  'crewbreaker',
   'additionalbreaker', 'breaker', 'powerattacker', 'mustattack', 'unattackable',
   'unattackableby', 'attackuntapped', 'attackableuntapped', 'ignoreattackrestrictions',
   'unchoosable', 'entersmanatapped', 'manatapped', 'enterstapped', 'enterstappedinmana',
@@ -1428,6 +1436,31 @@ const ATTACK_TRIGGERS = {
 // is asked about a card, so a buff appears the moment its source lands and vanishes
 // the moment it leaves. Everything here is driven by the spreadsheet.
 // ---------------------------------------------------------------------------
+
+// SURVIVOR. "Each of your Survivors has this creature's ability." So every ability
+// printed on any Survivor you control is shared by all of them. Rather than writing
+// the sharing into each card by hand — which was inconsistent and left some cards
+// doing nothing — the engine unions the clauses across your Survivors.
+function isSurvivor(cardId) {
+  return racesOf(cardId).includes('survivor');
+}
+// every clause this creature has for `trigger`, including those shared by your other
+// Survivors. Self-targeting clauses become self-targeting for the SHARING creature,
+// which is what "has this creature's ability" means.
+function survivorSharedClauses(state, ownerIdx, card, trigger) {
+  if (!card || !isSurvivor(card.id)) return [];
+  const out = [];
+  for (const other of state.players[ownerIdx].battlezone) {
+    if (other.key === card.key) continue;
+    if (!isSurvivor(other.id)) continue;
+    if (/evolution/i.test((cardMeta(other.id) || {}).type || '')) continue;
+    for (const e of ((cardMeta(other.id) || {}).parsedEffects || [])) {
+      if (e.trigger !== trigger) continue;
+      out.push(e);
+    }
+  }
+  return out;
+}
 
 function staticClauses(card) {
   let list = STATIC_CACHE.get(card.id);
@@ -1709,8 +1742,8 @@ function countSelector(state, srcOwnerIdx, srcCard, selText) {
 function staticPowerFactor(state, cardOwnerIdx, card) {
   let factor = 1;
   for (let si = 0; si < state.players.length; si++) {
-    for (const { src, bearer } of staticSources(state, si)) {
-      for (const e of staticClauses(src)) {
+    for (const { src, bearer, borrowFrom } of staticSources(state, si)) {
+      for (const e of staticClauses(borrowFrom || src)) {
         if (e.action !== 'buffMultiply') continue;
         const hits = bearer ? crossedTargetMatches(e.target, bearer, card)
                             : selectorMatches(state, si, src, e.target, cardOwnerIdx, card);
@@ -1728,6 +1761,26 @@ function staticPowerFactor(state, cardOwnerIdx, card) {
 function staticSources(state, si) {
   const p = state.players[si];
   const out = p.battlezone.map(c => ({ src: c, bearer: null }));
+  // SURVIVOR: every Survivor you control also carries the static abilities printed on
+  // your OTHER Survivors. Presented as an extra source whose "self" is this creature,
+  // so a clause like "+1000 self" lands on each Survivor rather than only its printer.
+  // inlined rather than calling isSurvivor, so this function stands alone when a test
+  // harness evaluates it in isolation
+  const isSv = (id) => racesOf(id).includes('survivor');
+  // A Survivor EVOLUTION creature receives shared abilities but does not give its own
+  // — it has no Survivor keyword of its own. Same for Promephius Q, which simply has
+  // no abilities to give.
+  const isDonor = (id) => isSv(id) && !/evolution/i.test((cardMeta(id) || {}).type || '');
+  const survivors = p.battlezone.filter(c => isSv(c.id));
+  if (survivors.length > 1) {
+    for (const holder of survivors) {
+      for (const donor of survivors) {
+        if (donor.key === holder.key) continue;
+        if (!isDonor(donor.id)) continue;
+        out.push({ src: holder, bearer: null, borrowFrom: donor });
+      }
+    }
+  }
   for (const g of (p.crossGear || [])) {
     if (!g.crossedTo) continue;                       // unattached gear does nothing
     const bearer = p.battlezone.find(c => c.key === g.crossedTo);
@@ -1745,8 +1798,8 @@ function crossedTargetMatches(sel, bearer, card) {
 function staticBuffTotal(state, cardOwnerIdx, card, ctx) {
   let bonus = 0;
   for (let si = 0; si < state.players.length; si++) {
-    for (const { src, bearer } of staticSources(state, si)) {
-      for (const e of staticClauses(src)) {
+    for (const { src, bearer, borrowFrom } of staticSources(state, si)) {
+      for (const e of staticClauses(borrowFrom || src)) {
         if (e.action !== 'buff') continue;
         // Gear only ever affects the creature it is crossed to; a creature source
         // uses the normal selector rules.
@@ -1791,8 +1844,8 @@ function grantedKeywords(state, cardOwnerIdx, card) {
   // keywords granted to this card for the rest of the turn
   for (const g of (card.tempGrants || [])) { out.add(g.keyword); if (g.arg) args[g.keyword] = g.arg; }
   for (let si = 0; si < state.players.length; si++) {
-    for (const { src, bearer } of staticSources(state, si)) {
-      for (const e of staticClauses(src)) {
+    for (const { src, bearer, borrowFrom } of staticSources(state, si)) {
+      for (const e of staticClauses(borrowFrom || src)) {
         if (e.action !== 'grant') continue;
         const hits = bearer ? crossedTargetMatches(e.selector, bearer, card)
                             : selectorMatches(state, si, src, e.selector, cardOwnerIdx, card);
@@ -3069,7 +3122,23 @@ function skipsAutoUntap(cardId) {
 function firePar(state, ownerIdx, card, trigger, logs, ctx) {
   if (!card) return { defer: false };
   const oppIdx = ownerIdx === 0 ? 1 : 0;
-  return runParsedEffects(state, ownerIdx, oppIdx, card.id, card.key, trigger, logs || [], [], ctx);
+  const res = runParsedEffects(state, ownerIdx, oppIdx, card.id, card.key, trigger, logs || [], [], ctx);
+  // SURVIVOR: this creature also has the triggered abilities of your other Survivors,
+  // so run theirs too — as though printed on this card.
+  const shared = survivorSharedClauses(state, ownerIdx, card, trigger);
+  if (shared.length) {
+    for (const donor of state.players[ownerIdx].battlezone) {
+      if (donor.key === card.key || !isSurvivor(donor.id)) continue;
+      // evolution Survivors receive but do not donate
+      if (/evolution/i.test((cardMeta(donor.id) || {}).type || '')) continue;
+      if (!((cardMeta(donor.id) || {}).parsedEffects || []).some(e => e.trigger === trigger)) continue;
+      // the donor's clauses, but acting on THIS creature
+      const r2 = runParsedEffects(state, ownerIdx, oppIdx, donor.id, card.key, trigger,
+                                  logs || [], [], ctx);
+      if (r2 && r2.defer) res.defer = true;
+    }
+  }
+  return res;
 }
 
 // Does the event that just happened satisfy a trigger's bracket filter?
