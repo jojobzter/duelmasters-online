@@ -568,7 +568,9 @@ document.getElementById('card-grid').addEventListener('click', (e) => {
   const id = thumb.dataset.cardId;
   if (!id) return;
   if (e.target.closest('.zoom-btn')) { e.stopPropagation(); openMagnify(id); return; }
-  if (currentDeck.length >= 40) return;
+  // Deck size is no longer capped at 40 — build whatever size you want. The 4-copy
+  // rule per card still applies, and a generous ceiling stops runaway clicking.
+  if (currentDeck.length >= 400) return;
   const name = (cardDB.get(id) || {}).name || id;
   if (currentDeck.filter(x => x === id).length >= 4) {
     alert('You can only have 4 copies of "' + name + '" in a deck.');
@@ -625,7 +627,12 @@ function refreshDeckList() {
     row.appendChild(btn);
     list.appendChild(row);
   }
-  document.getElementById('deck-count').textContent = currentDeck.length + ' / 40 cards';
+  {
+    // 40 is still the standard size, so show it as guidance rather than a limit
+    const n = currentDeck.length;
+    const el = document.getElementById('deck-count');
+    el.textContent = n + ' cards' + (n === 40 ? ' (standard)' : n < 40 ? ' (standard is 40)' : ' (above standard 40)');
+  }
 }
 
 function getSavedDecks() {
@@ -736,7 +743,10 @@ function refreshSavedDecks() {
 document.getElementById('btn-save-deck').addEventListener('click', async () => {
   const name = (document.getElementById('deck-name').value || '').trim();
   if (!name) { alert('Name your deck first.'); return; }
-  if (currentDeck.length !== 40) { if (!confirm('Deck has ' + currentDeck.length + ' cards, not 40. Save anyway?')) return; }
+  if (currentDeck.length < 11) {
+    alert('A deck needs at least 11 cards to deal shields and an opening hand.');
+    return;
+  }
   const decks = getSavedDecks();
   decks[name] = currentDeck.slice();
   setSavedDecks(decks);
@@ -857,7 +867,7 @@ function parseDecklist(raw) {
     const id = byName.get(normKeyClient(name)) || looseMap.get(loose(name));
     if (!id) { notFound.push(name); continue; }
     if (count > 4) { overLimit.push(name); count = 4; }
-    for (let i = 0; i < count && deck.length < 40; i++) deck.push(id);
+    for (let i = 0; i < count && deck.length < 400; i++) deck.push(id);
   }
   const capped = enforceDeckRules(deck);
   capped.trimmed.forEach(n => { if (!overLimit.includes(n)) overLimit.push(n); });
@@ -951,6 +961,13 @@ function sendOnSeat(seatIndex, msg) {
 const nameInput = document.getElementById('player-name');
 nameInput.value = localStorage.getItem('dm_playername') || '';
 nameInput.addEventListener('change', () => localStorage.setItem('dm_playername', nameInput.value.trim().slice(0, 24)));
+// 5 or 6 shields. 5 was the original tournament rule; 6 is the later standard.
+function chosenShieldCount() {
+  const el = document.getElementById('shield-count');
+  const v = el ? parseInt(el.value, 10) : 6;
+  return v === 5 ? 5 : 6;
+}
+
 function myName() { return nameInput.value.trim().slice(0, 24); }
 
 document.getElementById('btn-create-room').addEventListener('click', () => {
@@ -958,7 +975,7 @@ document.getElementById('btn-create-room').addEventListener('click', () => {
   if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
   isSolo = false;
   document.getElementById('room-info').textContent = 'Connecting to server (may take a minute if it was asleep)...';
-  openSeat(0, { type: 'create', name: myName() });
+  openSeat(0, { type: 'create', name: myName(), shieldCount: chosenShieldCount() });
 });
 document.getElementById('btn-join-room').addEventListener('click', () => {
   const decks = getSavedDecks();
@@ -1004,7 +1021,7 @@ document.getElementById('btn-vs-computer').addEventListener('click', () => {
   botDeck = healDeckIds(decks[botName]);
   isSolo = true; isBotGame = true;
   document.getElementById('room-info').textContent = 'Starting game against the computer...';
-  openSeat(0, { type: 'create', name: myName() });
+  openSeat(0, { type: 'create', name: myName(), shieldCount: chosenShieldCount() });
 });
 
 // music toggle, remembered between sessions
@@ -1023,7 +1040,7 @@ document.getElementById('btn-practice').addEventListener('click', () => {
   if (!selectedDeckName || !decks[selectedDeckName]) { alert('Select a deck above first.'); return; }
   practiceDeck = decks[selectedDeckName]; isSolo = true;
   document.getElementById('room-info').textContent = 'Starting practice game...';
-  openSeat(0, { type: 'create', name: myName() });
+  openSeat(0, { type: 'create', name: myName(), shieldCount: chosenShieldCount() });
 });
 function respondToJoin(accept) {
   document.getElementById('join-request-banner').style.display = 'none';
@@ -2297,6 +2314,20 @@ function isEvolutionById(id) { return /evolution/i.test(cardMetaFor(id).type || 
 function racesOfId(id) {
   return (cardMetaFor(id).race || '').toLowerCase().split('/').map(r => r.trim()).filter(Boolean);
 }
+// "static: vortex Merfolk+Chimera" in the effect text names the two required races.
+function vortexRacesClient(cardId) {
+  const txt = String(cardMetaFor(cardId).effectText || '');
+  const m = txt.match(/vortex\s+([A-Za-z ]+(?:\+[A-Za-z ]+)+)/i);
+  if (!m) return null;
+  const races = m[1].split('+').map(r => r.trim()).filter(Boolean);
+  return races.length >= 2 ? races : null;
+}
+function raceMatchesClient(cardId, race) {
+  if (!cardId) return false;
+  return String(cardMetaFor(cardId).race || '').toLowerCase()
+    .split('/').map(r => r.trim()).includes(String(race).toLowerCase());
+}
+
 function canEvolveOntoClient(evoId, baseId) {
   const a = racesOfId(evoId), b = racesOfId(baseId);
   return a.length && b.length && a.some(r => b.includes(r));
@@ -2329,6 +2360,30 @@ function selectableKeysFor(state, me, opp) {
   }
 
   if (evolveMode) {
+    // A Vortex evolution is put on TWO creatures, one of each named race, so the
+    // picker collects a first choice and then asks for the second.
+    const vRaces = vortexRacesClient(evolveMode.cardId);
+    if (vRaces) {
+      const first = evolveMode.firstKey;
+      const stillNeeded = first
+        ? vRaces.filter(r => !raceMatchesClient((me.battlezone.find(c => c.key === first) || {}).id, r))
+        : vRaces;
+      const legal2 = me.battlezone.filter(c =>
+        c.key !== first && stillNeeded.some(r => raceMatchesClient(c.id, r)));
+      if (!legal2.length) { evolveMode = null; return null; }
+      return {
+        keys: new Set(legal2.map(c => c.key)),
+        onClick: key => {
+          if (!first) { evolveMode = Object.assign({}, evolveMode, { firstKey: key }); renderState(state); return; }
+          sendMsg({ type: 'summonCard', key: evolveMode.handKey, baseKey: first, baseKey2: key });
+          evolveMode = null;
+        },
+        banner: 'Vortex evolution — ' + displayName(evolveMode.cardId) + ' needs a ' +
+                vRaces.join(' and a ') + '. ' +
+                (first ? 'Now click the second creature.' : 'Click the first creature.'),
+        showSkip: true, skipLabel: 'Cancel', onSkip: () => { evolveMode = null; renderState(state); }
+      };
+    }
     const legal = me.battlezone.filter(b => canEvolveOntoClient(evolveMode.cardId, b.id));
     if (!legal.length) { evolveMode = null; return null; }
     return {

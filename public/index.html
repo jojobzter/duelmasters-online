@@ -97,6 +97,13 @@
     <input id="player-name" placeholder="Your name (shown to your opponent)" maxlength="24" />
     <div id="selected-deck-display" class="selected-deck-display">No deck selected yet — pick one above and click "Select".</div>
     <div class="play-row">
+      <div class="shield-choice">
+        <label for="shield-count">Shields each:</label>
+        <select id="shield-count">
+          <option value="6" selected>6 shields (standard)</option>
+          <option value="5">5 shields (original rules)</option>
+        </select>
+      </div>
       <div><button id="btn-create-room">Create Private Game</button></div>
       <div>
         <input id="join-code" placeholder="Room code" maxlength="6" style="text-transform:uppercase" />
