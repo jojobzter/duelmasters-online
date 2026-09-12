@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1151,6 +1151,89 @@ if (WHICH === 'postattack') {
 
   console.log();
   console.log(fail ? fail+' failure(s)' : 'Marrow Ooze now survives its own attack');
+  process.exit(fail?1:0);
+
+}
+
+if (WHICH === 'survivor') {
+  // SURVIVOR: "Each of your Survivors has this creature's ability." Every ability on
+  // any Survivor you control is shared by all of them — and by nothing else.
+  // SURVIVOR: "Each of your Survivors has this creature's ability."
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const log=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js');
+  console.log=log;
+  const wss=server.__wss, rooms=server.__rooms;
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const deck=[]; for(const n of ['Smash Horn Q','Gigaling Q','Blazosaur Q','Cragsaur','Crimson Hammer','Comet Missile','Aqua Guard','Spiral Gate','Aqua Hulcus','Bolshack Dragon']) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+  say(a,{type:'claimTurn'});
+  const room=rooms.get(j.room), S=room.state;
+  S.turnNumber=9; S.activeTurn=0;
+  let pass=0,fail=0;
+  const check=(l,g,w)=>{const ok=g===w;console.log((ok?'  ok   ':'  FAIL ')+l.padEnd(62)+'got '+g);ok?pass++:fail++;};
+  const look=(bz,k)=>{
+    const c=(bz||[]).find(x=>x.key===k)||{};
+    return { power:c.livePower, kw:JSON.stringify((a.lastState.players[0].liveKeywords||{})[k]||[]) };
+  };
+
+  // Smash Horn Q alone: +1000 to itself (2000 base -> 3000)
+  S.players[0].battlezone=[{key:'sh',id:'X/Smash Horn Q',tapped:false,summonedTurn:2}];
+  say(a,{type:'drawCard',force:true});
+  console.log('     raw entry: ' + JSON.stringify((a.lastState.players[0].battlezone||[])[0]).slice(0,180));
+  let r = look(a.lastState.players[0].battlezone,'sh');
+  console.log('     Smash Horn Q alone: ' + r.power + '  ' + r.kw);
+  check('Smash Horn Q buffs itself', r.power === 3000, true);
+
+  // add Gigaling Q (slayer): BOTH should now have slayer, and Gigaling gains the +1000
+  S.players[0].battlezone=[
+    {key:'sh',id:'X/Smash Horn Q',tapped:false,summonedTurn:2},   // 2000, +1000
+    {key:'gg',id:'X/Gigaling Q',  tapped:false,summonedTurn:2}    // 2000, slayer
+  ];
+  say(a,{type:'drawCard',force:true});
+  const sh = look(a.lastState.players[0].battlezone,'sh');
+  const gg = look(a.lastState.players[0].battlezone,'gg');
+  console.log('     Smash Horn Q: ' + sh.power + '  ' + sh.kw);
+  console.log('     Gigaling Q  : ' + gg.power + '  ' + gg.kw);
+  check('Smash Horn Q gains slayer from Gigaling Q', /slayer/i.test(sh.kw), true);
+  check('Gigaling Q gains the +1000 from Smash Horn Q', gg.power === 3000, true);
+  check('Gigaling Q keeps its own slayer', /slayer/i.test(gg.kw), true);
+
+  // a NON-Survivor must not share anything
+  S.players[0].battlezone=[
+    {key:'sh',id:'X/Smash Horn Q',tapped:false,summonedTurn:2},
+    {key:'no',id:'X/Cragsaur',    tapped:false,summonedTurn:2}    // not a Survivor
+  ];
+  say(a,{type:'drawCard',force:true});
+  const no = look(a.lastState.players[0].battlezone,'no');
+  console.log('     non-Survivor Cragsaur: ' + no.power + ' (base 3000)  ' + no.kw);
+  check('a non-Survivor gets nothing', no.power === 3000, true);
+
+  // Blazosaur Q's power attacker spreads too
+  S.players[0].battlezone=[
+    {key:'bz',id:'X/Blazosaur Q', tapped:false,summonedTurn:2},
+    {key:'gg',id:'X/Gigaling Q',  tapped:false,summonedTurn:2}
+  ];
+  say(a,{type:'drawCard',force:true});
+  const gg2 = look(a.lastState.players[0].battlezone,'gg');
+  console.log('     Gigaling Q with Blazosaur Q out: ' + gg2.kw);
+  check('power attacker spreads from Blazosaur Q', /powerattacker/i.test(gg2.kw), true);
+  console.log();
+  console.log(fail ? fail+' failure(s)' : 'Survivor sharing works');
   process.exit(fail?1:0);
 
 }

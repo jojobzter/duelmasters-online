@@ -63,7 +63,15 @@ function loadDeck(file) {
     const n = m ? parseInt(m[1], 10) : 1;
     const name = (m ? m[2] : line).trim();
     const key = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    const id = byName.get(key);
+    let id = byName.get(key);
+    // Card names here are long and people shorten them — "Hydrooze" for "Hydrooze,
+    // the Mutant Emperor". Accept a shortened name when it matches exactly one card,
+    // and refuse it when it is ambiguous rather than guessing.
+    if (!id) {
+      const hits = [...byName.keys()].filter(k => k.startsWith(key + ' ') || k.startsWith(key + ','));
+      if (hits.length === 1) id = byName.get(hits[0]);
+      else if (hits.length > 1) { missing.push(name + ' (ambiguous: matches ' + hits.length + ' cards)'); continue; }
+    }
     if (!id) { missing.push(name); continue; }
     for (let i = 0; i < n; i++) out.push(id);
   }
