@@ -1055,7 +1055,10 @@ function resolveBattle(state, aIdx, aCard, dIdx, dCard, logs) {
     return { needsManual: { aIdx, aKey: aCard.key, aName, dIdx, dKey: dCard.key, dName } };
   }
 
-  const aSlayer = !!metaOf(aCard.id).slayer, dSlayer = !!metaOf(dCard.id).slayer;
+  // Slayer can be GRANTED as well as printed — Gigaling Q shares it with every
+  // Survivor you control. Reading only the printed flag meant a shared Slayer did
+  // nothing at all, on either side of the battle.
+  const aSlayer = hasSlayer(state, aIdx, aCard), dSlayer = hasSlayer(state, dIdx, dCard);
   const losers = [];
   if (ap > dp) losers.push([D, dCard, dIdx]);
   else if (dp > ap) losers.push([A, aCard, aIdx]);
@@ -3333,7 +3336,9 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
     for (const owner of [me, opp]) {
       for (const c of owner.battlezone.slice()) {
         if (c.key === cardKey) continue;
-        if (!metaOf(c.id).blocker) continue;
+        // a GRANTED blocker counts as a blocker here too
+        const ownerIdx2 = (owner === me) ? meIdx : oppIdx;
+        if (!metaOf(c.id).blocker && !hasKw(grantedKeywords(state, ownerIdx2, c), 'blocker')) continue;
         removeBattleCard(owner, c.key);
         dissolveStack(owner, c, extraLog, 'hand');
         owner.hand.push({ id: c.id, key: c.key });
@@ -5482,7 +5487,8 @@ wss.on('connection', (ws) => {
             return;
           }
           if (blockerOnly(atk.id) && !hasKw(grantedKeywords(s, idx, atk), 'ignoreattackrestrictions')
-              && !metaOf(victim.id).blocker) {
+              && !metaOf(victim.id).blocker
+              && !hasKw(grantedKeywords(s, oppIdx, victim), 'blocker')) {
             send(ws, { type: 'summonRejected', reason: cardLabel(atk.id) + ' can only attack creatures that have Blocker.' });
             return;
           }
