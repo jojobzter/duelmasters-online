@@ -5483,10 +5483,13 @@ wss.on('connection', (ws) => {
             }
             fireAttackTriggers(s, idx, oppIdx, atk, extraLogs, 'hit');
           }
-          // This whole branch resolves the attack without ever opening a combat, so
-          // endCombat never ran — anything that deferred itself until "after the
-          // attack" (Marrow Ooze destroying itself) has to be resolved here instead.
-          resolvePostAttack(s, idx, extraLogs);
+          // Anything that deferred itself until "after the attack" — Marrow Ooze
+          // destroying itself — resolves here, but ONLY if the attack is actually
+          // over. When the player attacks "shields" without naming one, combat stays
+          // in the breaking phase waiting for their click; running the sweep then
+          // destroyed the attacker while its own shield-break prompt was still open.
+          // endCombat covers that case once the breaking finishes.
+          if (!s.combat) resolvePostAttack(s, idx, extraLogs);
         }
         break;
       }
@@ -5590,6 +5593,10 @@ wss.on('connection', (ws) => {
             extraLogs.push('Marrow Ooze, the Twister destroyed itself after attacking.');
           }
           fireAttackTriggers(s, idx, oppIdx, attacker, extraLogs, 'hit');
+          // breakOneShield clears the combat itself, so endCombat never runs on this
+          // path and the post-attack sweep was skipped — a sheet-described
+          // "destroy self after attacking" simply never happened.
+          resolvePostAttack(s, idx, extraLogs);
         }
         break;
       }
