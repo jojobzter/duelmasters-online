@@ -864,7 +864,16 @@ function parseDecklist(raw) {
     let count = 1, name = line;
     if (m) { count = parseInt(m[1], 10); name = m[2]; }
     name = name.trim();
-    const id = byName.get(normKeyClient(name)) || looseMap.get(loose(name));
+    let id = byName.get(normKeyClient(name)) || looseMap.get(loose(name));
+    // These names are long and get shortened in written lists — "Hydrooze" for
+    // "Hydrooze, the Mutant Emperor". Accept a shortened name when exactly one card
+    // starts with it; say it is ambiguous rather than picking one at random.
+    if (!id) {
+      const want = loose(name);
+      const hits = [...looseMap.keys()].filter(k => k.startsWith(want + ' ') || k.startsWith(want + ','));
+      if (hits.length === 1) id = looseMap.get(hits[0]);
+      else if (hits.length > 1) { notFound.push(name + ' (ambiguous)'); continue; }
+    }
     if (!id) { notFound.push(name); continue; }
     if (count > 4) { overLimit.push(name); count = 4; }
     for (let i = 0; i < count && deck.length < 400; i++) deck.push(id);
