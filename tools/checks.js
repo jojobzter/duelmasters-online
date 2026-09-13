@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1339,6 +1339,104 @@ if (WHICH === 'triggers') {
     ? '\n' + clash.length + ' disagreement(s) — check the card art and fix one side'
     : 'the hardcoded trigger list agrees with the sheet on every card');
   process.exit(clash.length ? 1 : 0);
+}
+
+if (WHICH === 'discard') {
+  // "When this would be discarded during your OPPONENT'S turn, put it into the battle
+  // zone instead." Two halves matter: the redirect must fire (the trigger name did not
+  // match, so it never did), and it must NOT fire when you discard your own copy on
+  // your own turn — otherwise it becomes a free summon.
+  // "When this would be discarded during your opponent's turn, you may put it into the
+  // battle zone instead." Exactly the reported case: I attack, they discard, it enters.
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const lg=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js'); console.log=lg;
+  const wss=server.__wss, rooms=server.__rooms;
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const deck=[]; for(const n of ['Terradragon Arque Delacerna','Horrid Worm','Cragsaur','Comet Missile','Aqua Guard','Spiral Gate','Aqua Hulcus','Energy Stream','Bolshack Dragon','Crimson Hammer']) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+  say(a,{type:'claimTurn'});
+  const S=rooms.get(j.room).state;
+  let pass=0,fail=0;
+  const check=(l,g,w)=>{const ok=g===w;console.log((ok?'  ok   ':'  FAIL ')+l.padEnd(62)+'got '+g);ok?pass++:fail++;};
+
+  // MY turn. Horrid Worm attacks and makes THEM discard — their Terradragon should
+  // enter THEIR battle zone, because from their side it is their opponent's turn.
+  S.turnNumber=9; S.activeTurn=0;
+  S.players[0].battlezone=[{key:'hw',id:'X/Horrid Worm',tapped:false,summonedTurn:2}];
+  S.players[1].battlezone=[];
+  S.players[1].hand=[{key:'td',id:'X/Terradragon Arque Delacerna'}];
+  S.players[1].graveyard=[];
+  S.players[1].shields=[{key:'s1',id:'X/Cragsaur',faceUp:false,slot:0}];
+  // Force the discard to hit Terradragon specifically — a random discard could pick the
+  // shield card that has just entered their hand.
+  S.players[1].pendingDiscards=[{id:'d1', kind:'choose', count:1, source:'Horrid Worm'}];
+  say(b,{type:'effectDiscardResolve',effectId:'d1',keys:['td']});
+  const inPlay = S.players[1].battlezone.some(c=>/Terradragon/.test(c.id));
+  const inGrave = S.players[1].graveyard.some(c=>/Terradragon/.test(c.id));
+  console.log('     their battlezone: ' + (S.players[1].battlezone.map(c=>c.id.split('/').pop()).join(', ')||'(empty)'));
+  console.log('     their graveyard : ' + (S.players[1].graveyard.map(c=>c.id.split('/').pop()).join(', ')||'(empty)'));
+  check('discarded on the opponent turn -> enters the battle zone', inPlay, true);
+  check('it did NOT also go to the graveyard', inGrave, false);
+
+  // on its OWNER's own turn the redirect must NOT apply
+  S.turnNumber=10; S.activeTurn=1;
+  S.players[1].battlezone=[]; S.players[1].graveyard=[];
+  S.players[1].hand=[{key:'td2',id:'X/Terradragon Arque Delacerna'}];
+  S.players[1].pendingDiscards=[{id:'d9', kind:'choose', count:1, source:'test'}];
+  say(b,{type:'effectDiscardResolve',effectId:'d9',keys:['td2']});
+  console.log('     on its own turn -> battlezone ' + S.players[1].battlezone.length + ', graveyard ' + S.players[1].graveyard.length);
+  check('discarded on its OWN turn -> goes to the graveyard', S.players[1].graveyard.some(c=>/Terradragon/.test(c.id)), true);
+  // MY turn: I cast Wily Carpenter ("draw up to 2, then discard 2") and discard my own
+  // Terradragon. It must go to the graveyard — no free summon.
+  S.turnNumber=9; S.activeTurn=0;
+  S.players[0].battlezone=[];
+  S.players[0].graveyard=[];
+  S.players[0].hand=[
+    {key:'td', id:'X/Terradragon Arque Delacerna'},
+    {key:'x1', id:'X/Cragsaur'},
+    {key:'wc', id:'X/Wily Carpenter'}
+  ];
+  S.players[0].mana=[]; for(let n=0;n<6;n++) S.players[0].mana.push({key:'m'+n,id:'X/Aqua Guard',tapped:false});
+  say(a,{type:'summonCard',key:'wc'});
+  // answer its discard, choosing my own Terradragon
+  for (const d of (S.players[0].pendingDiscards||[]).slice()) {
+    say(a,{type:'effectDiscardResolve',effectId:d.id,keys:['td','x1'].filter(k=>S.players[0].hand.some(c=>c.key===k))});
+  }
+  const mineInPlay = S.players[0].battlezone.some(c=>/Terradragon/.test(c.id));
+  const mineInGrave = S.players[0].graveyard.some(c=>/Terradragon/.test(c.id));
+  console.log('     my battlezone: ' + (S.players[0].battlezone.map(c=>c.id.split('/').pop()).join(', ')||'(empty)'));
+  console.log('     my graveyard : ' + (S.players[0].graveyard.map(c=>c.id.split('/').pop()).join(', ')||'(empty)'));
+  check('discarding my OWN copy on MY turn does NOT summon it', mineInPlay, false);
+  check('it went to my graveyard instead', mineInGrave, true);
+
+  // Their turn, their copy discarded by MY effect -> that IS their opponent's turn
+  S.turnNumber=10; S.activeTurn=0;          // still my turn
+  S.players[1].battlezone=[]; S.players[1].graveyard=[];
+  S.players[1].hand=[{key:'td2',id:'X/Terradragon Arque Delacerna'}];
+  S.players[1].pendingDiscards=[{id:'dx', kind:'choose', count:1, source:'my effect'}];
+  say(b,{type:'effectDiscardResolve',effectId:'dx',keys:['td2']});
+  check('THEIR copy discarded during MY turn DOES enter their battle zone',
+        S.players[1].battlezone.some(c=>/Terradragon/.test(c.id)), true);
+
+  console.log();
+  console.log(fail ? fail+' failure(s)' : 'the discard redirect works');
+  process.exit(fail?1:0);
+
 }
 
 if (WHICH === 'effects') {
