@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1313,6 +1313,32 @@ if (WHICH === 'slayer') {
   console.log(fail ? fail+' failure(s)' : 'shared Slayer works on both sides of a battle');
   process.exit(fail?1:0);
 
+}
+
+if (WHICH === 'triggers') {
+  // The engine keeps a hardcoded shield-trigger list from before the sheet existed.
+  // Where the two disagree, one of them is wrong — Hunter Fish and Dome Shell were
+  // both being forced to be triggers against correct sheet data.
+  const fs = require('fs'), path = require('path');
+  const srcTxt = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = srcTxt.indexOf('const SHIELD_TRIGGER_CARDS');
+  const names = [...srcTxt.slice(i, srcTxt.indexOf(']);', i)).matchAll(/'([^']+)'|"([^"]+)"/g)]
+    .map(m => m[1] || m[2]);
+  const cards = JSON.parse(fs.readFileSync(path.join(__dirname, 'cards.json'), 'utf8'));
+  const norm = (x) => String(x).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/_/g, "'").trim();
+  const by = new Map();
+  for (const c of cards) if (c.Name) by.set(norm(c.Name), c);
+  const clash = [];
+  for (const n of names) {
+    const r = by.get(norm(n));
+    if (r && !r['Shield Trigger (Yes/No)']) clash.push(String(r.Name));
+  }
+  for (const c of clash) console.log('  FAIL hardcoded list says trigger, sheet says not: ' + c);
+  console.log(clash.length
+    ? '\n' + clash.length + ' disagreement(s) — check the card art and fix one side'
+    : 'the hardcoded trigger list agrees with the sheet on every card');
+  process.exit(clash.length ? 1 : 0);
 }
 
 if (WHICH === 'effects') {
