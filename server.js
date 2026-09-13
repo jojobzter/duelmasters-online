@@ -3544,10 +3544,10 @@ const SHIELD_TRIGGER_CARDS = new Set([
   'holy awe', 'solar ray', 'apocalypse day', 'logic cube', 'logic sphere', 'super spark',
   'miele, vizier of lightning', 'kolon, the oracle', 'phal eega, dawn guardian',
   'syforce, aurora elemental', 'spiral gate', 'teleportation', 'brain serum', 'crystal memory',
-  'liquid scope', 'aqua surfer', 'hunter fish', 'aqua jolter', 'terror pit', 'ghost touch',
+  'liquid scope', 'aqua surfer', 'aqua jolter', 'terror pit', 'ghost touch',
   'dark reversal', 'critical blade', 'zombie carnival', 'bone assassin, the ambusher',
   'locomotiver', 'burst shot', 'tornado flame', "phantom dragon's flame",
-  'natural snare', 'dimension gate', 'mana crisis', 'mystic inscription', 'torcon', 'dome shell',
+  'natural snare', 'dimension gate', 'mana crisis', 'mystic inscription', 'torcon', 
   'mighty shouter'
 ]);
 function hasShieldTrigger(id) {
