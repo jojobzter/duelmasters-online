@@ -3069,8 +3069,11 @@ function applyImmediate(state, owner, card, action, logs) {
 // A discarded card that says "onDiscard: -> battle" enters play instead of the
 // graveyard. Returns true if it was redirected.
 function discardRedirect(state, ownerIdx, card, logs) {
+  // The sheet writes this as "onSelfDiscard", which parses to onselfdiscard — the
+  // redirect only looked for "ondiscard", so Terradragon Arque Delacerna and Bingole
+  // were never redirected and just went to the graveyard.
   const eff = ((cardMeta(card.id) || {}).parsedEffects || [])
-    .find(e => e.trigger === 'ondiscard' && e.action === 'moveSelf');
+    .find(e => (e.trigger === 'ondiscard' || e.trigger === 'onselfdiscard') && e.action === 'moveSelf');
   if (!eff) return false;
   const me = state.players[ownerIdx];
   if (eff.condition && !conditionHolds(state, ownerIdx, card, eff.condition, null)) return false;
@@ -5391,8 +5394,11 @@ wss.on('connection', (ws) => {
         // Single funnel: a discarded card may redirect itself (Dava Torey enters play
         // instead), and the opponent may have cards that react to the discard.
         const discardOne = (c) => {
-          if (!discardRedirect(s, idx, c, extraLogs)) me.graveyard.push({ id: c.id, key: c.key });
-          firePar(s, idx, c, 'onselfdiscard', extraLogs);
+          const redirected = discardRedirect(s, idx, c, extraLogs);
+          if (!redirected) me.graveyard.push({ id: c.id, key: c.key });
+          // the redirect IS this card's onSelfDiscard ability; firing it again would
+          // try to move a card that has already left the hand
+          if (!redirected) firePar(s, idx, c, 'onselfdiscard', extraLogs);
           moved.push(cardLabel(c.id));
           fireBoardWide(s, 'onoppdiscard', extraLogs,
             { onlySide: oppIdx, event: { cardId: c.id, key: c.key, ownerIdx: idx } });

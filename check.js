@@ -20,6 +20,7 @@ const CHECKS = [
   ['survivor',[],                      'Survivors share every ability with each other'],
   ['slayer',  [],                      'a granted Slayer works in battle, both sides'],
   ['triggers',[],                      'the hardcoded trigger list agrees with the sheet'],
+  ['discard', [],                      'discard-to-battlezone redirects actually fire'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']
