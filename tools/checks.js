@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1435,6 +1435,64 @@ if (WHICH === 'discard') {
 
   console.log();
   console.log(fail ? fail+' failure(s)' : 'the discard redirect works');
+  process.exit(fail?1:0);
+
+}
+
+if (WHICH === 'manaleak') {
+  // A refused summon must not spend the mana it would have cost. Mana was tapped
+  // BEFORE the evolution checks ran, so every refused evolution silently ate it for
+  // the rest of the game while the player's zone still looked untapped.
+  // A refused summon must not eat the mana it would have cost.
+  const fs=require('fs'), Module=require('module');
+  const CARDS=JSON.parse(fs.readFileSync('/home/claude/duelmasters/tools/cards.json','utf8'));
+  const routes={}; const app={get:(p,f)=>{(Array.isArray(p)?p:[p]).forEach(x=>routes[x]=f);},use:()=>{},post:()=>{},listen:()=>({on:()=>{}})};
+  const ex=()=>app; ex.static=()=>{}; ex.json=()=>{};
+  class W{constructor(){this.handlers={};}on(e,f){this.handlers[e]=f;}}
+  const ol=Module._load;
+  Module._load=function(r){ if(r==='express')return ex; if(r==='ws')return{Server:W,WebSocketServer:W,OPEN:1};
+   if(r==='http')return{createServer:()=>({listen:()=>{},on:()=>{}})};
+   if(r==='xlsx')return{readFile:()=>({SheetNames:['Cards'],Sheets:{Cards:{}}}),utils:{sheet_to_json:()=>CARDS}};
+   return ol.apply(this,arguments); };
+  const lg=console.log; console.log=()=>{};
+  const server=require('/home/claude/duelmasters/server.js'); console.log=lg;
+  const wss=server.__wss, rooms=server.__rooms;
+  const mk=()=>({readyState:1,OPEN:1,inbox:[],send(d){const m=JSON.parse(d);this.inbox.push(m);if(m.type==='state')this.lastState=m.state;},on(e,f){this['_'+e]=f;},close(){}});
+  const a=mk(),b=mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say=(s,m)=>{try{s._message(JSON.stringify(m));}catch(e){}};
+  say(a,{type:'create',name:'A'});
+  const j=a.inbox.find(m=>m.type==='joined');
+  say(b,{type:'join',room:j.room,name:'B'}); say(a,{type:'respondJoin',accept:true});
+  const deck=[]; for(const n of ['Armored Blaster Valdios','Bolshack Dragon','Comet Missile','Cragsaur','Crimson Hammer','Tornado Flame','Aqua Guard','Spiral Gate','Aqua Hulcus','Energy Stream']) for(let i=0;i<4;i++) deck.push('X/'+n);
+  say(a,{type:'submitDeck',deck}); say(b,{type:'submitDeck',deck});
+  say(a,{type:'claimTurn'});
+  const S=rooms.get(j.room).state;
+  let pass=0,fail=0;
+  const check=(l,g,w)=>{const ok=g===w;console.log((ok?'  ok   ':'  FAIL ')+l.padEnd(64)+'got '+g);ok?pass++:fail++;};
+  const fresh=(n)=>{ S.players[0].mana=[]; for(let i=0;i<n;i++) S.players[0].mana.push({key:'m'+i,id:'X/Comet Missile',tapped:false}); };
+
+  S.turnNumber=9; S.activeTurn=0;
+  S.players[0].battlezone=[];   // no Human, so Valdios cannot evolve
+
+  // refused: an evolution creature with no base
+  fresh(6);
+  S.players[0].hand=[{key:'v',id:'X/Armored Blaster Valdios'}];
+  const mk1=a.inbox.length;
+  say(a,{type:'summonCard',key:'v'});
+  const rej=a.inbox.slice(mk1).find(m=>m.type==='summonRejected');
+  console.log('     refusal: ' + (rej ? rej.reason.split('\n')[0] : 'none'));
+  const untappedAfter = S.players[0].mana.filter(m=>!m.tapped).length;
+  console.log('     untapped mana after the refusal: ' + untappedAfter + ' of 6');
+  check('a refused evolution summon does NOT eat the mana', untappedAfter === 6, true);
+
+  // and the mana is still usable for something else
+  S.players[0].hand=[{key:'bd',id:'X/Bolshack Dragon'}];
+  say(a,{type:'summonCard',key:'bd'});
+  check('the mana can still pay for another 6-cost card', S.players[0].battlezone.some(c=>/Bolshack/.test(c.id)), true);
+  console.log('     untapped after a REAL summon: ' + S.players[0].mana.filter(m=>!m.tapped).length + ' of 6');
+  check('a successful summon DOES take the mana', S.players[0].mana.filter(m=>!m.tapped).length === 0, true);
+  console.log();
+  console.log(fail ? fail+' failure(s)' : 'refused summons no longer leak mana');
   process.exit(fail?1:0);
 
 }
