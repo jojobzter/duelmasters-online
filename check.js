@@ -21,6 +21,7 @@ const CHECKS = [
   ['slayer',  [],                      'a granted Slayer works in battle, both sides'],
   ['triggers',[],                      'the hardcoded trigger list agrees with the sheet'],
   ['discard', [],                      'discard-to-battlezone redirects actually fire'],
+  ['manaleak',[],                      'a refused summon does not eat your mana'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']

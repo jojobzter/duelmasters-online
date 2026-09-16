@@ -4345,6 +4345,13 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'summonRejected', reason: '"' + cardLabel(cardId) + '" was not found in the card database.\n\nThe image filename must match the Name column in your spreadsheet, otherwise its cost, type and abilities are all unknown.' });
           return;
         }
+        let manaPlan = null;
+        // taps the mana this summon reserved; called only once the summon is certain
+        const spendMana = () => {
+          if (!manaPlan) return;
+          manaPlan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
+          manaPlan = null;
+        };
         if (meta && meta.cost != null) {
           const plan = planManaPayment(me, meta);
           if (!plan) {
@@ -4356,15 +4363,28 @@ wss.on('connection', (ws) => {
             }).join(', ') || 'none';
             send(ws, {
               type: 'summonRejected',
-              reason: 'Not enough mana to summon ' + cardLabel(cardId) + ' — costs ' + meta.cost + civText + '.\n\nYour untapped mana: ' + untappedDesc
+              // Say the counts outright. "Your untapped mana: A, B" read as though the
+              // whole zone held two cards, when four others were simply tapped — which
+              // looks like the engine miscounting rather than mana already spent.
+              reason: 'Not enough mana to summon ' + cardLabel(cardId) + ' — costs ' + meta.cost + civText +
+                      '.\n\nYou have ' + me.mana.filter(m => !m.tapped).length + ' untapped of ' +
+                      me.mana.length + ' mana card(s).\n\nUntapped: ' + untappedDesc +
+                      (me.mana.some(m => m.tapped)
+                        ? '\nAlready tapped this turn: ' +
+                          me.mana.filter(m => m.tapped).map(m => cardLabel(m.id)).join(', ')
+                        : '')
             });
             return;
           }
-          plan.forEach(k => { const m = me.mana.find(mm => mm.key === k); if (m) m.tapped = true; });
+          // Do NOT tap yet. Every evolution check below can still refuse the summon and
+          // return — tapping here left that mana spent for the rest of the game, while
+          // the player's zone still showed it untapped. Applied once the summon commits.
+          manaPlan = plan;
         }
         // Cross Gear is GENERATED into the battle zone rather than summoned. It has no
         // power, can't attack or block, and does nothing until it is crossed.
         if (isCrossGear(cardId)) {
+          spendMana();
           const gi = me.hand.findIndex(h => h.key === c.key);
           if (gi !== -1) me.hand.splice(gi, 1);
           const gslot = battlefieldSlot(me);
@@ -4438,6 +4458,9 @@ wss.on('connection', (ws) => {
         }
 
         const [c] = me.hand.splice(i, 1);
+        // Every refusal is behind us — the summon is happening, so take the mana now.
+        spendMana();
+
         let x, y, inheritTapped = false, stack = [];
         if (evoBase) {
           // take the base's position, and inherit anything already stacked under it
