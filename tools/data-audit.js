@@ -54,6 +54,30 @@ if (suspicious.length) {
   console.log('no implausible stat lines');
 }
 
+// ---- 1b. type contradictions --------------------------------------------
+// A card with POWER and a RACE is a creature, never a spell. 70 rows were typed
+// "Spell" while carrying both, which made them unplayable as creatures.
+const mistyped = rows.filter(r => {
+  const t = String(r.Type || '').trim().toLowerCase();
+  const hasPower = r.Power != null && String(r.Power).trim() !== '';
+  const hasRace = r.Race != null && String(r.Race).trim() !== '';
+  if (t === 'spell' && (hasPower || hasRace)) return true;
+  // A creature that has a RACE but no power is a half-entered row; one with neither
+  // is simply not entered yet and is counted elsewhere, so it is not a contradiction.
+  if (/creature/i.test(t) && hasRace && !hasPower) return true;
+  return false;
+});
+console.log();
+if (mistyped.length) {
+  console.log('TYPE CONTRADICTIONS (' + mistyped.length + '):');
+  for (const r of mistyped.slice(0, 20)) {
+    console.log('   ' + String(r.Name).slice(0, 32).padEnd(34) +
+      'type=' + String(r.Type) + ' power=' + String(r.Power) + ' race=' + String(r.Race));
+  }
+} else {
+  console.log('no type contradictions: every card with power is typed as a creature');
+}
+
 // ---- 2. spells that do nothing ------------------------------------------
 const deadSpells = rows.filter(r =>
   String(r.Type || '').trim().toLowerCase() === 'spell' && !r.Effect);
