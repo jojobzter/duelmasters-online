@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1767,6 +1767,81 @@ if (WHICH === 'jagraveen') {
   check('tapped Jagraveen attacked by a stronger creature: destroyed', f.alive, false);
   check('none of those left a self-destroy pending', f.flagged, false);
   done('Necrodragon Jagraveen works properly');
+}
+
+
+if (WHICH === 'foil') {
+  // Artwork filed as "<Short Title> Foil" ("Death Phoenix Foil") is the sheet's card
+  // ("Death Phoenix, Avatar of Doom"). Server and client must both see that, and decks
+  // saved under the old file name must find the renamed file.
+  const { check, done } = makeChecker();
+  const FOIL = 'DM-12/Death Phoenix Foil';
+
+  // -- server: the engine finds the card's cost, colours and abilities
+  {
+    const T = newTable(['Necrodragon Zalva', 'Kip Chippotto', 'Gigaslug', 'Cragsaur']);
+    T.P.battlezone = [{ key: 'zd', id: 'X/Necrodragon Zalva', tapped: false, summonedTurn: 2 }, { key: 'fb', id: 'X/Kip Chippotto', tapped: false, summonedTurn: 2 }];
+    T.P.hand = [{ key: 'dp', id: FOIL }, { key: 'nf', id: 'DM-12/Nonexistent Foil' }];
+    T.P.mana = [1, 2].map(n => ({ key: 'g' + n, id: 'X/Gigaslug', tapped: false })).concat([1, 2].map(n => ({ key: 'c' + n, id: 'X/Cragsaur', tapped: false })));
+    const from = T.a.inbox.length;
+    T.say(T.a, { type: 'summonCard', key: 'nf' });
+    const rej = T.a.inbox.slice(from).find(m => m.type === 'summonRejected');
+    check('a Foil that matches no sheet card is still refused', !!rej && /not found in the card database/.test(rej.reason), true);
+    T.say(T.a, { type: 'summonCard', key: 'dp', baseKey: 'zd', baseKey2: 'fb' });
+    check('"Death Phoenix Foil" is summoned as the real card (Vortex, cost, colours)', T.P.battlezone.map(c => c.id), [FOIL]);
+    check('...and its bases are stacked under it', ((T.P.battlezone[0] || {}).under || []).length, 2);
+  }
+
+  // -- client: names, metadata and saved decks. Runs the real client.js under a DOM stub;
+  // the scenarios below are evaluated INSIDE that script so they can reach its functions.
+  const mk = () => ({ style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' }, classList: { add(){}, remove(){}, toggle(){}, contains: () => false },
+    addEventListener(){}, removeEventListener(){}, appendChild(){}, insertBefore(){}, querySelector: () => mk(), querySelectorAll: () => [], setAttribute(){}, getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), textContent: '', innerHTML: '', value: '', checked: false, focus(){}, remove(){}, children: [], dataset: {}, scrollIntoView(){}, click(){} });
+  global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800, location: { href: '', protocol: 'https:', host: 'x' }, matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
+  global.document = { getElementById: () => mk(), querySelector: () => mk(), querySelectorAll: () => [], createElement: () => mk(), addEventListener(){}, body: mk(), head: mk(), documentElement: mk(), readyState: 'complete' };
+  global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+  global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
+  global.WebSocket = function () { return { addEventListener(){}, send(){}, close(){} }; };
+  global.fetch = () => Promise.reject(new Error('offline'));
+  global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
+
+  const clientScenarios = function (check) {
+    // identifiers below (cardMetaDB, cardDB, cardBaseName, ...) belong to client.js
+    const sheet = [{ name: 'Death Phoenix, Avatar of Doom', cost: 4 }, { name: 'Necrodragon Jagraveen', cost: 6 },
+                   { name: 'Hydrooze, the Mutant Emperor', cost: 5 }, { name: 'Hydrooze, Something Else', cost: 7 }, { name: 'Aqua Surfer', cost: 6 }];
+    cardMetaDB = new Map(); sheet.forEach(c => cardMetaDB.set(normKeyClient(c.name), c)); resetSheetNameIndex();
+    const full = 'Death Phoenix, Avatar of Doom';
+    check('client: a Foil file name maps to the sheet name', cardBaseName('DM-12/Death Phoenix Foil'), full);
+    check('client: the card shows under its sheet name', displayName('DM-12/Death Phoenix Foil'), full);
+    check('client: its cost and colours are found', cardMetaFor('DM-12/Death Phoenix Foil').cost, 4);
+    check('client: "(Foil)" and "- Foil" spellings too', [cardBaseName('DM-12/Death Phoenix (Foil)'), cardBaseName('DM-12/Death Phoenix - Foil')], [full, full]);
+    check('client: an exact sheet name is left alone', cardBaseName('DM-12/' + full), full);
+    check('client: a non-foil name is left alone', cardBaseName('DM-3/Aqua Surfer'), 'Aqua Surfer');
+    check('client: a foil of a full sheet name', cardBaseName('DM-3/Aqua Surfer Foil'), 'Aqua Surfer');
+    check('client: an ambiguous short title is NOT guessed', cardBaseName('X/Hydrooze Foil'), 'Hydrooze Foil');
+    check('client: an unknown Foil is left alone', cardBaseName('X/Nonexistent Foil'), 'Nonexistent Foil');
+    // deck saved under the old file name, file since renamed to the sheet's name
+    cardDB.clear();
+    cardDB.set('DM-12/' + full, { url: 'u1', name: full, set: 'DM-12' }); cardDB.set('DM-3/Aqua Surfer', { url: 'u2', name: 'Aqua Surfer', set: 'DM-3' });
+    rebuildCardIndex();
+    check('client: an old saved-deck id heals onto the renamed file', resolveCardId('DM-12/Death Phoenix Foil'), 'DM-12/' + full);
+    check('client: healDeckIds keeps other ids as they are', healDeckIds(['DM-12/Death Phoenix Foil', 'DM-3/Aqua Surfer', 'DM-9/Unknown Card']), ['DM-12/' + full, 'DM-3/Aqua Surfer', 'DM-9/Unknown Card']);
+    check('client: the image shows instead of a text placeholder', /<img/.test(cardImgHtml(resolveCardId('DM-12/Death Phoenix Foil'))), true);
+    // the other way round: the file is still called "... Foil"
+    cardDB.clear(); cardDB.set('DM-12/Death Phoenix Foil', { url: 'u3', name: 'Death Phoenix Foil', set: 'DM-12' }); rebuildCardIndex();
+    check('client: file still named Foil, deck holds the full name', resolveCardId('DM-12/' + full), 'DM-12/Death Phoenix Foil');
+    check('client: ...and the exact Foil id is untouched', resolveCardId('DM-12/Death Phoenix Foil'), 'DM-12/Death Phoenix Foil');
+    // a written decklist
+    cardDB.clear(); cardDB.set('DM-12/' + full, { url: 'u1', name: full, set: 'DM-12' }); rebuildCardIndex();
+    const r = parseDecklist('2x Death Phoenix Foil\n1 ' + full + '\n1 Bogus Card');
+    check('client: a decklist line "Death Phoenix Foil" finds the card', [r.deck.length, r.deck[0], r.notFound], [3, 'DM-12/' + full, ['Bogus Card']]);
+  };
+  const src = require('fs').readFileSync(__dirname + '/../public/client.js', 'utf8');
+  const wq = console.warn; console.warn = () => {};
+  try { eval(src + '\n;(' + clientScenarios.toString() + ')(check);'); }
+  catch (e) { check('client.js runs the foil scenarios without throwing', e.message, null); }
+  console.warn = wq;
+  done('Foil-named artwork resolves to the sheet card');
 }
 
 if (WHICH === 'effects') {
