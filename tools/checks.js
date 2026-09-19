@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1495,6 +1495,278 @@ if (WHICH === 'manaleak') {
   console.log(fail ? fail+' failure(s)' : 'refused summons no longer leak mana');
   process.exit(fail?1:0);
 
+}
+
+// ---- shared by the two card checks below (phoenix, jagraveen) ---------------------
+// Boots the real server module once, with express/ws/xlsx stubbed, and seats two fresh
+// players per call. Paths come from __dirname, so this runs from any checkout.
+let __engine = null;
+function loadEngine() {
+  if (__engine) return __engine;
+  const fs = require('fs'), Module = require('module');
+  const CARDS = JSON.parse(fs.readFileSync(__dirname + '/cards.json', 'utf8'));
+  const routes = {}; const app = { get: (p, f) => { (Array.isArray(p) ? p : [p]).forEach(x => routes[x] = f); }, use: () => {}, post: () => {}, listen: () => ({ on: () => {} }) };
+  const ex = () => app; ex.static = () => {}; ex.json = () => {};
+  class W { constructor() { this.handlers = {}; } on(e, f) { this.handlers[e] = f; } }
+  const ol = Module._load;
+  Module._load = function (r) {
+    if (r === 'express') return ex; if (r === 'ws') return { Server: W, WebSocketServer: W, OPEN: 1 };
+    if (r === 'http') return { createServer: () => ({ listen: () => {}, on: () => {} }) };
+    if (r === 'xlsx') return { readFile: () => ({ SheetNames: ['Cards'], Sheets: { Cards: {} } }), utils: { sheet_to_json: () => CARDS } };
+    return ol.apply(this, arguments);
+  };
+  const lg = console.log; console.log = () => {};
+  const server = require(__dirname + '/../server.js'); console.log = lg;
+  return (__engine = { CARDS, server });
+}
+function newTable(deckNames) {
+  const { CARDS, server } = loadEngine();
+  const wss = server.__wss, rooms = server.__rooms;
+  const mk = () => ({ readyState: 1, OPEN: 1, inbox: [], send(d) { const m = JSON.parse(d); this.inbox.push(m); if (m.type === 'state') this.lastState = m.state; }, on(e, f) { this['_' + e] = f; }, close() {} });
+  const a = mk(), b = mk(); wss.handlers.connection(a); wss.handlers.connection(b);
+  const say = (s, m) => { try { s._message(JSON.stringify(m)); } catch (e) { console.log('engine threw: ' + (e && e.stack)); } };
+  say(a, { type: 'create', name: 'A' });
+  const j = a.inbox.find(m => m.type === 'joined');
+  say(b, { type: 'join', room: j.room, name: 'B' }); say(a, { type: 'respondJoin', accept: true });
+  const deck = []; for (const n of deckNames) for (let i = 0; i < 4; i++) deck.push('X/' + n);
+  say(a, { type: 'submitDeck', deck }); say(b, { type: 'submitDeck', deck });
+  say(a, { type: 'claimTurn' });
+  const S = rooms.get(j.room).state;
+  S.turnNumber = 9; S.activeTurn = 0;
+  const nm = c => c.id.split('/').pop();
+  const logsSince = (sock, from) => sock.inbox.slice(from).filter(m => m.type === 'log').map(m => m.text);
+  const shields = (names) => names.map((n, i) => ({ key: 's' + i, id: 'X/' + n, faceUp: false, slot: i }));
+  return { CARDS, a, b, say, S, P: S.players[0], O: S.players[1], nm, logsSince, shields };
+}
+function makeChecker() {
+  const c = { pass: 0, fail: 0 };
+  c.check = (l, got, want) => {
+    const ok = JSON.stringify(got) === JSON.stringify(want);
+    console.log((ok ? '  ok   ' : '  FAIL ') + l.padEnd(66) + 'got ' + JSON.stringify(got));
+    ok ? c.pass++ : c.fail++;
+  };
+  c.done = (okMsg) => {
+    console.log();
+    console.log(c.fail ? c.fail + ' failure(s)' : okMsg);
+    process.exit(c.fail ? 1 : 0);
+  };
+  return c;
+}
+
+if (WHICH === 'phoenix') {
+  // Death Phoenix, Avatar of Doom: Vortex evolution (Zombie Dragon + Fire Bird), goes
+  // into the mana zone tapped, Double Breaker; a shield it would break goes to the
+  // graveyard instead; when it leaves the battle zone the opponent discards their hand.
+  const { parseEffect } = require('../effects-parser.js');
+  const NAME = 'Death Phoenix, Avatar of Doom';
+  const DECK = [NAME, 'Necrodragon Zalva', 'Kip Chippotto', 'Cragsaur', 'Aqua Guard', 'Spiral Gate', 'Holy Awe', 'Gigaslug', 'Necrodragon Jagraveen'];
+  const { check, done } = makeChecker();
+  const row = loadEngine().CARDS.find(c => c.Name === NAME);
+
+  // -- the sheet row, as printed on the card
+  check('sheet: cost, type, civ, race, power',
+    [row['Mana Cost'], row.Type, row.Civilization, row.Race, String(row.Power)], [4, 'Evolution Creature', 'Darkness/Fire', 'Phoenix', '9000']);
+  check('sheet: Double Breaker', /^y/i.test(String(row['Double Breaker'])), true);
+  const parsed = parseEffect(row.Effect, NAME);
+  check('its effect text parses with no errors', parsed.errors.length, 0);
+  const vx = parsed.effects.find(e => e.action === 'vortexEvolution');
+  check('Vortex races keep their internal spaces', vx && vx.races, ['Zombie Dragon', 'Fire Bird']);
+
+  // -- summoning: needs one Zombie Dragon AND one Fire Bird, and Darkness + Fire mana
+  const evolve = (bases, mana, k1, k2) => {
+    const T = newTable(DECK);
+    T.P.battlezone = bases;
+    T.P.hand = [{ key: 'dp', id: 'X/' + NAME }];
+    T.P.mana = mana;
+    const from = T.a.inbox.length;
+    const msg = { type: 'summonCard', key: 'dp' }; if (k1) msg.baseKey = k1; if (k2) msg.baseKey2 = k2;
+    T.say(T.a, msg);
+    const rej = T.a.inbox.slice(from).find(m => m.type === 'summonRejected');
+    const dp = T.P.battlezone.find(c => c.id === 'X/' + NAME);
+    return { T, ok: !!dp, dp, why: rej && rej.reason };
+  };
+  const zd = { key: 'zd', id: 'X/Necrodragon Zalva', tapped: false, summonedTurn: 2 };       // Zombie Dragon
+  const zd2 = { key: 'zd2', id: 'X/Necrodragon Jagraveen', tapped: false, summonedTurn: 2 }; // Zombie Dragon
+  const fb = { key: 'fb', id: 'X/Kip Chippotto', tapped: false, summonedTurn: 2 };          // Fire Bird
+  const bothMana = () => [{ key: 'm1', id: 'X/Gigaslug', tapped: false }, { key: 'm2', id: 'X/Gigaslug', tapped: false },
+                          { key: 'm3', id: 'X/Cragsaur', tapped: false }, { key: 'm4', id: 'X/Cragsaur', tapped: false }];
+  let r = evolve([{ ...zd }, { ...fb }], bothMana(), 'zd', 'fb');
+  check('evolves from a Zombie Dragon + a Fire Bird', r.ok, true);
+  check('both bases are stacked underneath it', r.dp && r.dp.under.map(u => u.key).sort(), ['fb', 'zd']);
+  check('so it is a 3-card stack: the Phoenix on top of both bases', r.dp && 1 + r.dp.under.length, 3);
+  check('and both left the battle zone on their own', r.T.P.battlezone.length, 1);
+  r = evolve([{ ...zd }, { ...fb }], bothMana(), 'zd', null);
+  check('refused with only one base named', r.ok, false);
+  r = evolve([{ ...zd }, { ...zd2 }], bothMana(), 'zd', 'zd2');
+  check('refused with two Zombie Dragons and no Fire Bird', r.ok, false);
+  r = evolve([{ ...zd }, { ...fb }], bothMana(), 'zd', 'zd');
+  check('refused when the same creature is named twice', r.ok, false);
+  r = evolve([{ ...zd }, { ...fb }], [1, 2, 3, 4].map(n => ({ key: 'm' + n, id: 'X/Gigaslug', tapped: false })), 'zd', 'fb');
+  check('refused with Darkness mana only (it needs Fire too)', r.ok, false);
+  check('...and a refused summon did not tap any mana', r.T.P.mana.every(m => !m.tapped), true);
+
+  // -- enters the mana zone tapped
+  {
+    const T = newTable(DECK);
+    T.P.hand = [{ key: 'dp', id: 'X/' + NAME }]; T.P.mana = [];
+    T.say(T.a, { type: 'chargeMana', key: 'dp' });
+    check('charged into mana: it arrives tapped', T.P.mana.map(m => m.tapped), [true]);
+  }
+
+  // -- attacking: Double Breaker, and every shield it breaks goes to the graveyard
+  {
+    const T = newTable(DECK);
+    T.P.battlezone = [{ key: 'dp', id: 'X/' + NAME, tapped: false, summonedTurn: null, under: [] }];
+    T.O.battlezone = []; T.O.hand = [{ key: 'h1', id: 'X/Cragsaur' }, { key: 'h2', id: 'X/Aqua Guard' }];
+    T.O.shields = T.shields(['Holy Awe', 'Cragsaur', 'Holy Awe', 'Gigaslug', 'Aqua Guard']);   // Holy Awe = Shield Trigger
+    T.say(T.a, { type: 'declareAttack', key: 'dp', target: { type: 'shield' } });
+    check('it breaks two shields (Double Breaker)', T.S.combat && T.S.combat.shieldsToBreak, 2);
+    T.say(T.a, { type: 'breakShield', key: 's0' }); T.say(T.a, { type: 'breakShield', key: 's1' });
+    check('the two broken shields are in the graveyard', T.O.graveyard.map(T.nm), ['Holy Awe', 'Cragsaur']);
+    check('and NOT in the hand', T.O.hand.map(T.nm), ['Cragsaur', 'Aqua Guard']);
+    check('a Shield Trigger shield gets no chance to trigger', T.b.inbox.filter(m => m.type === 'shieldTriggerOffer').length, 0);
+    check('the three other shields are untouched', T.O.shields.length, 3);
+    check('combat is over', T.S.combat, null);
+  }
+  // the replacement is the Phoenix's own: it must not touch shields broken by other creatures
+  {
+    const T = newTable(DECK);
+    T.P.battlezone = [{ key: 'at', id: 'X/Cragsaur', tapped: false, summonedTurn: 2 }];
+    T.O.battlezone = [{ key: 'dp', id: 'X/' + NAME, tapped: false, summonedTurn: null, under: [] }];   // the Phoenix DEFENDS
+    T.O.hand = []; T.O.shields = T.shields(['Aqua Guard', 'Cragsaur', 'Holy Awe']);
+    T.P.shields = T.shields(['Aqua Guard', 'Cragsaur', 'Holy Awe']);
+    T.say(T.a, { type: 'declareAttack', key: 'at', target: { type: 'shield' } });
+    T.say(T.a, { type: 'breakShield', key: 's0' });
+    check('a shield broken by ANOTHER creature still goes to the hand', T.O.hand.map(T.nm), ['Aqua Guard']);
+    check('...and the Phoenix owner is not asked to send anything to the graveyard', [T.O.pendingTargets.length, T.P.pendingTargets.length, T.P.graveyard.length], [0, 0, 0]);
+  }
+
+  // -- leaving the battle zone: the OPPONENT discards their whole hand
+  const stage = () => {
+    const T = newTable(DECK);
+    T.O.battlezone = [{ key: 'dp', id: 'X/' + NAME, tapped: false, summonedTurn: null,
+                        under: [{ id: 'X/Necrodragon Zalva', key: 'zd' }, { id: 'X/Kip Chippotto', key: 'fb' }] }];
+    T.P.hand = [{ key: 'h1', id: 'X/Cragsaur' }, { key: 'h2', id: 'X/Holy Awe' }, { key: 'h3', id: 'X/Gigaslug' }];
+    return T;
+  };
+  {
+    const T = stage(); T.say(T.b, { type: 'battleDestroy', key: 'dp' });
+    check('destroyed: the opponent is told to discard their hand', T.P.pendingDiscards.map(d => d.kind), ['all']);
+    check('destroyed: the stack under it went to the graveyard as well', T.O.graveyard.map(T.nm).sort(), ['Death Phoenix, Avatar of Doom', 'Kip Chippotto', 'Necrodragon Zalva']);
+    T.say(T.a, { type: 'effectDiscardResolve', effectId: T.P.pendingDiscards[0].id, keys: [] });
+    check('answering the prompt discards EVERY card', [T.P.hand.length, T.P.graveyard.length], [0, 3]);
+  }
+  {
+    const T = stage(); T.say(T.b, { type: 'battleReturn', key: 'dp' });
+    check('returned to hand: the opponent still has to discard', T.P.pendingDiscards.map(d => d.kind), ['all']);
+  }
+  {
+    // bounced by a real spell (Spiral Gate) — the effect-resolution path, not a table button
+    const T = stage();
+    T.P.battlezone = T.O.battlezone; T.O.battlezone = [];           // Phoenix belongs to A, spell is cast by B
+    T.P.hand = []; T.O.hand = [{ key: 'sg', id: 'X/Spiral Gate' }, { key: 'x1', id: 'X/Cragsaur' }, { key: 'x2', id: 'X/Holy Awe' }];
+    T.O.mana = [{ key: 'a1', id: 'X/Aqua Guard', tapped: false }, { key: 'a2', id: 'X/Aqua Guard', tapped: false }];
+    T.S.activeTurn = 1;
+    T.say(T.b, { type: 'summonCard', key: 'sg' });
+    const eff = T.O.pendingTargets[0];
+    T.say(T.b, { type: 'effectTarget', effectId: eff && eff.id, key: 'dp' });
+    check('bounced by a spell: Phoenix and its stack are back in its owner\'s hand', T.P.hand.map(T.nm).sort(), ['Death Phoenix, Avatar of Doom', 'Kip Chippotto', 'Necrodragon Zalva']);
+    check('bounced by a spell: the caster must discard their hand', T.O.pendingDiscards.map(d => d.kind), ['all']);
+  }
+  {
+    const T = stage(); T.P.hand = [];
+    T.say(T.b, { type: 'battleDestroy', key: 'dp' });
+    check('an opponent with no hand is not prompted', T.P.pendingDiscards.length, 0);
+  }
+  {
+    // destroyed in an ordinary battle
+    const T = stage(); T.O.battlezone[0].tapped = true;
+    T.P.battlezone = [{ key: 'at', id: 'X/Necrodragon Zalva', tapped: false, summonedTurn: 2, tempBuff: 6000 }];   // 11000 beats 9000
+    T.say(T.a, { type: 'declareAttack', key: 'at', target: { type: 'creature', key: 'dp' } });
+    check('destroyed in battle: it is gone', T.O.battlezone.length, 0);
+    check('destroyed in battle: the attacker\'s player must discard', T.P.pendingDiscards.map(d => d.kind), ['all']);
+  }
+  done('Death Phoenix works properly');
+}
+
+if (WHICH === 'jagraveen') {
+  // Necrodragon Jagraveen: Blocker, Double Breaker, and "when this creature blocks,
+  // destroy it AFTER it battles" — it must still fight, and only then die.
+  const NAME = 'Necrodragon Jagraveen';
+  const DECK = [NAME, 'Aqua Hulcus', 'Necrodragon Bryzenaga', 'Cragsaur', 'Holy Awe'];
+  const { check, done } = makeChecker();
+  const row = loadEngine().CARDS.find(c => c.Name === NAME);
+  check('sheet: cost, type, civ, race, power',
+    [row['Mana Cost'], row.Type, row.Civilization, row.Race, String(row.Power)], [6, 'Creature', 'Darkness', 'Zombie Dragon', '6000']);
+  check('sheet: Blocker and Double Breaker', [/^y/i.test(String(row['Blocker (Yes/No)'])), /^y/i.test(String(row['Double Breaker']))], [true, true]);
+
+  const block = (attacker) => {
+    const T = newTable(DECK);
+    T.P.battlezone = [{ key: 'at', id: 'X/' + attacker, tapped: false, summonedTurn: 2 }];
+    T.O.battlezone = [{ key: 'jg', id: 'X/' + NAME, tapped: false, summonedTurn: 2 }];
+    T.O.shields = T.shields(['Holy Awe', 'Cragsaur', 'Holy Awe', 'Cragsaur', 'Holy Awe']);
+    T.P.shields = [];
+    T.say(T.a, { type: 'declareAttack', key: 'at', target: { type: 'shield' } });
+    const phase = T.S.combat && T.S.combat.phase;
+    const from = T.a.inbox.length;
+    T.say(T.b, { type: 'declareBlock', blockerKey: 'jg' });
+    return { T, phase, log: T.logsSince(T.a, from) };
+  };
+  const at = (log, re) => log.findIndex(l => re.test(l));
+
+  // a weaker attacker: it must actually lose the fight, THEN Jagraveen dies
+  let r = block('Aqua Hulcus');
+  check('it can block (the attack waits for a block)', r.phase, 'blocking');
+  check('the blocked attack broke no shield', r.T.O.shields.length, 5);
+  check('the weaker attacker was destroyed by the battle', r.T.P.graveyard.map(r.T.nm), ['Aqua Hulcus']);
+  check('Jagraveen is destroyed afterwards', [r.T.O.battlezone.length, r.T.O.graveyard.map(r.T.nm)], [0, [NAME]]);
+  const iBattle = at(r.log, /^B battle:/), iAtkDead = at(r.log, /Aqua Hulcus was destroyed/), iSelf = at(r.log, /Jagraveen was destroyed after blocking/);
+  check('order: battle, then the attacker dies, then Jagraveen', [iBattle >= 0, iAtkDead > iBattle, iSelf > iAtkDead], [true, true, true]);
+  check('Jagraveen was NOT destroyed before the battle', at(r.log, /^B (destroyed )?Necrodragon Jagraveen\.?$/), -1);
+  check('combat is closed and nothing is left flagged', [r.T.S.combat, r.T.O.graveyard.some(c => c.pendingSelfAction)], [null, false]);
+
+  // a stronger attacker: Jagraveen loses the fight itself, and must not be destroyed twice
+  r = block('Necrodragon Bryzenaga');
+  check('a stronger attacker survives', r.T.P.battlezone.map(r.T.nm), ['Necrodragon Bryzenaga']);
+  check('Jagraveen is in the graveyard exactly once', r.T.O.graveyard.map(r.T.nm), [NAME]);
+
+  // attacking with it is unaffected: Double Breaker, and it does NOT destroy itself
+  {
+    const T = newTable(DECK);
+    T.P.battlezone = [{ key: 'jg', id: 'X/' + NAME, tapped: false, summonedTurn: 2 }];
+    T.O.battlezone = []; T.O.shields = T.shields(['Cragsaur', 'Cragsaur', 'Cragsaur', 'Cragsaur', 'Cragsaur']);
+    T.say(T.a, { type: 'declareAttack', key: 'jg', target: { type: 'shield' } });
+    check('attacking: it breaks two shields', T.S.combat && T.S.combat.shieldsToBreak, 2);
+    T.say(T.a, { type: 'breakShield', key: 's0' }); T.say(T.a, { type: 'breakShield', key: 's1' });
+    check('attacking: it survives the attack (it only dies when it BLOCKS)', T.P.battlezone.map(T.nm), [NAME]);
+  }
+  // It only destroys itself when it BLOCKS. In any other battle it dies only if the other
+  // creature is at least as strong, like every creature.
+  const fight = (label, attackerSide, attName, defName, defTapped) => {
+    const T = newTable(DECK.concat(['Bolshack Dragon']));
+    const mine = (key, n, tapped) => ({ key, id: 'X/' + n, tapped: !!tapped, summonedTurn: 2 });
+    T.P.shields = []; T.O.shields = [];
+    if (attackerSide === 'jagraveen') {
+      T.P.battlezone = [mine('atk', NAME)]; T.O.battlezone = [mine('def', defName, true)];
+    } else {
+      T.P.battlezone = [mine('atk', attName)]; T.O.battlezone = [mine('def', NAME, true)];   // tapped, so it cannot block
+    }
+    T.say(T.a, { type: 'declareAttack', key: 'atk', target: { type: 'creature', key: 'def' } });
+    const jgOwner = attackerSide === 'jagraveen' ? T.P : T.O;
+    return { alive: jgOwner.battlezone.some(c => c.id === 'X/' + NAME), flagged: [...T.P.battlezone, ...T.O.battlezone].some(c => c.pendingSelfAction), T };
+  };
+  let f = fight('', 'jagraveen', null, 'Aqua Hulcus');
+  check('attacking a weaker creature: Jagraveen survives', [f.alive, f.T.O.graveyard.map(f.T.nm)], [true, ['Aqua Hulcus']]);
+  f = fight('', 'jagraveen', null, 'Necrodragon Bryzenaga');
+  check('attacking a stronger creature: Jagraveen is destroyed', [f.alive, f.T.O.battlezone.map(f.T.nm)], [false, ['Necrodragon Bryzenaga']]);
+  f = fight('', 'jagraveen', null, 'Bolshack Dragon');
+  check('attacking an equal creature: both are destroyed', [f.alive, f.T.O.battlezone.length], [false, 0]);
+  f = fight('', 'defender', 'Aqua Hulcus', null);
+  check('tapped Jagraveen attacked by a weaker creature: it survives', [f.alive, f.T.P.graveyard.map(f.T.nm)], [true, ['Aqua Hulcus']]);
+  f = fight('', 'defender', 'Necrodragon Bryzenaga', null);
+  check('tapped Jagraveen attacked by a stronger creature: destroyed', f.alive, false);
+  check('none of those left a self-destroy pending', f.flagged, false);
+  done('Necrodragon Jagraveen works properly');
 }
 
 if (WHICH === 'effects') {
