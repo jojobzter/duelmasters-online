@@ -42,6 +42,7 @@ let menuMusicMuted = localStorage.getItem('dm_music_muted') === '1';
 const SOUND_VOLUME = 0.55;
 const SOUND_POOL_SIZE = 3;   // primed copies per sound, so overlapping plays still work
 let cardDB = new Map();      // id ("DM-1/Name.png") -> {url, name, set}
+let cardsBySheetName = null;   // sheet name -> image ids, built on demand (see resolveBySheetName)
 let cardBackUrl = null;      // from a "card back" folder, if present
 const IMG_EXT = /\.(png|jpg|jpeg|webp|gif)$/i;
 // Old decks may hold ids captured before a file was renamed; map them onto whatever
@@ -50,7 +51,47 @@ function healDeckIds(ids) {
   return (ids || []).map(id => resolveCardId(id) || id);
 }
 function stripExt(id) { return typeof id === 'string' ? id.replace(IMG_EXT, '') : id; }
-function cardBaseName(id) { return id ? (id.split('/').pop() || id) : ''; }
+// The card's name as the SHEET spells it. A file called "Death Phoenix Foil" is the sheet's
+// "Death Phoenix, Avatar of Doom": the shiny version of the same card, filed under its short
+// title. Everything that looks a card up by name (cost, colours, abilities) goes through
+// here, so it finds the card whichever way the artwork was named. Mirrors sheetNameForFoil
+// in server.js.
+const FOIL_SUFFIX = /\s*[(\[]?\s*(?:[-\u2013\u2014]\s*)?foil\s*[)\]]?\s*$/i;
+let foilCache = new Map(), foilCacheDB = null, foilTitles = null;
+function foilSheetName(file) {
+  if (!/foil/i.test(file) || !FOIL_SUFFIX.test(file)) return null;
+  let db;
+  try { db = cardMetaDB; } catch (e) { return null; }      // sheet not declared/loaded yet
+  if (!db || !db.size) return null;
+  if (foilCacheDB !== db) { foilCache = new Map(); foilCacheDB = db; foilTitles = null; }
+  if (foilCache.has(file)) return foilCache.get(file);
+  let out = null;
+  if (!db.has(normKeyClient(file))) {                       // a sheet row with that exact name wins
+    const short = normKeyClient(file.replace(FOIL_SUFFIX, ''));
+    if (db.has(short)) {
+      out = db.get(short).name;
+    } else {
+      if (!foilTitles) {                                     // title before the first comma -> full names
+        foilTitles = new Map();
+        for (const [k, c] of db) {
+          const i = k.indexOf(',');
+          if (i <= 0) continue;
+          const title = k.slice(0, i).trim();
+          if (!foilTitles.has(title)) foilTitles.set(title, []);
+          foilTitles.get(title).push(c.name);
+        }
+      }
+      const hits = foilTitles.get(short);
+      if (hits && hits.length === 1) out = hits[0];          // exactly one card fits, or none
+    }
+  }
+  foilCache.set(file, out);
+  return out;
+}
+function cardBaseName(id) {
+  const file = id ? (id.split('/').pop() || id) : '';
+  return foilSheetName(file) || file;
+}
 // Filenames often can't hold an apostrophe, so it arrives as '_'. Normalising it here
 // keeps both the display name and the ability lookup working.
 function normKeyClient(name) {
@@ -312,6 +353,7 @@ function faceDownHtml() { return cardBackUrl ? `<img src="${cardBackUrl}" alt="c
 const cardDBNorm = new Map();
 function rebuildCardIndex() {
   cardDBNorm.clear();
+  resetSheetNameIndex();
   for (const key of cardDB.keys()) {
     const n = normKeyClient(key);
     if (!cardDBNorm.has(n)) cardDBNorm.set(n, key);
@@ -320,7 +362,27 @@ function rebuildCardIndex() {
 function resolveCardId(id) {
   if (!id) return null;
   if (cardDB.has(id)) return id;
-  return cardDBNorm.get(normKeyClient(id)) || null;
+  return cardDBNorm.get(normKeyClient(id)) || resolveBySheetName(id);
+}
+// A deck saved while the art was called "Death Phoenix Foil" still holds that id after the
+// file is renamed to the sheet's "Death Phoenix, Avatar of Doom" (or the other way round).
+// Match on the sheet's name for the card, preferring the same set folder.
+function resetSheetNameIndex() { cardsBySheetName = null; }
+function resolveBySheetName(id) {
+  const want = normKeyClient(cardBaseName(id));
+  if (!want) return null;
+  if (!cardsBySheetName) {
+    cardsBySheetName = new Map();
+    for (const key of cardDB.keys()) {
+      const k = normKeyClient(cardBaseName(key));
+      if (!cardsBySheetName.has(k)) cardsBySheetName.set(k, []);
+      cardsBySheetName.get(k).push(key);
+    }
+  }
+  const hits = cardsBySheetName.get(want);
+  if (!hits || !hits.length) return null;
+  const folder = id.includes('/') ? id.slice(0, id.lastIndexOf('/')) : '';
+  return hits.find(h => h.startsWith(folder + '/')) || hits[0];
 }
 function lookupCard(id) {
   const real = resolveCardId(id);
@@ -358,6 +420,7 @@ async function loadCardMetaDB() {
     const data = await res.json();
     const arr = data.cards || [];
     cardMetaDB = new Map();
+    resetSheetNameIndex();     // sheet names decide how Foil files map onto cards
     const civSet = new Set(), typeSet = new Set();
     arr.forEach(c => {
       cardMetaDB.set(normKeyClient(c.name), c);
@@ -864,6 +927,10 @@ function parseDecklist(raw) {
     let count = 1, name = line;
     if (m) { count = parseInt(m[1], 10); name = m[2]; }
     name = name.trim();
+    // "Death Phoenix Foil" in a list: no file of that name -> look for the card itself
+    if (FOIL_SUFFIX.test(name) && !byName.has(normKeyClient(name)) && !looseMap.has(loose(name))) {
+      name = name.replace(FOIL_SUFFIX, '');
+    }
     let id = byName.get(normKeyClient(name)) || looseMap.get(loose(name));
     // These names are long and get shortened in written lists — "Hydrooze" for
     // "Hydrooze, the Mutant Emperor". Accept a shortened name when exactly one card
