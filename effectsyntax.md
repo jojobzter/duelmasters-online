@@ -982,3 +982,18 @@ not honour them, so these are the rules it now follows. Regression checks:
 - **`onBlock: destroy self`** — "destroy it *after it battles*". It is deferred like
   `onAttack: destroy self` and runs once the battle is over, so the blocker still fights.
   If it lost the battle it is already gone, and is never destroyed twice.
+
+## 18. Card art named "<Title> Foil"
+
+A card's cost, colours and abilities are found by matching the IMAGE FILE'S NAME to the
+sheet's Name column (the card id is `<folder>/<file name>`, built from the folder you load
+in the browser). Foil artwork is often filed under the short title — `DM-12/Death Phoenix
+Foil` for the sheet's `Death Phoenix, Avatar of Doom` — which used to leave the card "not
+found in the card database". A name ending in `Foil` (also `(Foil)` / `- Foil`) is now read
+as the same card when that resolves to exactly one sheet row: first the name without
+"Foil", then the sheet names whose title before the first comma is that name. A name that
+is itself a sheet row is never rewritten, an ambiguous short title (two sheet cards start
+"Hydrooze,") is never guessed, and a Foil that fits nothing is still refused. Decks saved
+under the old file name also find the file again after it is renamed to the sheet's name.
+Server: `sheetNameForFoil` / `cardLabel`. Client: `foilSheetName` / `cardBaseName` /
+`resolveBySheetName`. Regression check: `node check.js foil`.

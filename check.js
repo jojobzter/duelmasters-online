@@ -24,6 +24,7 @@ const CHECKS = [
   ['manaleak',[],                      'a refused summon does not eat your mana'],
   ['phoenix', [],                      'Death Phoenix: Vortex, shields to graveyard, discard on leaving'],
   ['jagraveen',[],                     'Necrodragon Jagraveen destroys itself after the battle it blocks'],
+  ['foil',     [],                     'artwork named "<Title> Foil" resolves to the sheet card'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']

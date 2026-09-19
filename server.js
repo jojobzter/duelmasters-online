@@ -382,7 +382,46 @@ function newKey() { return crypto.randomBytes(6).toString('hex'); }
 function cardLabel(id) {
   if (!id) return 'a card';
   const file = id.split('/').pop() || id;
-  return file.replace(/\.[^.]+$/, '');
+  const label = file.replace(/\.[^.]+$/, '');
+  // "Death Phoenix Foil" IS "Death Phoenix, Avatar of Doom" — see sheetNameForFoil
+  return (/foil/i.test(label) && sheetNameForFoil(label)) || label;
+}
+
+// Artwork is often filed as the SHORT title plus "Foil" — "Death Phoenix Foil" for the
+// sheet's "Death Phoenix, Avatar of Doom". A foil is the same card printed shiny, but the
+// game finds a card's cost and abilities by matching the image's file name to the sheet's
+// Name column, so that file name left the card "not found in the card database". This maps
+// such a name onto the sheet's own name. It only ever applies to a name that ends in
+// "Foil" and is NOT already a sheet name, and only when exactly one card fits, so it
+// cannot turn one real card into another.
+const FOIL_SUFFIX = /\s*[(\[]?\s*(?:[-\u2013\u2014]\s*)?foil\s*[)\]]?\s*$/i;
+let FOIL_CACHE = new Map(), FOIL_CACHE_DB = null, FOIL_TITLES = null;
+function sheetNameForFoil(label) {
+  if (!FOIL_SUFFIX.test(label)) return null;
+  if (FOIL_CACHE_DB !== CARD_DB) { FOIL_CACHE = new Map(); FOIL_CACHE_DB = CARD_DB; FOIL_TITLES = null; }
+  if (FOIL_CACHE.has(label)) return FOIL_CACHE.get(label);
+  let out = null;
+  if (!CARD_DB.has(normalizeCardKey(label))) {             // a sheet row with that exact name wins
+    const short = normalizeCardKey(label.replace(FOIL_SUFFIX, ''));
+    if (CARD_DB.has(short)) {
+      out = CARD_DB.get(short).name;
+    } else {
+      if (!FOIL_TITLES) {                                    // title before the first comma -> full names
+        FOIL_TITLES = new Map();
+        for (const [k, c] of CARD_DB) {
+          const i = k.indexOf(',');
+          if (i <= 0) continue;
+          const title = k.slice(0, i).trim();
+          if (!FOIL_TITLES.has(title)) FOIL_TITLES.set(title, []);
+          FOIL_TITLES.get(title).push(c.name);
+        }
+      }
+      const hits = FOIL_TITLES.get(short);
+      if (hits && hits.length === 1) out = hits[0];
+    }
+  }
+  FOIL_CACHE.set(label, out);
+  return out;
 }
 
 // Names of cards whose "search your deck" ability the app is allowed to facilitate.
