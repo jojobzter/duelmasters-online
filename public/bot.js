@@ -360,7 +360,38 @@ const Bot = (() => {
     return scored[0].c;
   }
 
+  // "static: vortex Zombie Dragon+Fire Bird": the races a Vortex evolution needs.
+  function vortexRaces(id) {
+    const m = String(meta(id).effectText || '').match(/vortex\s+([^;\n]+)/i);
+    if (!m) return null;
+    const races = m[1].split('+').map(r => r.trim().toLowerCase()).filter(Boolean);
+    return races.length >= 2 ? races : null;
+  }
+  // The creatures a Vortex evolution goes on: two DIFFERENT ones, one of each named race,
+  // the weakest that fit so the better bodies stay on the table. null if it can't be done.
+  function vortexBasesFor(state, card) {
+    const races = vortexRaces(card.id);
+    if (!races) return null;
+    const pool = myState(state).battlezone.slice().sort((x, y) => powerOf(x.id) - powerOf(y.id));
+    const picked = [];
+    const place = (i) => {
+      if (i === races.length) return true;
+      for (const c of pool) {
+        if (picked.includes(c) || !racesOf(c.id).includes(races[i])) continue;
+        picked.push(c);
+        if (place(i + 1)) return true;
+        picked.pop();
+      }
+      return false;
+    };
+    return place(0) ? picked : null;
+  }
+
   function evolutionBaseFor(state, card) {
+    if (vortexRaces(card.id)) {            // a Vortex evolution ignores its own race entirely
+      const vb = vortexBasesFor(state, card);
+      return vb ? vb[0] : null;
+    }
     const me = myState(state);
     const a = racesOf(card.id);
     // evolve from the weakest valid base, keeping the better body on the table
@@ -693,8 +724,12 @@ const Bot = (() => {
     if (play) {
       const msg = { type: 'summonCard', key: play.key };
       if (isEvolution(play.id)) {
-        const base = evolutionBaseFor(state, play);
-        if (base) msg.baseKey = base.key;
+        const vb = vortexBasesFor(state, play);
+        if (vb) { msg.baseKey = vb[0].key; msg.baseKey2 = vb[1].key; }
+        else {
+          const base = evolutionBaseFor(state, play);
+          if (base) msg.baseKey = base.key;
+        }
       }
       lastAttemptKey = play.key;
       act(() => send(msg), DELAY.normal);

@@ -2390,10 +2390,10 @@ function isEvolutionById(id) { return /evolution/i.test(cardMetaFor(id).type || 
 function racesOfId(id) {
   return (cardMetaFor(id).race || '').toLowerCase().split('/').map(r => r.trim()).filter(Boolean);
 }
-// "static: vortex Merfolk+Chimera" in the effect text names the two required races.
+// "static: vortex Zombie Dragon+Fire Bird" in the effect text names the required races.
 function vortexRacesClient(cardId) {
   const txt = String(cardMetaFor(cardId).effectText || '');
-  const m = txt.match(/vortex\s+([A-Za-z ]+(?:\+[A-Za-z ]+)+)/i);
+  const m = txt.match(/vortex\s+([^;\n]+)/i);
   if (!m) return null;
   const races = m[1].split('+').map(r => r.trim()).filter(Boolean);
   return races.length >= 2 ? races : null;
@@ -2407,6 +2407,27 @@ function raceMatchesClient(cardId, race) {
 function canEvolveOntoClient(evoId, baseId) {
   const a = racesOfId(evoId), b = racesOfId(baseId);
   return a.length && b.length && a.some(r => b.includes(r));
+}
+// Does an evolution creature in hand have anything to go on? A Vortex evolution is put on
+// TWO different creatures, one of each race it names (Death Phoenix: a Zombie Dragon AND a
+// Fire Bird — its own race, Phoenix, is irrelevant); any other evolution needs one creature
+// that shares a race with it. Checking only the second rule refused every Vortex evolution
+// before the two-creature picker could open.
+function canEvolveFromClient(evoId, zone) {
+  const vRaces = vortexRacesClient(evoId);
+  if (!vRaces) return (zone || []).some(b => canEvolveOntoClient(evoId, b.id));
+  const taken = new Set();
+  const place = (i) => {
+    if (i === vRaces.length) return true;
+    for (const c of (zone || [])) {
+      if (taken.has(c.key) || !raceMatchesClient(c.id, vRaces[i])) continue;
+      taken.add(c.key);
+      if (place(i + 1)) return true;
+      taken.delete(c.key);
+    }
+    return false;
+  };
+  return place(0);
 }
 let multiTableChosen = new Set();
 
@@ -2866,10 +2887,13 @@ function renderState(state) {
           if (isEvolutionById(c.id)) {
             const st = seats[activeSeat] && seats[activeSeat].state;
             const mine = st && st.players[st.you];
-            const legal = mine ? mine.battlezone.filter(b => canEvolveOntoClient(c.id, b.id)) : [];
-            if (!legal.length) {
-              alert(displayName(c.id) + ' is an evolution creature — you need a ' +
-                    ((cardMetaFor(c.id).race) || 'matching') + ' creature in your battle zone first.');
+            if (!mine || !canEvolveFromClient(c.id, mine.battlezone)) {
+              const vRaces = vortexRacesClient(c.id);
+              alert(vRaces
+                ? displayName(c.id) + ' is a Vortex evolution — you need a ' + vRaces.join(' and a ') +
+                  ' in your battle zone first.'
+                : displayName(c.id) + ' is an evolution creature — you need a ' +
+                  ((cardMetaFor(c.id).race) || 'matching') + ' creature in your battle zone first.');
               return;
             }
             evolveMode = { handKey: c.key, cardId: c.id };
