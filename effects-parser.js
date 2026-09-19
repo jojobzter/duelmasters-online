@@ -564,8 +564,11 @@ function parseAction(body, mods) {
     case 'vortex': {
       // "vortex Merfolk+Chimera" — a Vortex evolution needs ONE of each race, not one
       // creature matching either. Recorded as a property so the summon path can check it.
-      const spec = rest.join(' ').replace(/\s+/g, '');
-      const parts = spec.split('+').filter(Boolean);
+      // Race names keep their internal spaces ("Zombie Dragon+Fire Bird"): stripping
+      // them left "ZombieDragon"/"FireBird", which no creature's race ever matched, so
+      // every Vortex evolution with a two-word race could never be summoned.
+      const parts = rest.join(' ').split('+')
+        .map(r => r.replace(/\s+/g, ' ').trim()).filter(Boolean);
       return { action: 'vortexEvolution', races: parts };
     }
     case 'evocharge': {

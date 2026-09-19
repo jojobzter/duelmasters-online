@@ -527,6 +527,22 @@ function removeBattleCard(owner, key) {
   releaseGearFrom(owner, key, null);
   return owner.battlezone.splice(i, 1)[0];
 }
+// "When this creature leaves the battle zone" (Death Phoenix, Cruel Naga, Aura Pegasus...)
+// however it leaves: destroyed, returned to hand, put into mana, deck or shields. Call it
+// just AFTER the card is taken off the table and BEFORE its stack is dissolved, so a clause
+// that looks at the cards underneath it still sees them. `removed` says the caller has
+// already taken the card out of the battle zone; without it the card must still be there,
+// which stops a creature that was never on the table (a card in mana) from firing it.
+function fireLeaveBattleZone(owner, card, logs, removed) {
+  const st = owner && owner.__state;
+  if (!st || !card) return;
+  if (!((cardMeta(card.id) || {}).parsedEffects || []).some(e => e.trigger === 'onwouldleavebattlezone')) return;
+  if (!removed && !owner.battlezone.some(c => c.key === card.key)) return;
+  const oi = st.players.indexOf(owner);
+  if (oi === -1) return;
+  firePar(st, oi, card, 'onwouldleavebattlezone', logs || st.__deathLogs || []);
+}
+
 // Single funnel for battlezone -> graveyard so the Coiling Vines redirect can't be
 // missed by one of the several paths that destroy a creature.
 function battleCardToGrave(owner, card) {
@@ -535,9 +551,12 @@ function battleCardToGrave(owner, card) {
     const oi0 = st0.players.indexOf(owner);
     const ev = { cardId: card.id, key: card.key, ownerIdx: oi0 };
     fireBoardWide(st0, 'onowncreaturewouldbedestroyed', st0.__deathLogs || [], { onlySide: oi0, exceptKey: card.key, event: ev });
-    firePar(st0, oi0, card, 'onwouldleavebattlezone', st0.__deathLogs || []);
   }
   const oi = st0 ? st0.players.indexOf(owner) : -1;
+  // The leave-the-battle-zone clause fires on the branches below where the creature really
+  // does leave. It used to fire up here, before the protection checks, so a creature that
+  // was protected or saved (and never left) still set it off.
+  const leaving = () => fireLeaveBattleZone(owner, card, null, true);
   if (st0 && oi !== -1) {
     const kw = grantedKeywords(st0, oi, card);
     // outright protection from destruction
@@ -566,11 +585,13 @@ function battleCardToGrave(owner, card) {
     }
     // keyword forms of the "goes somewhere else instead" replacement
     if (hasKw(kw, 'returnondestroy') || hasKw(kw, 'ondestroy->hand')) {
+      leaving();
       dissolveStack(owner, card, null, 'hand');
       owner.hand.push({ id: card.id, key: card.key });
       return 'hand';
     }
     if (hasKw(kw, 'tomanaondestroy')) {
+      leaving();
       dissolveStack(owner, card, null, 'hand');
       const sl = manaSlot(owner);
       owner.mana.push({ id: card.id, key: card.key, tapped: false, x: sl.x, y: sl.y });
@@ -581,6 +602,7 @@ function battleCardToGrave(owner, card) {
   const dm = (cardMeta(card.id) || {}).parsedEffects || [];
   const move = dm.find(e => e.trigger === 'ondestroy' && e.action === 'moveSelf');
   if (move) {
+    leaving();
     dissolveStack(owner, card, null, move.to === 'mana' ? 'hand' : 'hand');
     if (move.to === 'mana') {
       const sl = manaSlot(owner);
@@ -590,6 +612,7 @@ function battleCardToGrave(owner, card) {
     owner.hand.push({ id: card.id, key: card.key });
     return 'hand';
   }
+  leaving();
   // Every other onDestroy clause fires as the creature dies — a farewell effect like
   // Bombersaur's, Cetibols' draw or Snipe Bug's ramp. Only "-> hand/mana" above
   // replaces destruction; these happen alongside it.
@@ -641,8 +664,11 @@ function vortexRaces(cardId) {
   return null;
 }
 // does this creature satisfy one named race of a Vortex requirement?
+// Compared with whitespace ignored, so "Zombie Dragon" matches however the sheet spaced it.
 function matchesVortexRace(baseId, race) {
-  return racesOf(baseId).includes(String(race).toLowerCase());
+  const squash = (s) => String(s).toLowerCase().replace(/\s+/g, '');
+  const want = squash(race);
+  return racesOf(baseId).some(r => squash(r) === want);
 }
 
 function canEvolveOnto(evoId, baseId) {
@@ -911,20 +937,24 @@ function resolvePostAttack(state, ownerIdx, logs) {
   for (const c of me.battlezone.slice()) {
     if (!c.pendingSelfAction) continue;
     const what = c.pendingSelfAction;
+    const cause = c.pendingSelfCause || null;      // 'blocking' for "when this blocks, destroy it"
     c.pendingSelfAction = null;
+    c.pendingSelfCause = null;
     const i = me.battlezone.findIndex(x => x.key === c.key);
     if (i === -1) continue;
     me.battlezone.splice(i, 1);
     if (what === 'destroy') {
       const dest = battleCardToGrave(me, c);
-      logs.push(cardLabel(c.id) + ' was destroyed after attacking' +
+      logs.push(cardLabel(c.id) + ' was destroyed after ' + (cause || 'attacking') +
                 (dest && dest !== 'graveyard' ? ' (to ' + dest + ')' : '') + '.');
       creatureDestroyed(me, state.players[ownerIdx === 0 ? 1 : 0], c, logs, true);
     } else if (what === 'bounce' || what === 'toHand') {
+      fireLeaveBattleZone(me, c, logs, true);
       dissolveStack(me, c, logs, 'hand');
       me.hand.push({ id: c.id, key: c.key });
-      logs.push(cardLabel(c.id) + ' returned to their hand after attacking.');
+      logs.push(cardLabel(c.id) + ' returned to their hand after ' + (cause || 'attacking') + '.');
     } else {
+      fireLeaveBattleZone(me, c, logs, true);
       me.graveyard.push({ id: c.id, key: c.key });
     }
   }
@@ -935,6 +965,21 @@ function roomSocketFor(state, idx) {
     if (room.state === state) return room.sockets[idx] || null;
   }
   return null;
+}
+
+// "Whenever this creature would break a shield, your opponent puts that shield into his
+// graveyard instead" (Death Phoenix, Avatar of Doom), written in the sheet on the ATTACKER
+// as "onShieldWouldBreak: oppShield -> grave instead". The same trigger name also means
+// "one of MY shields would break" on a defender's card (Glais Mejicula), so a clause only
+// counts as this replacement when it is the shield-to-graveyard one.
+function isShieldToGraveReplacement(e) {
+  return !!(e && e.trigger === 'onshieldwouldbreak' && e.replacement && e.action === 'toGrave' &&
+            e.selector && e.selector.name === 'oppShield');
+}
+function brokenShieldGoesToGrave(state, atkIdx, attacker) {
+  return ((cardMeta(attacker.id) || {}).parsedEffects || []).some(e =>
+    isShieldToGraveReplacement(e) &&
+    (!e.condition || conditionHolds(state, atkIdx, attacker, e.condition, null)));
 }
 
 function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrigger) {
@@ -980,6 +1025,10 @@ function breakOneShield(state, atkIdx, defIdx, attacker, shieldKey, logs, onTrig
   if (atkName === 'bolmeteus steel dragon') {
     opp.graveyard.push({ id: sh.id, key: sh.key });
     logs.push('broke a shield with Bolmeteus Steel Dragon — it went straight to the graveyard.');
+  } else if (attacker && brokenShieldGoesToGrave(state, atkIdx, attacker)) {
+    // a replacement, so the shield never reaches the hand and there is no Shield Trigger
+    opp.graveyard.push({ id: sh.id, key: sh.key });
+    logs.push('broke a shield with ' + cardLabel(attacker.id) + ' — it went to the graveyard instead of their hand.');
   } else {
     opp.hand.push({ id: sh.id, key: sh.key });
     logs.push('broke a shield.');
@@ -2304,6 +2353,9 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
   const _state = state;
   const meta = cardMeta(cardId) || {};
   let clauses = (meta.parsedEffects || []).filter(e => e.trigger === trigger);
+  // the attacker-side shield-to-graveyard replacement is applied by breakOneShield; it is
+  // not a trigger, and must not run when one of ITS OWNER's shields is the one being broken
+  clauses = clauses.filter(e => !isShieldToGraveReplacement(e));
   // a clause with a bracket filter only fires for a matching event
   if (ctx && ctx.event) {
     clauses = clauses.filter(e => triggerFilterMatches(state, meIdx, e.triggerFilter, ctx.event));
@@ -2385,13 +2437,17 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       case 'toShield': case 'toDeckTop': case 'tap': case 'untap': {
         // "onPlayerAttack: destroy self" means destroyed AFTER the attack, not instead
         // of it. Flag it and let the post-combat sweep handle it.
+        // Likewise "onBlock: destroy self" (Necrodragon Jagraveen: "destroy it after it
+        // battles") — destroying it here would kill it BEFORE the fight it was blocking for.
+        const selfAfterBlock = trigger === 'onblock' && e.action === 'destroy';
         if (e.selector && e.selector.selfOnly &&
-            (trigger === 'onplayerattack' || trigger === 'onattack' || trigger === 'onunblockedattack')) {
+            (trigger === 'onplayerattack' || trigger === 'onattack' || trigger === 'onunblockedattack' || selfAfterBlock)) {
           const selfCard = me.battlezone.find(c => c.key === cardKey);
           if (selfCard) {
             selfCard.pendingSelfAction = e.action;
+            selfCard.pendingSelfCause = selfAfterBlock ? 'blocking' : null;
             logs.push(cardLabel(cardId) + ' will be ' +
-              (e.action === 'destroy' ? 'destroyed' : 'moved') + ' after this attack.');
+              (e.action === 'destroy' ? 'destroyed' : 'moved') + ' after this ' + (selfAfterBlock ? 'battle' : 'attack') + '.');
           }
           break;
         }
@@ -2549,6 +2605,7 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         const i = me.battlezone.findIndex(c => c.key === cardKey);
         if (i === -1) break;
         const [self] = me.battlezone.splice(i, 1);
+        fireLeaveBattleZone(me, self, logs, true);
         const dest = (e.to || 'hand').toLowerCase();
         if (dest === 'mana') {
           dissolveStack(me, self, logs, 'hand');
@@ -3057,6 +3114,7 @@ function applyImmediate(state, owner, card, action, logs) {
     case 'returnToHand':
       if (!inBattle) return;
       owner.battlezone.splice(i, 1);
+      fireLeaveBattleZone(owner, card, logs, true);
       dissolveStack(owner, card, logs, 'hand');
       owner.hand.push({ id: card.id, key: card.key });
       break;
@@ -3343,6 +3401,7 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
         const ownerIdx2 = (owner === me) ? meIdx : oppIdx;
         if (!metaOf(c.id).blocker && !hasKw(grantedKeywords(state, ownerIdx2, c), 'blocker')) continue;
         removeBattleCard(owner, c.key);
+        fireLeaveBattleZone(owner, c, extraLog, true);
         dissolveStack(owner, c, extraLog, 'hand');
         owner.hand.push({ id: c.id, key: c.key });
         bounced.push(cardLabel(c.id));
@@ -4157,6 +4216,7 @@ wss.on('connection', (ws) => {
           const ci2 = me.battlezone.findIndex(x => x.key === c.key);
           if (ci2 === -1) continue;
           me.battlezone.splice(ci2, 1);
+          fireLeaveBattleZone(me, c, extraLogs, true);
           dissolveStack(me, c, extraLogs, 'hand');
           me.hand.push({ id: c.id, key: c.key });
           extraLogs.push(cardLabel(c.id) + ' returned to their hand (Cyclone).');
@@ -4782,6 +4842,7 @@ wss.on('connection', (ws) => {
         const i = me.battlezone.findIndex(c => c.key === msg.key);
         if (i === -1) return;
         const [c] = me.battlezone.splice(i, 1);
+        fireLeaveBattleZone(me, c, extraLogs, true);
         dissolveStack(me, c, extraLogs, 'hand');
         me.hand.push({ id: c.id, key: c.key });
         logText = 'returned ' + cardLabel(c.id) + ' from the battlefield to hand.';
@@ -5063,6 +5124,8 @@ wss.on('connection', (ws) => {
         }
 
         const label = cardLabel(card.id);
+        // was this card a creature on the table? then leaving it may set off its own clause
+        const fromBz = owner.battlezone.includes(card);
         switch (eff.action) {
           case 'tap':
             if (card.tapped) { send(ws, { type: 'summonRejected', reason: label + ' is already tapped.' }); return; }
@@ -5124,12 +5187,14 @@ wss.on('connection', (ws) => {
           }
           case 'returnToHand':
             list.splice(ci, 1);
+            if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
             dissolveStack(owner, card, extraLogs, 'hand');
             owner.hand.push({ id: card.id, key: card.key });
             logText = 'used ' + eff.source + ' to return ' + label + " to its owner's hand.";
             break;
           case 'toHand':
             list.splice(ci, 1);
+            if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
             me.hand.push({ id: card.id, key: card.key });
             logText = 'used ' + eff.source + ' to take ' + label + ' back into their hand.';
             break;
@@ -5148,6 +5213,7 @@ wss.on('connection', (ws) => {
                   event: { cardId: card.id, key: card.key, ownerIdx: s.players.indexOf(owner) } });
             }
             list.splice(ci, 1);
+            if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
             dissolveStack(owner, card, extraLogs, 'hand');
             const slot = manaSlot(owner);
             owner.mana.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y });
@@ -5156,6 +5222,7 @@ wss.on('connection', (ws) => {
           }
           case 'toOwnMana': {
             list.splice(ci, 1);
+            if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
             const slot = manaSlot(me);
             me.mana.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y });
             logText = 'used ' + eff.source + ' to put ' + label + ' into their mana zone.';
@@ -5172,12 +5239,14 @@ wss.on('connection', (ws) => {
             break;
           case 'toTopOfDeck':
             list.splice(ci, 1);
+            if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
             dissolveStack(owner, card, extraLogs, 'hand');
             owner.deck.unshift(card.id);
             logText = 'used ' + eff.source + ' to put ' + label + " on top of its owner's deck.";
             break;
           case 'toOwnerShield':
             list.splice(ci, 1);
+            if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
             owner.shields.push({ id: card.id, key: card.key, faceUp: false, slot: nextShieldSlot(owner) });
             logText = 'used ' + eff.source + ' to put ' + label + " into its owner's shield zone.";
             break;
@@ -5252,6 +5321,7 @@ wss.on('connection', (ws) => {
           if (i === -1) continue;
           const card = list[i];
           const label = cardLabel(card.id);
+          const fromBz = owner.battlezone.includes(card);
           switch (pm.action) {
             case 'destroy': {
               list.splice(i, 1);
@@ -5265,17 +5335,20 @@ wss.on('connection', (ws) => {
               break;
             case 'returnToHand':
               list.splice(i, 1);
+              if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
               dissolveStack(owner, card, extraLogs, 'hand');
               owner.hand.push({ id: card.id, key: card.key });
               done.push(label);
               break;
             case 'toHand':
               list.splice(i, 1);
+              if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
               me.hand.push({ id: card.id, key: card.key });
               done.push(label);
               break;
             case 'toOwnMana': {
               list.splice(i, 1);
+              if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
               const slot = manaSlot(me);
               me.mana.push({ id: card.id, key: card.key, tapped: false, x: slot.x, y: slot.y });
               done.push(label);
@@ -5297,6 +5370,7 @@ wss.on('connection', (ws) => {
             }
             case 'toOwnerMana': {
               list.splice(i, 1);
+              if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
               const slotO = manaSlot(owner);
               owner.mana.push({ id: card.id, key: card.key, tapped: false, x: slotO.x, y: slotO.y });
               done.push(label);
@@ -5304,12 +5378,14 @@ wss.on('connection', (ws) => {
             }
             case 'toOwnerShield': {
               list.splice(i, 1);
+              if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
               owner.shields.push({ id: card.id, key: card.key, faceUp: false, slot: nextShieldSlot(owner) });
               done.push(label);
               break;
             }
             case 'toTopOfDeck': {
               list.splice(i, 1);
+              if (fromBz) fireLeaveBattleZone(owner, card, extraLogs, true);
               owner.deck.unshift(card.id);
               done.push(label);
               break;
@@ -5641,6 +5717,9 @@ wss.on('connection', (ws) => {
               event: { cardId: atk.id, key: atk.key, ownerIdx: cb.attackerIdx } });
           const res = resolveBattle(s, cb.attackerIdx, atk, idx, blk, extraLogs);
           endCombat(s, extraLogs);
+          // endCombat sweeps the ATTACKER's deferred self-actions; a blocker that destroys
+          // itself after it battles (Necrodragon Jagraveen) belongs to the other player.
+          resolvePostAttack(s, idx, extraLogs);
           if (res.needsManual) manualBattle = res.needsManual;
           break;
         }

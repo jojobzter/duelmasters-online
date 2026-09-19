@@ -952,3 +952,33 @@ batch:
 cross-row agreement check both came back clean afterward (0 duplicate groups, 0
 disagreements across Civilization/Mana Cost/Power/Race/Type for every multi-row card
 name in the sheet).
+
+## 17. Engine semantics pinned down for Death Phoenix and Necrodragon Jagraveen
+
+No new syntax — both cards' Effect cells were already in the sheet — but the engine did
+not honour them, so these are the rules it now follows. Regression checks:
+`node check.js phoenix` and `node check.js jagraveen`.
+
+- **`static: vortex Zombie Dragon+Fire Bird`** — race names keep their internal spaces.
+  The parser used to strip them (`ZombieDragon`/`FireBird`), which no creature's race ever
+  matched, so every Vortex evolution with a two-word race (Death Phoenix, Soul Phoenix,
+  Aura Pegasus, Wise Staroid) was unsummonable. Only single-word pairs (Cruel Naga:
+  `Merfolk+Chimera`) had worked. Matching also ignores spacing and case.
+- **`onShieldWouldBreak: oppShield -> grave instead`, written on the ATTACKER** — "whenever
+  this creature would break a shield, your opponent puts that shield into his graveyard
+  instead". The broken shield goes to the graveyard, never the hand, so it gets no Shield
+  Trigger; the shield still counts as broken (`onBreak` clauses and Turbo Rush see it).
+  This is a replacement the engine applies in `breakOneShield`, not a trigger that fires
+  a prompt. The same trigger name on a card that is being *attacked* (Glais Mejicula:
+  `discard 2 ownHand, optional, prevents break`) is unrelated and unchanged; the two are
+  told apart by the `oppShield -> grave instead` shape.
+- **`onWouldLeaveBattleZone:`** now fires however the creature leaves — destroyed
+  (battle, spell, or the table's Destroy button), returned to hand, put into mana, deck or
+  shields — as its notes above always said, but the engine only ever fired it on
+  destruction. It fires once, after the card is off the table and before the cards stacked
+  underneath it are moved (so `self.underCards` is still readable), and **only when the
+  creature really leaves**: a creature that is protected from destruction or saved by a
+  Saver never left, so nothing fires. Applies to every card using the trigger.
+- **`onBlock: destroy self`** — "destroy it *after it battles*". It is deferred like
+  `onAttack: destroy self` and runs once the battle is over, so the blocker still fights.
+  If it lost the battle it is already gone, and is never destroyed twice.
