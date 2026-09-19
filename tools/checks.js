@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1553,6 +1553,26 @@ function makeChecker() {
   return c;
 }
 
+// Runs `scenarios(check)` INSIDE the real public/client.js (under a DOM stub), so the
+// scenarios can reach its functions and module-level variables directly.
+function runInClient(scenarios, check) {
+  const mk = () => ({ style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' }, classList: { add(){}, remove(){}, toggle(){}, contains: () => false },
+    addEventListener(){}, removeEventListener(){}, appendChild(){}, insertBefore(){}, querySelector: () => mk(), querySelectorAll: () => [], setAttribute(){}, getAttribute: () => null,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), textContent: '', innerHTML: '', value: '', checked: false, focus(){}, remove(){}, children: [], dataset: {}, scrollIntoView(){}, click(){} });
+  global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800, location: { href: '', protocol: 'https:', host: 'x' }, matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
+  global.document = { getElementById: () => mk(), querySelector: () => mk(), querySelectorAll: () => [], createElement: () => mk(), addEventListener(){}, body: mk(), head: mk(), documentElement: mk(), readyState: 'complete' };
+  global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+  global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
+  global.WebSocket = function () { return { addEventListener(){}, send(){}, close(){} }; };
+  global.fetch = () => Promise.reject(new Error('offline'));
+  global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
+  const src = require('fs').readFileSync(__dirname + '/../public/client.js', 'utf8');
+  const wq = console.warn; console.warn = () => {};
+  try { eval(src + '\n;(' + scenarios.toString() + ')(check);'); }
+  catch (e) { check('client.js runs the scenarios without throwing', e.message, null); }
+  console.warn = wq;
+}
+
 if (WHICH === 'phoenix') {
   // Death Phoenix, Avatar of Doom: Vortex evolution (Zombie Dragon + Fire Bird), goes
   // into the mana zone tapped, Double Breaker; a shield it would break goes to the
@@ -1792,19 +1812,7 @@ if (WHICH === 'foil') {
     check('...and its bases are stacked under it', ((T.P.battlezone[0] || {}).under || []).length, 2);
   }
 
-  // -- client: names, metadata and saved decks. Runs the real client.js under a DOM stub;
-  // the scenarios below are evaluated INSIDE that script so they can reach its functions.
-  const mk = () => ({ style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' }, classList: { add(){}, remove(){}, toggle(){}, contains: () => false },
-    addEventListener(){}, removeEventListener(){}, appendChild(){}, insertBefore(){}, querySelector: () => mk(), querySelectorAll: () => [], setAttribute(){}, getAttribute: () => null,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), textContent: '', innerHTML: '', value: '', checked: false, focus(){}, remove(){}, children: [], dataset: {}, scrollIntoView(){}, click(){} });
-  global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800, location: { href: '', protocol: 'https:', host: 'x' }, matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
-  global.document = { getElementById: () => mk(), querySelector: () => mk(), querySelectorAll: () => [], createElement: () => mk(), addEventListener(){}, body: mk(), head: mk(), documentElement: mk(), readyState: 'complete' };
-  global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
-  global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
-  global.WebSocket = function () { return { addEventListener(){}, send(){}, close(){} }; };
-  global.fetch = () => Promise.reject(new Error('offline'));
-  global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
-
+  // -- client: names, metadata and saved decks
   const clientScenarios = function (check) {
     // identifiers below (cardMetaDB, cardDB, cardBaseName, ...) belong to client.js
     const sheet = [{ name: 'Death Phoenix, Avatar of Doom', cost: 4 }, { name: 'Necrodragon Jagraveen', cost: 6 },
@@ -1836,12 +1844,119 @@ if (WHICH === 'foil') {
     const r = parseDecklist('2x Death Phoenix Foil\n1 ' + full + '\n1 Bogus Card');
     check('client: a decklist line "Death Phoenix Foil" finds the card', [r.deck.length, r.deck[0], r.notFound], [3, 'DM-12/' + full, ['Bogus Card']]);
   };
-  const src = require('fs').readFileSync(__dirname + '/../public/client.js', 'utf8');
-  const wq = console.warn; console.warn = () => {};
-  try { eval(src + '\n;(' + clientScenarios.toString() + ')(check);'); }
-  catch (e) { check('client.js runs the foil scenarios without throwing', e.message, null); }
-  console.warn = wq;
+  runInClient(clientScenarios, check);
   done('Foil-named artwork resolves to the sheet card');
+}
+
+
+if (WHICH === 'evolve') {
+  // Death Phoenix (Vortex: a Zombie Dragon AND a Fire Bird) could not be summoned from the
+  // hand: the Summon menu refused it because no Phoenix was on the table — the ordinary
+  // "evolve from your own race" rule — before the two-creature picker could ever open.
+  // Everything that decides whether an evolution can be played must know about Vortex:
+  // the click gate, the picker, and the computer player.
+  const fs = require('fs');
+  const { check, done } = makeChecker();
+  const NAME = 'Death Phoenix, Avatar of Doom';
+  const clientSrc = fs.readFileSync(__dirname + '/../public/client.js', 'utf8');
+  check('the Summon menu uses the Vortex-aware test', /canEvolveFromClient\(c\.id, mine\.battlezone\)/.test(clientSrc), true);
+  check('...and no longer only the same-race one', /mine\.battlezone\.filter\(b => canEvolveOntoClient\(c\.id, b\.id\)\)/.test(clientSrc), false);
+
+  // -- client: can it be summoned, what does the picker offer, what does it send
+  runInClient(function (check) {
+    const DP = 'DM-12/Death Phoenix, Avatar of Doom';
+    const db = [
+      { name: 'Death Phoenix, Avatar of Doom', type: 'Evolution Creature', race: 'Phoenix', cost: 4, effectText: 'static: vortex Zombie Dragon+Fire Bird; static: grant entersManaTapped self' },
+      { name: 'Necrodragon Jagraveen', type: 'Creature', race: 'Zombie Dragon' }, { name: 'Necrodragon Gilland', type: 'Creature', race: 'Zombie Dragon' },
+      { name: 'Cocco Lupia', type: 'Creature', race: 'Fire Bird' }, { name: 'Bolshack Dragon', type: 'Creature', race: 'Armored Dragon' },
+      { name: 'Aqua Surfer', type: 'Creature', race: 'Liquid People' }, { name: 'Some Phoenix', type: 'Creature', race: 'Phoenix' },
+      { name: 'Dual Race', type: 'Creature', race: 'Zombie Dragon/Fire Bird' },
+      { name: 'Test Evolution', type: 'Evolution Creature', race: 'Liquid People', cost: 5 }
+    ];
+    cardMetaDB = new Map(); db.forEach(c => cardMetaDB.set(normKeyClient(c.name), c));
+    const z = (key, name) => ({ key, id: 'X/' + name });
+    const jg = z('jg', 'Necrodragon Jagraveen'), gl = z('gl', 'Necrodragon Gilland'), cl = z('cl', 'Cocco Lupia'),
+          bd = z('bd', 'Bolshack Dragon'), aq = z('aq', 'Aqua Surfer'), ph = z('ph', 'Some Phoenix'), du = z('du', 'Dual Race');
+    check('client: the Vortex races are read from the sheet', vortexRacesClient(DP), ['Zombie Dragon', 'Fire Bird']);
+    check('client: Zombie Dragon + Zombie Dragon + Fire Bird: can summon', canEvolveFromClient(DP, [jg, gl, cl]), true);
+    check('client: a Zombie Dragon and a Fire Bird are enough', canEvolveFromClient(DP, [jg, cl]), true);
+    check('client: no Fire Bird: cannot', canEvolveFromClient(DP, [jg, gl]), false);
+    check('client: no Zombie Dragon: cannot', canEvolveFromClient(DP, [cl, aq]), false);
+    check('client: an Armored Dragon is not a Zombie Dragon', canEvolveFromClient(DP, [bd, cl]), false);
+    check('client: its own race (Phoenix) is not what it needs', canEvolveFromClient(DP, [ph, aq]), false);
+    check('client: one creature cannot be both bases', canEvolveFromClient(DP, [du]), false);
+    check('client: ...but a dual-race creature can be one of them', canEvolveFromClient(DP, [du, jg]), true);
+    check('client: an ordinary evolution still needs its own race', [canEvolveFromClient('X/Test Evolution', [aq]), canEvolveFromClient('X/Test Evolution', [jg])], [true, false]);
+
+    renderState = () => {};                                  // drawing is not under test
+    const sent = []; sendMsg = m => sent.push(m);
+    const me = { battlezone: [jg, gl, cl, bd, aq], crossGear: [] };
+    evolveMode = { handKey: 'h1', cardId: DP };
+    let sel = selectableKeysFor({}, me, {});
+    check('client: the picker offers Zombie Dragons and Fire Birds only', [...sel.keys].sort(), ['cl', 'gl', 'jg']);
+    sel.onClick('jg');
+    sel = selectableKeysFor({}, me, {});
+    check('client: after a Zombie Dragon it offers only Fire Birds', [...sel.keys], ['cl']);
+    sel.onClick('cl');
+    check('client: both bases go to the server in one summon', sent, [{ type: 'summonCard', key: 'h1', baseKey: 'jg', baseKey2: 'cl' }]);
+    check('client: and the picker closes', evolveMode, null);
+  }, check);
+
+  // -- the computer player, against the real server
+  {
+    const norm = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    const META = new Map();
+    for (const r of loadEngine().CARDS) if (r.Name) {
+      const y = v => /^(y|yes|true|1)$/i.test(String(v == null ? '' : v).trim());
+      const n = v => { const x = parseInt(String(v == null ? '' : v).replace(/[^0-9-]/g, ''), 10); return Number.isFinite(x) ? x : null; };
+      if (!META.has(norm(r.Name))) META.set(norm(r.Name), { name: String(r.Name).trim(), cost: n(r['Mana Cost']), power: n(r.Power), type: String(r.Type || ''), race: String(r.Race || ''),
+        civs: String(r.Civilization || '').split('/').map(x => x.trim()).filter(Boolean), blocker: y(r['Blocker (Yes/No)']), doubleBreaker: y(r['Double Breaker']), tripleBreaker: y(r['Triple Breaker']),
+        speedAttacker: y(r['Speed Attacker (yes/No)']), shieldTrigger: y(r['Shield Trigger (Yes/No)']), slayer: y(r.Slayer), attackRestriction: String(r['Attack restriction'] || 'none'), effectText: r.Effect ? String(r.Effect) : '' });
+    }
+    global.cardMetaFor = id => META.get(norm(String(id).split('/').pop())) || {};
+    global.displayName = id => String(id).split('/').pop();
+    global.fetch = () => Promise.reject(new Error('offline'));
+    const botSrc = fs.readFileSync(__dirname + '/../public/bot.js', 'utf8');
+    const playBot = (boardSetup) => {
+      const pending = new Map(); let nextId = 1; const order = [];
+      const st = (fn) => { const id = nextId++; pending.set(id, fn); order.push(id); return id; };
+      const ct = (id) => pending.delete(id);
+      const bot = eval('(function(setTimeout, clearTimeout){' + botSrc + '; return Bot; })')(st, ct);
+      const drain = (limit) => { let ran = 0; while (order.length && ran < limit) { const id = order.shift(); const fn = pending.get(id); if (!fn) continue; pending.delete(id); try { fn(); } catch (e) { /* the bot's own errors surface as missing moves */ } ran++; } return ran; };
+      const T = newTable(['Death Phoenix, Avatar of Doom', 'Necrodragon Jagraveen', 'Cocco Lupia', 'Bolshack Dragon', 'Gigaslug', 'Cragsaur', 'Aqua Guard']);
+      const sent = [];
+      const origSend = T.b.send.bind(T.b);
+      T.b.send = function (d) { origSend(d); const m = JSON.parse(d); if (this.onMsg) this.onMsg(m); };
+      T.S.turnNumber = 12; T.S.activeTurn = 1;                 // the COMPUTER's turn
+      T.P.battlezone = []; T.P.shields = T.shields(['Cragsaur', 'Cragsaur', 'Cragsaur']);
+      boardSetup(T.O);
+      bot.start({ seatIdx: 1, deck: [], send: (m) => { sent.push(m); T.say(T.b, m); } });
+      T.b.onMsg = (m) => { if (m.type === 'state') bot.onState(m.state); };
+      T.say(T.b, { type: 'setShowingHand', show: false });      // makes the server send the bot its view
+      for (let i = 0; i < 60; i++) { if (T.b.lastState) bot.onState(T.b.lastState); if (!drain(400)) break; if (T.S.activeTurn !== 1) break; }
+      return { T, sent };
+    };
+    const mana = () => [{ key: 'm1', id: 'X/Gigaslug', tapped: false }, { key: 'm2', id: 'X/Gigaslug', tapped: false }, { key: 'm3', id: 'X/Cragsaur', tapped: false }, { key: 'm4', id: 'X/Cragsaur', tapped: false }];
+    const body = (key, name) => ({ key, id: 'X/' + name, tapped: false, summonedTurn: 10 });
+
+    let r = playBot(B => {
+      B.battlezone = [body('jg', 'Necrodragon Jagraveen'), body('bd', 'Bolshack Dragon'), body('cl', 'Cocco Lupia')];
+      B.hand = [{ key: 'dp', id: 'X/' + NAME }]; B.mana = mana();
+    });
+    const summon = r.sent.find(m => m.type === 'summonCard' && m.key === 'dp');
+    check('bot: summons Death Phoenix, naming a base of each race', summon && [summon.baseKey, summon.baseKey2].sort(), ['cl', 'jg']);
+    const dp = r.T.O.battlezone.find(c => c.id === 'X/' + NAME);
+    check('bot: the server accepted it as a 3-card stack', dp && dp.under.map(u => u.key).sort(), ['cl', 'jg']);
+    check('bot: it kept the Armored Dragon (not a valid base) on the table', r.T.O.battlezone.some(c => c.key === 'bd'), true);
+
+    r = playBot(B => {
+      B.battlezone = [body('jg', 'Necrodragon Jagraveen'), body('bd', 'Bolshack Dragon')];        // no Fire Bird
+      B.hand = [{ key: 'dp', id: 'X/' + NAME }]; B.mana = mana();
+    });
+    check('bot: without a Fire Bird it does not even try', r.sent.some(m => m.type === 'summonCard' && m.key === 'dp'), false);
+    check('bot: and it still finishes its turn', r.T.S.activeTurn, 0);
+  }
+  done('Death Phoenix can be summoned by the player and by the computer');
 }
 
 if (WHICH === 'effects') {
