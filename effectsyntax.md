@@ -964,6 +964,12 @@ not honour them, so these are the rules it now follows. Regression checks:
   matched, so every Vortex evolution with a two-word race (Death Phoenix, Soul Phoenix,
   Aura Pegasus, Wise Staroid) was unsummonable. Only single-word pairs (Cruel Naga:
   `Merfolk+Chimera`) had worked. Matching also ignores spacing and case.
+  The browser's Summon menu and the computer player each had their own "evolve from your
+  own race" test too, so a Vortex evolution was refused there before the two-creature
+  picker could open ("you need a Phoenix creature first"). Both now understand Vortex:
+  `canEvolveFromClient` (client.js) and `vortexBasesFor` (bot.js) need two DIFFERENT
+  creatures, one per named race, and ignore the card's own race. Regression check:
+  `node check.js evolve`.
 - **`onShieldWouldBreak: oppShield -> grave instead`, written on the ATTACKER** — "whenever
   this creature would break a shield, your opponent puts that shield into his graveyard
   instead". The broken shield goes to the graveyard, never the hand, so it gets no Shield
