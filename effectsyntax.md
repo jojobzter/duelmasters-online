@@ -1003,3 +1003,48 @@ is itself a sheet row is never rewritten, an ambiguous short title (two sheet ca
 under the old file name also find the file again after it is renamed to the sheet's name.
 Server: `sheetNameForFoil` / `cardLabel`. Client: `foilSheetName` / `cardBaseName` /
 `resolveBySheetName`. Regression check: `node check.js foil`.
+
+## 19. `oppHand[...]` filters on `oppDiscard` were parsed but never applied
+
+The sheet syntax for a filtered discard — `oppDiscard all oppHand[spell,civ=Darkness]`
+(Rain of Arrows), `oppDiscard choose 1 oppHand[creature,civ=Light/Nature]` (Telescope
+Horn) — always parsed correctly. The engine's `oppDiscard` case just never looked at the
+selector: `all` discarded the WHOLE hand, and `choose` let the opponent (who resolves
+their own discard) pick any card at all, regardless of what was bracketed. This hit
+every `oppHand[...]`-filtered card in the sheet, not just Rain of Arrows.
+
+Fixed by having `oppDiscard`, at the moment it resolves, filter the opponent's hand
+against the selector and lock in the matching card KEYS on the `pendingDiscards` entry —
+before the opponent has a chance to answer the prompt, so they can't dodge it by drawing
+something else first. `all` only discards that set; `choose` can only pick from it (the
+server checks this itself, never trusting the client); `random` (unused by any card
+today, but supported) only picks from it. A selector-less `oppDiscard` (Death Phoenix,
+Galek) is untouched — it always meant the whole hand and still does. The client's
+discard-confirmation modal dims and disables cards outside the matching set instead of
+hiding them, and the computer player only ever offers a matching key.
+
+Matching a hand-zone card needed the SAME per-filter logic `selectorMatches` already has
+(race, civ with slash-OR, power, name, spell/creature, ...) — but that function refuses
+any zone but the battle zone on purpose (its other callers scan the battle zone, so a
+hand selector there is the wrong context). The per-filter switch was pulled out into
+`matchesSelectorFilters`, which `selectorMatches` now calls internally; a hand-zone
+filter check (`matchesSelectorFilters` alone, no zone gate) reuses the exact same cases.
+
+Cabalt, the Patroller's sheet text also had a typo this surfaced: `civ=Darkness,civ=Fire`
+is two separate filters, ANDed — matching only an impossible Darkness-AND-Fire card. The
+established convention for "either" is a slash in ONE filter (Telescope Horn:
+`civ=Light/Nature`), so it's fixed to `civ=Darkness/Fire`.
+
+`, reveal` is a new modifier on `oppDiscard`: `onSummon: oppDiscard all
+oppHand[spell,civ=Darkness], reveal` (Rain of Arrows) shows the caster the hand as it
+stood the instant the effect resolved, via the existing reveal-modal plumbing (already
+used elsewhere, just never wired to a sheet effect before). A hardcoded, pre-sheet
+special case for Rain of Arrows existed in `server.js` but had been fully dead code since
+Rain of Arrows got its own Effect text — `hasSheetEffects`/`described` always skipped
+straight past it. It's been removed.
+
+`nameCard` (Nocturne Dragoon: `onSummon: oppDiscard all oppHand[name=named]`, after
+`onSummon: nameCard`) is a separate, still-unimplemented feature — naming a card is
+currently a no-op, so `name=named` never matches anything real. This fix does not touch
+it; the card now discards nothing instead of (wrongly) discarding the whole hand, but
+still doesn't do what it says. Regression check: `node check.js filterdiscard`.

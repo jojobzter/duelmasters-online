@@ -364,9 +364,12 @@ function parseAction(body, mods) {
       if (kindWord === 'random' || kindWord === 'choose' || kindWord === 'all') {
         const c = parseCount(rest.slice(1));
         const sel = c.rest ? parseSelector(c.rest) : null;
-        return { action: 'oppDiscard', mode: kindWord, count: kindWord === 'all' ? 'all' : c.count, selector: sel };
+        // "oppDiscard all oppHand[spell,civ=Darkness], reveal" (Rain of Arrows) — shows
+        // the caster the hand before anything is discarded from it.
+        return { action: 'oppDiscard', mode: kindWord, count: kindWord === 'all' ? 'all' : c.count,
+                 selector: sel, reveal: !!mods.reveal };
       }
-      return { action: 'oppDiscard', mode: 'random', count: 1 };
+      return { action: 'oppDiscard', mode: 'random', count: 1, reveal: !!mods.reveal };
     }
     case 'destroy': case 'bounce': case 'tomana': case 'tograve': case 'tohand':
     case 'toshield': case 'todecktop': case 'tap': case 'untap': {

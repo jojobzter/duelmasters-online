@@ -1571,8 +1571,19 @@ function selectorMatches(state, srcOwnerIdx, srcCard, sel, cardOwnerIdx, card) {
   if (sel.side === 'opp' && cardOwnerIdx === srcOwnerIdx) return false;
   if (sel.excludeSelf && card.key === srcCard.key) return false;
   if (sel.zone && sel.zone !== 'battle' && sel.zone !== 'played') return false;
+  return matchesSelectorFilters(state, srcOwnerIdx, srcCard, sel, card);
+}
 
-  for (const f of sel.filters || []) {
+// The bracketed part of a selector ("[spell,civ=Darkness]") tested against one card, with
+// none of selectorMatches's side/zone gating above. selectorMatches refuses any zone but
+// battle/played on purpose (its callers scan the battle zone, so a hand selector there is
+// the wrong context, not a match to compute) — but a hand-zone selector like
+// "oppHand[spell,civ=Darkness]" (Rain of Arrows) or "oppHand[name=named]" (Nocturne
+// Dragoon) needs the exact same per-filter checks, just without that gate. Both share
+// this loop so a filter (name=, power ranges, race, ...) behaves identically wherever
+// it's written, rather than each zone re-implementing its own partial copy.
+function matchesSelectorFilters(state, srcOwnerIdx, srcCard, sel, card) {
+  for (const f of (sel && sel.filters) || []) {
     let ok;
     switch (f.key) {
       case 'race': {
@@ -2459,9 +2470,29 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
       }
       case 'oppDiscard': {
         if (!opp.hand.length) break;
+        // "oppHand[spell,civ=Darkness]" (Rain of Arrows) narrows WHICH cards this can
+        // touch. A bare "oppDiscard all/random/choose N" with no selector still means
+        // the whole hand, as it always has (Death Phoenix: "opponent discards their
+        // hand"; Galek: one at random from the whole hand).
+        // "reveal" (Rain of Arrows) shows the caster the hand as it stood the instant
+        // this resolved — before any of it is actually discarded, which happens later
+        // when the opponent answers the prompt below.
+        if (e.reveal && ctx) ctx.revealHand = opp.hand.map(c => c.id);
+        let pool = opp.hand;
+        if (e.selector) {
+          pool = opp.hand.filter(c => matchesSelectorFilters(state, meIdx, selfRef, e.selector, c));
+          if (!pool.length) {
+            logs.push(cardLabel(cardId) + ": their opponent's hand had nothing matching.");
+            break;
+          }
+        }
         opp.pendingDiscards.push({ id: newKey(), kind: e.mode === 'choose' ? 'choose' : e.mode,
                                    count: typeof e.count === 'number' ? e.count : 0,
-                                   source: cardLabel(cardId) });
+                                   source: cardLabel(cardId),
+                                   // locks in exactly which cards qualify, computed now — the
+                                   // opponent can't dodge "discard your Darkness spells" by
+                                   // drawing something else before they answer the prompt
+                                   keys: e.selector ? pool.map(c => c.key) : null });
         break;
       }
       case 'search': {
@@ -3302,13 +3333,16 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
     const meIdx = state.players.indexOf(me), oppIdx = state.players.indexOf(opp);
     const notices = [];
     const extraLog = [];
-    const res = runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, 'onsummon', extraLog, notices);
+    // a mutable out-param: "oppDiscard ..., reveal" (Rain of Arrows) fills in
+    // ctx.revealHand with the opponent's hand as it stood right before the discard.
+    const ctx = {};
+    const res = runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, 'onsummon', extraLog, notices, ctx);
     // Ice Vapor's passive, only when its own Effect text doesn't already cover it
     if (isSpellCard(cardId) && opp.battlezone.some(c => normalizeCardKey(cardLabel(c.id)) === ICE_VAPOR_NAME && !hasSheetEffects(c.id))) {
       if (me.hand.length) me.pendingDiscards.push({ id: newKey(), kind: 'choose', count: 1, source: 'Ice Vapor, Shadow of Anguish' });
       if (me.mana.length) me.pendingManaDiscards = (me.pendingManaDiscards || 0) + 1;
     }
-    return { defer: res.defer, sfx: null, extraLog, notices, revealHand: null, peekShields: null };
+    return { defer: res.defer, sfx: null, extraLog, notices, revealHand: ctx.revealHand || null, peekShields: null };
   }
 
   let defer = false, sfx = null, revealHand = null, peekShields = null;
@@ -3519,25 +3553,9 @@ function applyOnSummonTriggers(me, opp, cardId, cardKey, state) {
                    other: "%p's Diamond Cutter — their creatures can attack your shields freely this turn." });
   }
 
-  // Rain of Arrows: the caster sees the opponent's hand, then every darkness spell
-  // in it is discarded automatically.
-  if (name === 'rain of arrows') {
-    revealHand = opp.hand.map(c => c.id);   // snapshot before anything is removed
-    const doomed = opp.hand.filter(c => isSpellCard(c.id) && civsOf(c.id).includes('Darkness'));
-    for (const c of doomed) {
-      const idx = opp.hand.findIndex(h => h.key === c.key);
-      if (idx !== -1) {
-        opp.hand.splice(idx, 1);
-        opp.graveyard.push({ id: c.id, key: c.key });
-      }
-    }
-    const names = doomed.map(c => cardLabel(c.id));
-    extraLog.push('cast ' + cardLabel(cardId) + ' \u2014 ' + (names.length ? 'discarded ' + names.join(', ') + " from their opponent's hand." : 'their opponent had no darkness spells.'));
-    notices.push({
-      self: cardLabel(cardId) + ' \u2014 ' + (names.length ? 'discarded ' + names.join(', ') + '.' : 'no darkness spells to discard.'),
-      other: "%p's " + cardLabel(cardId) + ' \u2014 ' + (names.length ? 'you discarded ' + names.join(', ') + '.' : 'you had no darkness spells.')
-    });
-  }
+  // Rain of Arrows now has Effect text of its own ("onSummon: oppDiscard all
+  // oppHand[spell,civ=Darkness], reveal"), so the sheet-described branch above already
+  // handles it and this card never reaches here — see hasSheetEffects / "described".
 
   // Hydro Hurricane: one optional choice per Light creature (opponent's mana -> their
   // hand) and one per Darkness creature (opponent's creature -> their hand).
@@ -5541,15 +5559,27 @@ wss.on('connection', (ws) => {
           fireBoardWide(s, 'onoppdiscard', extraLogs,
             { onlySide: oppIdx, event: { cardId: c.id, key: c.key, ownerIdx: idx } });
         };
+        // eff.keys, when present, is a filtered discard (Rain of Arrows: only Darkness
+        // spells) — the exact hand-card keys it may touch, locked in when it was cast.
+        // Every mode below stays within that set instead of the whole hand.
+        const allowed = eff.keys ? new Set(eff.keys) : null;
         if (eff.kind === 'random') {
-          if (me.hand.length) {
-            const r = Math.floor(Math.random() * me.hand.length);
-            discardOne(me.hand.splice(r, 1)[0]);
+          const pool = allowed ? me.hand.filter(c => allowed.has(c.key)) : me.hand;
+          if (pool.length) {
+            const pick = pool[Math.floor(Math.random() * pool.length)];
+            discardOne(me.hand.splice(me.hand.indexOf(pick), 1)[0]);
           }
         } else if (eff.kind === 'all') {
-          while (me.hand.length) discardOne(me.hand.splice(0, 1)[0]);
+          for (const c of (allowed ? me.hand.filter(c => allowed.has(c.key)) : me.hand.slice())) {
+            const di = me.hand.indexOf(c);
+            if (di !== -1) discardOne(me.hand.splice(di, 1)[0]);
+          }
         } else { // 'choose'
-          const keys = Array.isArray(msg.keys) ? msg.keys.slice(0, eff.count) : [];
+          // filter to what's actually allowed BEFORE capping at eff.count — otherwise a
+          // spoofed key sent first would crowd out a legal one instead of being ignored
+          let keys = Array.isArray(msg.keys) ? msg.keys : [];
+          if (allowed) keys = keys.filter(k => allowed.has(k));
+          keys = keys.slice(0, eff.count);
           for (const k of keys) {
             const di = me.hand.findIndex(c => c.key === k);
             if (di !== -1) discardOne(me.hand.splice(di, 1)[0]);
