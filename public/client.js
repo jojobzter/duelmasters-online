@@ -1899,21 +1899,31 @@ function openDiscardModal(eff, hand) {
   titleEl.textContent = eff.source;
   grid.innerHTML = '';
 
+  // A filtered discard (Rain of Arrows: only your Darkness spells) narrows which of
+  // your cards this can touch. eff.keys, when present, names exactly which ones — the
+  // rest of the hand is shown dimmed, for reference, but is never chosen or affected.
+  const allowed = eff.keys ? new Set(eff.keys) : null;
+  const matchCount = allowed ? hand.filter(c => allowed.has(c.key)).length : hand.length;
+
   if (eff.kind === 'random') {
-    subEl.textContent = 'Discard a random card from your hand?';
+    subEl.textContent = allowed ? 'Discard a random matching card from your hand?' : 'Discard a random card from your hand?';
   } else if (eff.kind === 'all') {
-    subEl.textContent = 'Discard your entire hand (' + hand.length + ' card' + (hand.length === 1 ? '' : 's') + ')?';
+    subEl.textContent = allowed
+      ? 'Discard ' + matchCount + ' matching card' + (matchCount === 1 ? '' : 's') + ' from your hand.'
+      : 'Discard your entire hand (' + hand.length + ' card' + (hand.length === 1 ? '' : 's') + ')?';
   } else {
-    subEl.textContent = 'Choose ' + eff.count + ' card' + (eff.count === 1 ? '' : 's') + ' to discard.';
+    subEl.textContent = 'Choose ' + eff.count + ' card' + (eff.count === 1 ? '' : 's') +
+      (allowed ? ' to discard (only matching cards are eligible).' : ' to discard.');
   }
 
   hand.forEach(c => {
+    const eligible = !allowed || allowed.has(c.key);
     const d = document.createElement('div');
-    d.className = 'pick';
+    d.className = 'pick' + (eligible ? '' : ' ineligible') + (eff.kind === 'all' && eligible ? ' chosen' : '');
     d.innerHTML = cardImgHtml(c.id) + '<div class="zoom-btn" title="Preview">\u{1F50D}</div>';
     // preview works in every mode, including the ones where clicking does nothing
     d.querySelector('.zoom-btn').addEventListener('click', (e) => { e.stopPropagation(); openMagnify(c.id); });
-    if (eff.kind === 'choose') {
+    if (eff.kind === 'choose' && eligible) {
       d.addEventListener('click', () => {
         if (discardChosen.has(c.key)) discardChosen.delete(c.key);
         else {
@@ -1921,12 +1931,12 @@ function openDiscardModal(eff, hand) {
           discardChosen.add(c.key);
         }
         d.classList.toggle('chosen', discardChosen.has(c.key));
-        updateDiscardButton(hand.length);
+        updateDiscardButton(matchCount);
       });
     }
     grid.appendChild(d);
   });
-  updateDiscardButton(hand.length);
+  updateDiscardButton(matchCount);
   document.getElementById('discard-modal').style.display = 'flex';
 }
 

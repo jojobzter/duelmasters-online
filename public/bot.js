@@ -573,8 +573,11 @@ const Bot = (() => {
       const eff = me.pendingDiscards[0];
       let keys = [];
       if (eff.kind === 'choose') {
+        // eff.keys, when present, is a filtered discard (Rain of Arrows: only Darkness
+        // spells) — pick only from that set, or the server rejects anything outside it.
+        const pool = eff.keys ? me.hand.filter(c => eff.keys.includes(c.key)) : me.hand;
         // pitch what it can't cast soon, keeping castable cards and strong bodies
-        const ranked = me.hand.slice().sort((a, b) => {
+        const ranked = pool.slice().sort((a, b) => {
           const va = (costOf(a.id) * 100) - powerOf(a.id) / 10;
           const vb = (costOf(b.id) * 100) - powerOf(b.id) / 10;
           return vb - va;

@@ -500,6 +500,8 @@ input {
 .discard-grid .pick { position: relative; cursor: pointer; border-radius: 6px; }
 .discard-grid .pick img { width: clamp(104px, 13vw, 196px); height: auto; border-radius: 6px; display: block; border: 3px solid transparent; }
 .discard-grid .pick.chosen img { border-color: #e04b4b; }
+.discard-grid .pick.ineligible { opacity: 0.35; cursor: default; }
+.discard-grid .pick.ineligible img { filter: grayscale(70%); }
 .discard-grid .pick.chosen::after {
   content: '\2713'; position: absolute; top: 4px; right: 4px;
   background: #e04b4b; color: #fff; width: 26px; height: 26px; border-radius: 50%;
