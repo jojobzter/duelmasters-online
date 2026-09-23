@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -1848,6 +1848,140 @@ if (WHICH === 'foil') {
   done('Foil-named artwork resolves to the sheet card');
 }
 
+
+
+if (WHICH === 'filterdiscard') {
+  // "oppDiscard ... oppHand[...]" ignored its own filter entirely — "all" discarded the
+  // WHOLE hand and "choose" let you pick any card, regardless of what was bracketed.
+  // Rain of Arrows ("discard their Darkness spells") is the clearest case, but the same
+  // bug hit every oppHand-filtered card in the sheet (Telescope Horn, Cabalt...). A
+  // selector-less oppDiscard (Death Phoenix, Galek) is unaffected on purpose — it
+  // always meant the whole hand and still does.
+  const { check, done } = makeChecker();
+  const nm = c => c.id.split('/').pop();
+  const lightMana = n => Array.from({ length: n }, (_, i) => ({ key: 'lm' + i, id: 'X/Holy Awe', tapped: false }));
+  const darkMana = n => Array.from({ length: n }, (_, i) => ({ key: 'dm' + i, id: 'X/Gigaslug', tapped: false }));
+
+  // -- Rain of Arrows: a hand with NO Darkness spell in it is untouched, and the caster
+  // is still shown it (the reveal doesn't depend on anything being discardable)
+  {
+    const T = newTable(['Rain of Arrows', 'Holy Awe', 'Gigaslug', 'Cragsaur', 'Necrodragon Zalva']);
+    T.P.hand = [{ key: 'roa', id: 'X/Rain of Arrows' }];
+    T.P.mana = lightMana(2);
+    T.O.hand = [
+      { key: 'd1', id: 'X/Necrodragon Zalva' },   // Darkness, but a CREATURE — must survive
+      { key: 'd2', id: 'X/Cragsaur' },            // Fire creature — must survive
+      { key: 'd3', id: 'X/Gigaslug' },            // Darkness creature — must survive
+    ];
+    const from = T.a.inbox.length;
+    T.say(T.a, { type: 'summonCard', key: 'roa' });
+    const reveal = T.a.inbox.slice(from).find(m => m.type === 'revealCards');
+    check('the caster is shown the opponent\'s hand', reveal && reveal.cards.map(id => id.split('/').pop()).sort(),
+      ['Cragsaur', 'Gigaslug', 'Necrodragon Zalva']);
+    check('no genuine Darkness SPELL was in it, so nothing is queued', T.O.pendingDiscards.length, 0);
+    check('and none of it was discarded', T.O.hand.map(nm).sort(), ['Cragsaur', 'Gigaslug', 'Necrodragon Zalva']);
+  }
+  // -- with a real Darkness spell mixed in among Darkness/other creatures
+  {
+    const T = newTable(['Rain of Arrows', 'Holy Awe', 'Terror Pit', 'Necrodragon Zalva', 'Cragsaur']);
+    T.P.hand = [{ key: 'roa', id: 'X/Rain of Arrows' }];
+    T.P.mana = lightMana(2);
+    T.O.hand = [
+      { key: 'tp', id: 'X/Terror Pit' },          // Darkness SPELL — the only one that should go
+      { key: 'zd', id: 'X/Necrodragon Zalva' },   // Darkness CREATURE — must survive
+      { key: 'cr', id: 'X/Cragsaur' },            // Fire creature — must survive
+    ];
+    T.say(T.a, { type: 'summonCard', key: 'roa' });
+    check('only the Darkness SPELL is queued, not the Darkness creature', T.O.pendingDiscards[0] && T.O.pendingDiscards[0].keys, ['tp']);
+    T.say(T.b, { type: 'effectDiscardResolve', effectId: T.O.pendingDiscards[0].id, keys: [] });
+    check('resolving discards exactly that one card', T.O.graveyard.map(nm), ['Terror Pit']);
+    check('the Darkness creature and the Fire creature are untouched', T.O.hand.map(nm).sort(), ['Cragsaur', 'Necrodragon Zalva']);
+  }
+
+  // -- Cabalt, the Patroller: the sheet had "civ=Darkness,civ=Fire" (AND — impossible
+  // for a single-civ card, so it matched nothing); fixed to "civ=Darkness/Fire" (OR)
+  {
+    const T = newTable(['Cabalt, the Patroller', 'Holy Awe', 'Terror Pit', 'Gigaslug']);
+    T.P.hand = [{ key: 'cb', id: 'X/Cabalt, the Patroller' }];
+    T.P.mana = lightMana(4);
+    T.O.hand = [{ key: 'tp', id: 'X/Terror Pit' }, { key: 'gs', id: 'X/Gigaslug' }];
+    T.say(T.a, { type: 'summonCard', key: 'cb' });
+    check('a Darkness spell now matches a Darkness-OR-Fire filter', T.O.pendingDiscards[0] && T.O.pendingDiscards[0].keys, ['tp']);
+  }
+
+  // -- Telescope Horn: "choose 1" narrowed to creature + Light/Nature. Only a matching
+  // card may be offered or chosen, and the server refuses a spoofed key outside it.
+  {
+    const T = newTable(['Telescope Horn', 'Gigaslug', 'Aqua Surfer', 'Holy Awe']);
+    T.P.hand = [{ key: 'th', id: 'X/Telescope Horn' }];
+    T.P.mana = darkMana(4);
+    // Aqua Surfer (Water creature) and Holy Awe (Light SPELL) both fail to qualify
+    T.O.hand = [{ key: 'as', id: 'X/Aqua Surfer' }, { key: 'ha', id: 'X/Holy Awe' }];
+    T.say(T.a, { type: 'summonCard', key: 'th' });
+    check('a Water creature and a Light spell both miss "creature, Light/Nature"', T.O.pendingDiscards.length, 0);
+  }
+  {
+    const T = newTable(['Telescope Horn', 'Gigaslug', 'Emerald Grass', 'Aqua Surfer']);
+    T.P.hand = [{ key: 'th', id: 'X/Telescope Horn' }];
+    T.P.mana = darkMana(4);
+    T.O.hand = [
+      { key: 'eg', id: 'X/Emerald Grass' },   // a genuine Light CREATURE — the only legal choice
+      { key: 'as', id: 'X/Aqua Surfer' },     // Water — must not be offered
+    ];
+    T.say(T.a, { type: 'summonCard', key: 'th' });
+    check('exactly the matching creature is offered', T.O.pendingDiscards[0] && T.O.pendingDiscards[0].keys, ['eg']);
+    // the client is expected never to send an ineligible key, but the server checks anyway —
+    // one resolution, mixing a spoofed key with the legal one, proves it filters rather than
+    // trusts the message wholesale
+    T.say(T.b, { type: 'effectDiscardResolve', effectId: T.O.pendingDiscards[0].id, keys: ['as', 'eg'] });
+    check('the spoofed key is ignored and only the legal one is discarded', T.O.hand.map(nm), ['Aqua Surfer']);
+  }
+
+  // -- a bare, selector-less oppDiscard is UNCHANGED: it still means the whole hand
+  {
+    const T = newTable(['Necrodragon Zalva', 'Kip Chippotto', 'Gigaslug', 'Cragsaur']);
+    T.O.battlezone = [{ key: 'dp', id: 'DM-12/Death Phoenix, Avatar of Doom', tapped: false, summonedTurn: null, under: [] }];
+    T.P.hand = [{ key: 'h1', id: 'X/Cragsaur' }, { key: 'h2', id: 'X/Gigaslug' }];
+    T.say(T.b, { type: 'battleDestroy', key: 'dp' });
+    check('Death Phoenix (no selector) still queues the WHOLE hand, unfiltered', T.P.pendingDiscards[0] && T.P.pendingDiscards[0].keys, null);
+    T.say(T.a, { type: 'effectDiscardResolve', effectId: T.P.pendingDiscards[0].id, keys: [] });
+    check('...and discards all of it, exactly as before', T.P.hand.length, 0);
+  }
+
+  // -- the bot: with a filtered "choose" prompt pending, it only ever offers a key
+  // that is actually in eff.keys — never one of the other cards in its own hand
+  {
+    const norm = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    const META = new Map();
+    for (const r of loadEngine().CARDS) if (r.Name && !META.has(norm(r.Name))) META.set(norm(r.Name), { cost: r['Mana Cost'], power: r.Power });
+    global.cardMetaFor = id => META.get(norm(String(id).split('/').pop())) || {};
+    global.displayName = id => String(id).split('/').pop();
+    global.fetch = () => Promise.reject(new Error('offline'));
+    const fs = require('fs');
+    const botSrc = fs.readFileSync(__dirname + '/../public/bot.js', 'utf8');
+    const pending = new Map(); let nextId = 1; const order = [];
+    const st = fn => { const id = nextId++; pending.set(id, fn); order.push(id); return id; };
+    const ct = id => pending.delete(id);
+    const bot = eval('(function(setTimeout, clearTimeout){' + botSrc + '; return Bot; })')(st, ct);
+    const drain = limit => { let ran = 0; while (order.length && ran < limit) { const id = order.shift(); const fn = pending.get(id); if (!fn) continue; pending.delete(id); try { fn(); } catch (e) {} ran++; } return ran; };
+
+    const T = newTable(['Cragsaur', 'Gigaslug', 'Aqua Guard']);
+    T.O.hand = [{ key: 'a', id: 'X/Cragsaur' }, { key: 'b', id: 'X/Gigaslug' }, { key: 'onlyMatch', id: 'X/Aqua Guard' }];
+    T.O.pendingDiscards = [{ id: 'e1', kind: 'choose', count: 1, source: 'Telescope Horn', keys: ['onlyMatch'] }];
+    T.S.activeTurn = 1;
+    const sent = [];
+    const origSend = T.b.send.bind(T.b);
+    T.b.send = function (d) { origSend(d); const m = JSON.parse(d); if (this.onMsg) this.onMsg(m); };
+    bot.start({ seatIdx: 1, deck: [], send: (m) => { sent.push(m); T.say(T.b, m); } });
+    T.b.onMsg = (m) => { if (m.type === 'state') bot.onState(m.state); };
+    T.say(T.b, { type: 'setShowingHand', show: false });
+    for (let i = 0; i < 20; i++) { if (T.b.lastState) bot.onState(T.b.lastState); if (!drain(200)) break; }
+    const resolve = sent.find(m => m.type === 'effectDiscardResolve');
+    check('the bot only offers the one key the filter allows', resolve && resolve.keys, ['onlyMatch']);
+  }
+
+  done('oppHand[...] filters (Rain of Arrows and friends) are actually honoured');
+}
 
 if (WHICH === 'evolve') {
   // Death Phoenix (Vortex: a Zombie Dragon AND a Fire Bird) could not be summoned from the
