@@ -1266,7 +1266,7 @@ function pendingPromptTotal(p) {
     (p.pendingMulti ? 1 : 0) + (p.pendingMultiQueue || []).length + (p.pendingSearch ? 1 : 0) +
     (p.pendingRaceChoices || []).length + (p.pendingTruce ? 1 : 0) +
     (p.pendingShieldTriggers || []).length + (p.pendingManaDiscards || 0) +
-    (p.pendingSilentSkills || []).length;
+    (p.pendingSilentSkills || []).length + (p.pendingCardNameChoices || []).length;
 }
 
 // Counts the targets an effect could legally hit right now. Used so an effect with
@@ -1574,6 +1574,46 @@ function selectorMatches(state, srcOwnerIdx, srcCard, sel, cardOwnerIdx, card) {
   return matchesSelectorFilters(state, srcOwnerIdx, srcCard, sel, card);
 }
 
+// "oppDiscard ... oppHand[...]" (Rain of Arrows: "all oppHand[spell,civ=Darkness]";
+// Telescope Horn: "choose 1 oppHand[creature,civ=Light/Nature]"; Nocturne Dragoon:
+// "all oppHand[name=named]", run once its name is chosen — see resolveNameCardChoice
+// below). A selector-less "oppDiscard all/random/choose N" still means the whole hand,
+// as it always has (Death Phoenix: "opponent discards their hand"; Galek: one at random).
+// Pulled out of runParsedEffects's switch so the deferred Nocturne Dragoon path (which
+// runs this AFTER a naming prompt is answered, outside that switch entirely) can call
+// the exact same logic rather than a second, drifting copy of it.
+function resolveOppDiscard(state, meIdx, oppIdx, selfRef, e, logs, ctx) {
+  const opp = state.players[oppIdx];
+  const cardId = selfRef.id;
+  if (!opp.hand.length) return;
+  // "reveal" (Rain of Arrows) shows the caster the hand as it stood the instant this
+  // resolved — before any of it is actually discarded, which happens later when the
+  // opponent answers the prompt below.
+  if (e.reveal && ctx) ctx.revealHand = opp.hand.map(c => c.id);
+  let pool = opp.hand;
+  if (e.selector) {
+    pool = opp.hand.filter(c => matchesSelectorFilters(state, meIdx, selfRef, e.selector, c));
+    if (!pool.length) {
+      logs.push(cardLabel(cardId) + ": their opponent's hand had nothing matching.");
+      return;
+    }
+  }
+  opp.pendingDiscards.push({ id: newKey(), kind: e.mode === 'choose' ? 'choose' : e.mode,
+                             count: typeof e.count === 'number' ? e.count : 0,
+                             source: cardLabel(cardId),
+                             // locks in exactly which cards qualify, computed now — the
+                             // opponent can't dodge "discard your Darkness spells" by
+                             // drawing something else before they answer the prompt
+                             keys: e.selector ? pool.map(c => c.key) : null });
+}
+
+// A clause elsewhere in the SAME trigger's clause list that reads the name just chosen
+// by a "nameCard" clause (Nocturne Dragoon: "oppDiscard all oppHand[name=named]") —
+// it must wait for that prompt rather than run first, with nothing named yet.
+function clauseNeedsNamedCard(e) {
+  return !!(e && e.selector && (e.selector.filters || []).some(f => f.key === 'name' && /^named$/i.test(String(f.value))));
+}
+
 // The bracketed part of a selector ("[spell,civ=Darkness]") tested against one card, with
 // none of selectorMatches's side/zone gating above. selectorMatches refuses any zone but
 // battle/played on purpose (its callers scan the battle zone, so a hand selector there is
@@ -1639,10 +1679,15 @@ function matchesSelectorFilters(state, srcOwnerIdx, srcCard, sel, card) {
         // "name=self" means "another copy of THIS card" — the Cloned cycle counts its
         // own copies in both graveyards. Taken literally it looked for a card called
         // "self" and always found none.
-        const want = /^self$/i.test(String(f.value))
-          ? normalizeCardKey(cardLabel(srcCard.id))
-          : normalizeCardKey(String(f.value));
-        ok = normalizeCardKey(cardLabel(card.id)) === want;
+        // "name=named" (Nocturne Dragoon: "oppDiscard all oppHand[name=named]") means
+        // whatever card its controller named with an earlier "nameCard" clause —
+        // stored per-player (like Petrova's chosen race below) since it's read once,
+        // right after naming, not kept as a lasting per-card ability.
+        const raw = /^self$/i.test(String(f.value)) ? cardLabel(srcCard.id)
+                  : /^named$/i.test(String(f.value)) ? (state.players[srcOwnerIdx].namedCard || '')
+                  : String(f.value);
+        const want = normalizeCardKey(raw);
+        ok = !!want && normalizeCardKey(cardLabel(card.id)) === want;
         break;
       }
       case 'cost': {
@@ -2427,7 +2472,12 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
     return c;
   };
 
+  // A clause claimed by an earlier "nameCard" clause in this SAME list (Nocturne
+  // Dragoon's "oppDiscard all oppHand[name=named]") — it depends on a name nobody has
+  // chosen yet, so it's skipped here and run later, once that prompt is answered.
+  const stashedForNaming = new Set();
   for (const e of clauses) {
+    if (stashedForNaming.has(e)) continue;
     // a clause only fires when its own condition holds — "if self.brokeShieldThisTurn"
     // and friends were previously ignored outside static effects
     if (e.condition) {
@@ -2469,30 +2519,7 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         break;
       }
       case 'oppDiscard': {
-        if (!opp.hand.length) break;
-        // "oppHand[spell,civ=Darkness]" (Rain of Arrows) narrows WHICH cards this can
-        // touch. A bare "oppDiscard all/random/choose N" with no selector still means
-        // the whole hand, as it always has (Death Phoenix: "opponent discards their
-        // hand"; Galek: one at random from the whole hand).
-        // "reveal" (Rain of Arrows) shows the caster the hand as it stood the instant
-        // this resolved — before any of it is actually discarded, which happens later
-        // when the opponent answers the prompt below.
-        if (e.reveal && ctx) ctx.revealHand = opp.hand.map(c => c.id);
-        let pool = opp.hand;
-        if (e.selector) {
-          pool = opp.hand.filter(c => matchesSelectorFilters(state, meIdx, selfRef, e.selector, c));
-          if (!pool.length) {
-            logs.push(cardLabel(cardId) + ": their opponent's hand had nothing matching.");
-            break;
-          }
-        }
-        opp.pendingDiscards.push({ id: newKey(), kind: e.mode === 'choose' ? 'choose' : e.mode,
-                                   count: typeof e.count === 'number' ? e.count : 0,
-                                   source: cardLabel(cardId),
-                                   // locks in exactly which cards qualify, computed now — the
-                                   // opponent can't dodge "discard your Darkness spells" by
-                                   // drawing something else before they answer the prompt
-                                   keys: e.selector ? pool.map(c => c.key) : null });
+        resolveOppDiscard(state, meIdx, oppIdx, selfRef, e, logs, ctx);
         break;
       }
       case 'search': {
@@ -3145,7 +3172,14 @@ function runParsedEffects(state, meIdx, oppIdx, cardId, cardKey, trigger, logs, 
         break;
       }
       case 'nameCard': {
-        logs.push('named a card with ' + cardLabel(cardId) + '.');
+        // "onSummon: nameCard; onSummon: oppDiscard all oppHand[name=named]" (Nocturne
+        // Dragoon) — any later clause in this SAME trigger that reads the chosen name
+        // is stashed here and run from chooseCardName below, once there is a name.
+        const dependent = clauses.filter(o => o !== e && !stashedForNaming.has(o) && clauseNeedsNamedCard(o));
+        dependent.forEach(o => stashedForNaming.add(o));
+        me.pendingCardNameChoices.push({ id: newKey(), source: cardLabel(cardId), cardKey,
+                                         thenClauses: dependent });
+        defer = true;
         break;
       }
       case 'extraTurn': {
@@ -3692,6 +3726,7 @@ function emptyPlayerState() {
     pendingTruce: null, truceCiv: null, truceUntilTurn: null,
     pendingRaceChoices: [], pendingShieldTriggers: [], crossGear: [], pendingMultiQueue: [],
     pendingSilentSkills: [], drewThisTurn: 0,
+    pendingCardNameChoices: [], namedCard: null,   // Nocturne Dragoon: "onSummon: nameCard"
     manualDrawsThisTurn: 0, manualChargesThisTurn: 0
   };
 }
@@ -3775,6 +3810,11 @@ function viewFor(room, viewerIdx) {
     diamondCutterActive: !!p.diamondCutterActive,
     pendingTruce: isSelf ? p.pendingTruce : undefined,
     pendingRaceChoice: isSelf ? (p.pendingRaceChoices[0] || null) : undefined,
+    // Nocturne Dragoon: the naming player gets the full prompt (to answer it); the
+    // OPPONENT gets just enough to show "your opponent is choosing a card name..." —
+    // never the id/cardKey, which they have no message that could act on anyway.
+    pendingCardNameChoice: isSelf ? (p.pendingCardNameChoices[0] || null)
+                          : (p.pendingCardNameChoices[0] ? { waiting: true, source: p.pendingCardNameChoices[0].source } : undefined),
     // keywords each of this player's creatures currently has, so the client can offer
     // exactly the attacks the server would allow
     liveKeywords: p.battlezone.reduce((acc, c) => {
@@ -5485,6 +5525,37 @@ wss.on('connection', (ws) => {
         if (petCard) petCard.petrovaRace = race;
         me.pendingRaceChoices.shift();
         logText = 'named ' + race + ' with Petrova — EVERY ' + race + ' creature gets +4000, on both sides.';
+        break;
+      }
+      case 'chooseCardName': {
+        // Nocturne Dragoon: "onSummon: nameCard" opens this prompt; the typed name is
+        // matched case-insensitively against the real card database (the same
+        // normalizeCardKey lookup every other name-based effect in the engine uses),
+        // and whatever the sheet's OWN spelling and capitalization is becomes the
+        // canonical name — so the discard clause below matches on that, not on
+        // whatever the player happened to type.
+        const pending = me.pendingCardNameChoices[0];
+        if (!pending) return;
+        const typed = (msg.name || '').toString().trim();
+        if (!typed) return;
+        const found = CARD_DB.get(normalizeCardKey(typed));
+        if (!found) {
+          send(ws, { type: 'summonRejected', reason: 'No card named "' + typed + '" — check the spelling and try again.' });
+          return;
+        }
+        me.namedCard = found.name;
+        me.pendingCardNameChoices.shift();
+        logText = 'named "' + found.name + '" with ' + pending.source + '.';
+        // run whatever was waiting on that name (Nocturne Dragoon's own discard clause) —
+        // needs the source creature's own card id for its "used X to..." log lines
+        const srcCard = me.battlezone.find(c => c.key === pending.cardKey);
+        if (srcCard) {
+          for (const clause of pending.thenClauses || []) {
+            if (clause.action === 'oppDiscard') {
+              resolveOppDiscard(s, idx, oppIdx, { key: srcCard.key, id: srcCard.id }, clause, extraLogs, null);
+            }
+          }
+        }
         break;
       }
       case 'chooseTruceCiv': {

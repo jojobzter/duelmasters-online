@@ -27,6 +27,7 @@ const CHECKS = [
   ['foil',     [],                     'artwork named "<Title> Foil" resolves to the sheet card'],
   ['evolve',   [],                     'Vortex evolutions can be summoned: the menu, the picker, the bot'],
   ['filterdiscard', [],                'oppHand[...] filters (Rain of Arrows, Cabalt, Telescope Horn) are honoured'],
+  ['namecard', [],                      'Nocturne Dragoon: naming a card works for both players and the bot'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']

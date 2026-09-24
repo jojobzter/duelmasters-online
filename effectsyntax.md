@@ -1048,3 +1048,46 @@ straight past it. It's been removed.
 currently a no-op, so `name=named` never matches anything real. This fix does not touch
 it; the card now discards nothing instead of (wrongly) discarding the whole hand, but
 still doesn't do what it says. Regression check: `node check.js filterdiscard`.
+
+## 20. `nameCard` — actually naming a card (Nocturne Dragoon)
+
+`nameCard` was a no-op stub — it logged a line and did nothing, so Nocturne Dragoon's
+`onSummon: nameCard; onSummon: oppDiscard all oppHand[name=named]` could never discard
+anything (`name=named` matched nothing, since nothing was ever named).
+
+This is the sheet's first case of one clause in a trigger depending on the outcome of an
+EARLIER clause in the same trigger, resolved over an actual round trip to the player
+(typing a name). `runParsedEffects` now tracks which clauses a `nameCard` clause claims
+as dependent (`clauseNeedsNamedCard`: any clause whose selector filters on
+`name=named`) in a `stashedForNaming` set, and skips them in that pass rather than
+running them with nothing named yet. A `chooseCardName` prompt is queued
+(`pendingCardNameChoices`, mirroring `pendingRaceChoices`) carrying those stashed
+clauses (`thenClauses`).
+
+Answering it (`chooseCardName`, matched case-insensitively — and whitespace-tolerantly —
+against the real card list via the same `normalizeCardKey`/`CARD_DB` lookup every other
+name-based effect uses, so `"  hOlY aWe  "` resolves to the sheet's own spelling,
+`"Holy Awe"`) stores that canonical name on the PLAYER (`me.namedCard` — read from
+`state.players[srcOwnerIdx].namedCard` by the `name` filter's new `named` case,
+alongside its existing `self` case), then runs each stashed clause for real —
+`oppDiscard`'s logic was pulled out into `resolveOppDiscard` (shared by the normal
+switch-case path and this one) rather than duplicated. An unrecognized name is refused
+(`summonRejected`) and the prompt stays open, so a typo just means typing again. Naming a
+card the opponent doesn't hold resolves cleanly with nothing to discard.
+
+The opponent needed to see this is happening. `pendingCardNameChoice` in publicState
+gives the naming player the full prompt (so their client can open it) and gives the
+OPPONENT only `{waiting: true, source}` — enough for a message, nothing they could act
+on. It's counted in `pendingPromptTotal` like every other prompt type, so the existing
+"<name> is resolving something — please wait" banner already covers it for free; the
+turn indicator special-cases this one prompt type for the closer wording the card asks
+for ("<name> is choosing a card name for you to discard...").
+
+The client adds one modal (`#name-card-modal`, opened the same way `openDiscardModal`
+already opens automatically off `pendingCardNameChoice`) — a plain text input with a
+`<datalist>` of every known card name for autocomplete, since the player is expected to
+type "roughly", not perfectly. The computer player can't see the opponent's hand (that
+would be reading hidden information), so its guess is necessarily blind: a generic,
+well-known card in whichever civilization the opponent has actually shown on the board,
+via a small fixed table — good enough that it never sends an invalid name and never
+stalls its own turn on this prompt. Regression check: `node check.js namecard`.
