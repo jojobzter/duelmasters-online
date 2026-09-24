@@ -1888,6 +1888,7 @@ function openShieldTriggerModal(key, id) {
 }
 // ====================== Forced discard prompts (Ghost Touch, Cranium Clamp, Lost Soul, Ice Vapor) ======================
 let discardEffectId = null, discardChosen = new Set(), discardNeeded = 0;
+let nameCardEffectId = null;
 
 function openDiscardModal(eff, hand) {
   discardEffectId = eff.id;
@@ -1957,6 +1958,39 @@ document.getElementById('btn-discard-confirm').addEventListener('click', () => {
   sendMsg({ type: 'effectDiscardResolve', effectId: discardEffectId, keys: [...discardChosen] });
   discardEffectId = null; discardChosen = new Set();
   document.getElementById('discard-modal').style.display = 'none';
+});
+
+// ---- Nocturne Dragoon: "name a card" ----
+function openNameCardModal(pending) {
+  nameCardEffectId = pending.id;
+  document.getElementById('name-card-title').textContent = pending.source || 'Name a card';
+  const input = document.getElementById('name-card-input');
+  input.value = '';
+  // Every known card name, so the field behaves like a search-as-you-type box — the
+  // player only has to get it roughly right, not remember exact capitalization.
+  const list = document.getElementById('name-card-list');
+  list.innerHTML = '';
+  const names = new Set();
+  cardMetaDB.forEach(c => { if (c && c.name) names.add(c.name); });
+  [...names].sort().forEach(n => {
+    const opt = document.createElement('option');
+    opt.value = n;
+    list.appendChild(opt);
+  });
+  document.getElementById('name-card-modal').style.display = 'flex';
+  input.focus();
+}
+function submitNameCard() {
+  if (!nameCardEffectId) return;
+  const name = document.getElementById('name-card-input').value.trim();
+  if (!name) return;
+  sendMsg({ type: 'chooseCardName', name });
+  // left open until the state confirms it resolved — a bad name comes back as
+  // summonRejected (an alert), and the player just types again in the same box
+}
+document.getElementById('btn-name-card-confirm').addEventListener('click', submitNameCard);
+document.getElementById('name-card-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); submitNameCard(); }
 });
 
 document.getElementById('btn-skip-effect').addEventListener('click', () => {
@@ -3046,6 +3080,15 @@ function renderState(state) {
     document.getElementById('discard-modal').style.display = 'none';
   }
 
+  // ---- Nocturne Dragoon: "name a card" opens automatically, same as a forced discard ----
+  const myNameChoice = me.pendingCardNameChoice;
+  if (myNameChoice && myNameChoice.id && nameCardEffectId !== myNameChoice.id) {
+    openNameCardModal(myNameChoice);
+  } else if (!(myNameChoice && myNameChoice.id) && nameCardEffectId) {
+    nameCardEffectId = null;
+    document.getElementById('name-card-modal').style.display = 'none';
+  }
+
   // make it obvious when the opponent is held up waiting on you
   const waitingOnMe = (me.pendingPromptCount || 0) > 0;
   const waitingOnThem = (opp.pendingPromptCount || 0) > 0;
@@ -3053,6 +3096,8 @@ function renderState(state) {
   const ti = document.getElementById('turn-indicator');
   const oppLabel = (state.names && state.names[oppIdx]) ? state.names[oppIdx] : 'your opponent';
   ti.textContent = !state.dealt[oppIdx] ? 'Waiting for opponent to join & deal in...'
+    : (opp.pendingCardNameChoice && opp.pendingCardNameChoice.waiting)
+      ? (oppLabel + ' is choosing a card name for you to discard...')
     : waitingOnThem ? (oppLabel + ' is resolving something — please wait.')
     : waitingOnMe ? 'Resolve your prompt to continue.'
     : ('Free play with ' + oppLabel + ' — act anytime');

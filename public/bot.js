@@ -609,6 +609,22 @@ const Bot = (() => {
       return true;
     }
 
+    if (me.pendingCardNameChoice) {
+      // Nocturne Dragoon: name a card, discard every copy of it from the opponent's
+      // hand. The bot can't see their hand (that would be cheating), so this is
+      // necessarily a guess — a generic, high-impact card in whichever civilization
+      // the opponent has actually shown on the board, which is the only real signal
+      // available. Any of these names is valid, so the guess never gets rejected.
+      const civCount = {};
+      opp.battlezone.forEach(c => (meta(c.id).civs || []).forEach(v => { civCount[v] = (civCount[v] || 0) + 1; }));
+      opp.mana.forEach(c => (meta(c.id).civs || []).forEach(v => { civCount[v] = (civCount[v] || 0) + 1; }));
+      const civ = Object.keys(civCount).sort((a, b) => civCount[b] - civCount[a])[0];
+      const GUESS = { Light: 'Holy Awe', Water: 'Aqua Surfer', Darkness: 'Gigaslug', Fire: 'Bolshack Dragon', Nature: 'Bronze-Arm Tribe' };
+      const name = GUESS[civ] || 'Bolshack Dragon';
+      act(() => send({ type: 'chooseCardName', name }), DELAY.normal);
+      return true;
+    }
+
     if (me.pendingTruce) {
       const civCount = {};
       opp.battlezone.forEach(c => (meta(c.id).civs || []).forEach(v => { civCount[v] = (civCount[v] || 0) + 1; }));
