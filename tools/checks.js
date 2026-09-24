@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'namecard', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -2091,6 +2091,126 @@ if (WHICH === 'evolve') {
     check('bot: and it still finishes its turn', r.T.S.activeTurn, 0);
   }
   done('Death Phoenix can be summoned by the player and by the computer');
+}
+
+if (WHICH === 'namecard') {
+  // Nocturne Dragoon: "onSummon: nameCard; onSummon: oppDiscard all oppHand[name=named]".
+  // Naming a card is a real prompt (a later clause in the same trigger has to wait for
+  // it), matched case-insensitively against the real card list, and the opponent gets
+  // a "your opponent is choosing..." indicator rather than silence while they wait.
+  const { check, done } = makeChecker();
+  const nm = c => c.id.split('/').pop();
+  const NAME = 'Nocturne Dragoon';
+  const DECK = [NAME, 'Cragsaur', 'Aqua Guard', 'Gigaslug', 'Holy Awe', 'Bolshack Dragon'];
+
+  const { parseEffect } = require('../effects-parser.js');
+  const row = loadEngine().CARDS.find(c => c.Name === NAME);
+  const parsed = parseEffect(row.Effect, NAME);
+  check('sheet effect parses with no errors', parsed.errors.length, 0);
+  check('two onSummon clauses: name it, then discard by that name',
+    parsed.effects.map(e => e.action), ['nameCard', 'oppDiscard']);
+  check('the discard clause is keyed on "named"',
+    parsed.effects[1].selector.filters, [{ key: 'name', op: '=', value: 'named', negate: false }]);
+
+  const summon = (oppHand, mana) => {
+    const T = newTable(DECK);
+    T.P.battlezone = []; T.P.hand = [{ key: 'nd', id: 'X/' + NAME }];
+    T.P.mana = mana || [1, 2, 3, 4, 5].map(n => ({ key: 'm' + n, id: 'X/Gigaslug', tapped: false }));
+    T.O.hand = oppHand;
+    T.say(T.a, { type: 'summonCard', key: 'nd' });
+    return T;
+  };
+
+  // -- the prompt itself: queued for the caster, with the discard clause waiting on it
+  {
+    const T = summon([{ key: 'h1', id: 'X/Holy Awe' }, { key: 'h2', id: 'X/Holy Awe' }, { key: 'h3', id: 'X/Cragsaur' }]);
+    check('Nocturne Dragoon is on the table', T.P.battlezone.map(nm), [NAME]);
+    const pend = T.P.pendingCardNameChoices[0];
+    check('a naming prompt is queued for its controller', pend && pend.source, NAME);
+    check('the discard clause is stashed on it, waiting for a name', pend && pend.thenClauses.map(c => c.action), ['oppDiscard']);
+    check('the OPPONENT is told someone is choosing, nothing more',
+      T.b.lastState.players[0].pendingCardNameChoice, { waiting: true, source: NAME });
+    check('...but the CASTER sees the real, answerable prompt',
+      T.a.lastState.players[0].pendingCardNameChoice && T.a.lastState.players[0].pendingCardNameChoice.id, pend.id);
+    check('this counts as a pending prompt (drives the "please wait" banner)',
+      T.b.lastState.players[0].pendingPromptCount > 0, true);
+  }
+
+  // -- naming, case-insensitively and tolerant of stray whitespace, discards every copy
+  {
+    const T = summon([{ key: 'h1', id: 'X/Holy Awe' }, { key: 'h2', id: 'X/Holy Awe' }, { key: 'h3', id: 'X/Cragsaur' }]);
+    T.say(T.a, { type: 'chooseCardName', name: '  hOlY aWe  ' });
+    check('the canonical (sheet) spelling is stored, not what was typed', T.P.namedCard, 'Holy Awe');
+    check('the naming prompt is gone', T.P.pendingCardNameChoices.length, 0);
+    const pd = T.O.pendingDiscards[0];
+    check('exactly the two matching cards are queued, not the third', pd && pd.keys.slice().sort(), ['h1', 'h2']);
+    T.say(T.b, { type: 'effectDiscardResolve', effectId: pd.id, keys: [] });
+    check('both copies are discarded', T.O.graveyard.map(nm).sort(), ['Holy Awe', 'Holy Awe']);
+    check('the unrelated card is untouched', T.O.hand.map(nm), ['Cragsaur']);
+  }
+
+  // -- naming a card the opponent doesn't have: nothing to discard, no stray prompt
+  {
+    const T = summon([{ key: 'h1', id: 'X/Cragsaur' }]);
+    T.say(T.a, { type: 'chooseCardName', name: 'Holy Awe' });
+    check('named, even though they have none', T.P.namedCard, 'Holy Awe');
+    check('nothing was queued to discard', T.O.pendingDiscards.length, 0);
+    check('their hand is untouched', T.O.hand.map(nm), ['Cragsaur']);
+  }
+
+  // -- an unknown name is refused, and the player can just try again
+  {
+    const T = summon([{ key: 'h1', id: 'X/Cragsaur' }]);
+    const from = T.a.inbox.length;
+    T.say(T.a, { type: 'chooseCardName', name: 'Not A Real Card XYZ' });
+    const rej = T.a.inbox.slice(from).find(m => m.type === 'summonRejected');
+    check('an unknown name is refused', !!rej, true);
+    check('the prompt is still open', T.P.pendingCardNameChoices.length, 1);
+    check('nothing got named yet', T.P.namedCard, null);
+    T.say(T.a, { type: 'chooseCardName', name: 'cragsaur' });
+    check('a valid retry resolves it', T.P.namedCard, 'Cragsaur');
+    check('...and the matching card is queued', T.O.pendingDiscards[0] && T.O.pendingDiscards[0].keys, ['h1']);
+  }
+
+  // -- the computer player: it can't see the opponent's hand, so it guesses by their
+  // visible colours, and — this is the functional bar — it never gets stuck
+  {
+    const norm = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    const META = new Map();
+    for (const r of loadEngine().CARDS) if (r.Name && !META.has(norm(r.Name))) META.set(norm(r.Name), { cost: r['Mana Cost'], power: r.Power, civs: String(r.Civilization || '').split('/') });
+    global.cardMetaFor = id => META.get(norm(String(id).split('/').pop())) || {};
+    global.displayName = id => String(id).split('/').pop();
+    global.fetch = () => Promise.reject(new Error('offline'));
+    const fs = require('fs');
+    const botSrc = fs.readFileSync(__dirname + '/../public/bot.js', 'utf8');
+    const pending = new Map(); let nextId = 1; const order = [];
+    const st = fn => { const id = nextId++; pending.set(id, fn); order.push(id); return id; };
+    const ct = id => pending.delete(id);
+    const bot = eval('(function(setTimeout, clearTimeout){' + botSrc + '; return Bot; })')(st, ct);
+    const drain = limit => { let ran = 0; while (order.length && ran < limit) { const id = order.shift(); const fn = pending.get(id); if (!fn) continue; pending.delete(id); try { fn(); } catch (e) {} ran++; } return ran; };
+
+    const T = newTable(DECK);
+    const A = T.P, B = T.O;
+    T.S.turnNumber = 12; T.S.activeTurn = 1;
+    A.battlezone = [{ key: 'ax', id: 'X/Bolshack Dragon', tapped: false, summonedTurn: 5 }];   // Fire — the bot's only real signal
+    A.mana = [{ key: 'am', id: 'X/Cragsaur', tapped: false }];
+    A.shields = T.shields(['Cragsaur', 'Cragsaur', 'Cragsaur']);
+    B.battlezone = []; B.hand = [{ key: 'nd', id: 'X/' + NAME }];
+    B.mana = [1, 2, 3, 4, 5].map(n => ({ key: 'm' + n, id: 'X/Gigaslug', tapped: false }));
+    const sent = [];
+    const origSend = T.b.send.bind(T.b);
+    T.b.send = function (d) { origSend(d); const m = JSON.parse(d); if (this.onMsg) this.onMsg(m); };
+    bot.start({ seatIdx: 1, deck: [], send: (m) => { sent.push(m); T.say(T.b, m); } });
+    T.b.onMsg = (m) => { if (m.type === 'state') bot.onState(m.state); };
+    T.say(T.b, { type: 'setShowingHand', show: false });
+    for (let i = 0; i < 40; i++) { if (T.b.lastState) bot.onState(T.b.lastState); if (!drain(400)) break; }
+    const named = sent.find(m => m.type === 'chooseCardName');
+    check('the bot answers the prompt itself', named && named.name, 'Bolshack Dragon');
+    check('...and the prompt actually clears (it never gets stuck)', B.pendingCardNameChoices.length, 0);
+    check('it only ever answers once — no retry loop', sent.filter(m => m.type === 'chooseCardName').length, 1);
+  }
+
+  done('Nocturne Dragoon: naming a card actually works, for both players and the bot');
 }
 
 if (WHICH === 'effects') {
