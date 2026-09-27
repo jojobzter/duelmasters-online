@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'namecard', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'namecard', 'cardgrid', 'reconnect', 'lobby', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -82,8 +82,11 @@ if (WHICH === 'client') {
     textContent: '', innerHTML: '', value: '', checked: false, focus(){}, remove(){},
     children: [], dataset: {}, scrollIntoView(){}, click(){}
   });
+  let __fakeSession = {};
   global.window = { addEventListener(){}, innerWidth:1000, innerHeight:800,
-    location:{ href:'', protocol:'https:', host:'x' },
+    location:{ href:'', protocol:'https:', host:'x', pathname:'/', search:'' },
+    history: { replaceState(){} },
+    sessionStorage: { getItem: (k) => (k in __fakeSession ? __fakeSession[k] : null), setItem: (k,v) => { __fakeSession[k]=String(v); }, removeItem: (k) => { delete __fakeSession[k]; } },
     matchMedia: () => ({ matches:false, addEventListener(){} }), requestAnimationFrame:(f)=>f() };
   global.document = { getElementById: () => mk(), querySelector: () => mk(), querySelectorAll: () => [],
     createElement: () => mk(), addEventListener(){}, body: mk(), head: mk(),
@@ -1538,6 +1541,17 @@ function newTable(deckNames) {
   const shields = (names) => names.map((n, i) => ({ key: 's' + i, id: 'X/' + n, faceUp: false, slot: i }));
   return { CARDS, a, b, say, S, P: S.players[0], O: S.players[1], nm, logsSince, shields };
 }
+// A single raw, unpaired connection — for lobby/reconnect scenarios, where each test
+// needs its own independent socket rather than newTable's fixed, already-seated pair.
+function rawSocket() {
+  const { server } = loadEngine();
+  const ws = { readyState: 1, OPEN: 1, inbox: [],
+    send(d) { const m = JSON.parse(d); this.inbox.push(m); if (m.type === 'state') this.lastState = m.state; if (m.type === 'onlineUsers') this.lastUsers = m.users; },
+    on(e, f) { this['_' + e] = f; }, close() {} };
+  server.__wss.handlers.connection(ws);
+  return ws;
+}
+function rawSay(ws, m) { try { ws._message(JSON.stringify(m)); } catch (e) { console.log('engine threw: ' + (e && e.stack)); } }
 function makeChecker() {
   const c = { pass: 0, fail: 0 };
   c.check = (l, got, want) => {
@@ -2091,6 +2105,323 @@ if (WHICH === 'evolve') {
     check('bot: and it still finishes its turn', r.T.S.activeTurn, 0);
   }
   done('Death Phoenix can be summoned by the player and by the computer');
+}
+
+if (WHICH === 'cardgrid') {
+  // The deck-builder search box could feel unresponsive on a phone: an empty or short
+  // query matched most of the ~2000+ card library, and every keystroke rebuilt the
+  // WHOLE matching set as real <img>-holding DOM nodes — the rebuild itself was the
+  // slow part, not the typing. Rendering is now capped, however broad the query is.
+  const { check, done } = makeChecker();
+  const fs = require('fs');
+  const src = fs.readFileSync(__dirname + '/../public/client.js', 'utf8');
+
+  const mkGeneric = () => ({ style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' },
+    classList: { add(){}, remove(){}, toggle(){}, contains: () => false }, addEventListener(){}, removeEventListener(){},
+    appendChild(){}, insertBefore(){}, querySelector: () => mkGeneric(), querySelectorAll: () => [], setAttribute(){},
+    getAttribute: () => null, getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }),
+    textContent: '', innerHTML: '', value: '', checked: false, focus(){}, remove(){}, children: [], dataset: {}, scrollIntoView(){}, click(){} });
+
+  // purpose-built stand-ins for the three elements refreshCardGrid actually touches,
+  // so the test can see what it DID rather than just that it didn't crash
+  const searchEl = Object.assign(mkGeneric(), { value: '' });
+  const hintEl = Object.assign(mkGeneric(), { style: { display: 'none' } });
+  let renderedCount = null;         // how many .card-thumb nodes actually got attached
+  let gridInnerHTMLClears = 0;
+  const gridEl = Object.assign(mkGeneric(), {
+    appendChild(fragment) { renderedCount = (fragment && fragment.__thumbCount) || 0; },
+  });
+  Object.defineProperty(gridEl, 'innerHTML', { set() { gridInnerHTMLClears++; }, get() { return ''; } });
+
+  global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800,
+    location: { href: '', protocol: 'https:', host: 'x', pathname: '/', search: '' }, history: { replaceState(){} },
+    sessionStorage: { getItem: () => null, setItem(){}, removeItem(){} },
+    matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
+  global.document = {
+    getElementById: (id) => id === 'card-search' ? searchEl : id === 'card-grid' ? gridEl : id === 'card-grid-cap-hint' ? hintEl : mkGeneric(),
+    createDocumentFragment: () => { const f = mkGeneric(); f.__thumbCount = 0; const real = f.appendChild.bind(f); f.appendChild = (x) => { f.__thumbCount++; real(x); }; return f; },
+    createElement: () => mkGeneric(), querySelector: () => mkGeneric(), querySelectorAll: () => [], addEventListener(){},
+    body: mkGeneric(), head: mkGeneric(), documentElement: mkGeneric(), readyState: 'complete',
+  };
+  global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+  global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
+  global.WebSocket = function () { return { addEventListener(){}, send(){}, close(){} }; };
+  global.fetch = () => Promise.reject(new Error('offline'));
+  global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
+
+  const wq = console.warn; const eq = console.error; console.warn = () => {}; console.error = () => {};
+  try {
+    eval(src + `
+;(function () {
+  // a library far bigger than the render cap, entirely matching an empty query —
+  // exactly the "just opened the deck builder" case that used to render everything
+  cardDB = new Map();
+  for (let i = 0; i < 2000; i++) cardDB.set('DM-1/Card ' + i, { url: 'u', name: 'Card ' + i, set: 'DM-1' });
+  cardMetaDB = new Map(); currentDeck = []; activeCivFilters = new Set(); activeCostFilters.clear();
+  activeRaceFilter = ''; activeKeywordFilters.clear(); invalidateCardGridCache();
+  searchEl.value = '';
+  refreshCardGrid();
+  check('an empty query on a huge library is still capped', renderedCount <= CARD_GRID_RENDER_CAP, true);
+  check('...specifically at the documented cap', renderedCount, CARD_GRID_RENDER_CAP);
+  check('the hint explains there is more, and how to see it', /2000/.test(hintEl.textContent) && /narrow/i.test(hintEl.textContent), true);
+
+  // a query narrow enough to fall under the cap: everything matching is shown, no hint
+  searchEl.value = 'card 7';   // "Card 7", "Card 70".."Card 79", "Card 700".."Card 799" etc.
+  invalidateCardGridCache();
+  refreshCardGrid();
+  check('a narrow query renders ALL its matches (no needless capping)', renderedCount < CARD_GRID_RENDER_CAP && renderedCount > 0, true);
+  check('...and the hint goes away once nothing is hidden', hintEl.style.display, 'none');
+})();
+`);
+  } catch (e) { check('client.js runs the card-grid scenario without throwing', e.message, null); }
+  console.warn = wq; console.error = eq;
+
+  done('the card search grid stays capped, however broad the query is');
+}
+
+if (WHICH === 'reconnect') {
+  // A dropped connection (mobile network blip, backgrounded tab) used to be
+  // indistinguishable from someone quitting: the seat went blank immediately, the
+  // room could vanish the instant both sockets happened to be down at once, and there
+  // was no way back in except asking the opponent to approve you as if you were a
+  // stranger. A drop now leaves the seat (and a resume token) in place for a grace
+  // period, and the SAME player can walk back in with that token — no approval needed.
+  const { check, done } = makeChecker();
+  const { server } = loadEngine();
+  const rooms = server.__rooms;
+
+  // -- the basics: a drop doesn't delete the room, and the name survives it
+  {
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(b, { type: 'join', room, name: 'Bob' });
+    rawSay(a, { type: 'respondJoin', accept: true });
+    const aToken = a.inbox.find(m => m.type === 'joined').resumeToken;
+    check('a resume token is issued on being seated', typeof aToken, 'string');
+    a._close();
+    check('the room is NOT deleted the instant one side drops', rooms.has(room), true);
+    check('the dropped seat is cleared', rooms.get(room).sockets[0], null);
+    check("the other player's view still shows the disconnected player's name",
+      b.lastState.names[0], 'Alice');
+
+    // -- resuming: same room, same seat, same board — no approval prompt involved
+    const a2 = rawSocket();
+    const fromB = b.inbox.length;
+    rawSay(a2, { type: 'resume', room, token: aToken });
+    const resumedMsg = a2.inbox.find(m => m.type === 'resumed');
+    check('resume re-seats at the SAME index', resumedMsg && [resumedMsg.room, resumedMsg.you], [room, 0]);
+    check('...and issues a fresh resume token (the old one is spent)',
+      typeof resumedMsg.resumeToken === 'string' && resumedMsg.resumeToken !== aToken, true);
+    check('the room now points at the NEW socket', rooms.get(room).sockets[0] === a2, true);
+    check('the opponent is told it was a reconnect, not asked to approve anyone',
+      b.inbox.slice(fromB).some(m => m.type === 'log' && /reconnected/i.test(m.text)), true);
+    check('...and got no joinRequest for it', b.inbox.slice(fromB).some(m => m.type === 'joinRequest'), false);
+
+    // -- and again: the SECOND resume must use the token the FIRST resume just
+    // issued, not the original one (which the server has since retired)
+    const a2Token = resumedMsg.resumeToken;
+    a2._close();
+    check('dropping the resumed connection still leaves the room alone', rooms.has(room), true);
+    const oldTokenStillWorks = rawSocket();
+    rawSay(oldTokenStillWorks, { type: 'resume', room, token: aToken });
+    check('the ORIGINAL (now-retired) token no longer works', oldTokenStillWorks.inbox, [{ type: 'resumeFailed' }]);
+    const a3 = rawSocket();
+    rawSay(a3, { type: 'resume', room, token: a2Token });
+    check('but the token from the FIRST resume still does', a3.inbox.some(m => m.type === 'resumed'), true);
+  }
+
+  // -- a bad or stale token is refused outright, never silently seats an impostor
+  {
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room = a.inbox.find(m => m.type === 'joined').room;
+    const x = rawSocket();
+    rawSay(x, { type: 'resume', room, token: 'not-a-real-token' });
+    check('an unknown token is refused', x.inbox, [{ type: 'resumeFailed' }]);
+    check('the real seat is untouched', rooms.get(room).sockets[0].inbox !== undefined, true);
+  }
+
+  // -- both sides dropping at once still gets a grace period, not instant deletion
+  {
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(b, { type: 'join', room, name: 'Bob' });
+    rawSay(a, { type: 'respondJoin', accept: true });
+    a._close(); b._close();
+    check('room survives a simultaneous double-drop (grace period)', rooms.has(room), true);
+  }
+
+  // -- Create/Join while already seated elsewhere cleanly vacates the old seat
+  // instead of leaving a socket that still thinks it's in two rooms at once
+  {
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room1 = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room2 = a.inbox.filter(m => m.type === 'joined').slice(-1)[0].room;
+    check('clicking Create again gives a different room', room2 !== room1, true);
+    check('the OLD room lost that seat', rooms.get(room1).sockets[0], null);
+    check('the NEW room has it', rooms.get(room2).sockets[0] === a, true);
+  }
+
+  // -- declined: the requester keeps whatever room they already had — this is what
+  // makes a lobby "request to join" safe to click without losing your own game
+  {
+    const a = rawSocket(), c = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room1 = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(c, { type: 'create', name: 'Carol' });
+    const room2 = c.inbox.find(m => m.type === 'joined').room;
+    rawSay(c, { type: 'join', room: room1, name: 'Carol' });
+    check("their OWN room is untouched while the request is pending", rooms.get(room2).sockets[0] === c, true);
+    rawSay(a, { type: 'respondJoin', accept: false });
+    check('declined — back in their own room, not stranded', rooms.get(room2).sockets[0] === c, true);
+    const deck = []; ['Cragsaur', 'Aqua Guard', 'Gigaslug', 'Holy Awe', 'Necrodragon Zalva'].forEach(n => { for (let i = 0; i < 4; i++) deck.push('X/' + n); });
+    rawSay(c, { type: 'submitDeck', deck });
+    check('...and it still works normally', c.inbox.some(m => m.type === 'log' && /opening hand/.test(m.text)), true);
+  }
+
+  // -- accepted: NOW the old room is vacated (it was genuinely replaced, not just tried)
+  {
+    const a = rawSocket(), c = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice' });
+    const room1 = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(c, { type: 'create', name: 'Carol' });
+    const room2 = c.inbox.find(m => m.type === 'joined').room;
+    rawSay(c, { type: 'join', room: room1, name: 'Carol' });
+    rawSay(a, { type: 'respondJoin', accept: true });
+    check('now seated in the NEW room', rooms.get(room1).sockets[1] === c, true);
+    check('the OLD room was cleanly vacated', rooms.get(room2).sockets[0], null);
+  }
+
+  // -- Quit to Menu: a DELIBERATE close must never be mistaken for a dropped
+  // connection. This is the exact bug behind "Return to Main Menu feels slow to
+  // respond" — closing the socket used to leave a valid resume token in place, the
+  // close handler saw it and started reconnecting in the background, and a
+  // successful resume would then silently flip the screen right back to the table a
+  // moment after the player thought they'd left.
+  {
+    const listeners = new Map();
+    const mkEl = (id) => ({
+      style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' }, textContent: '', innerHTML: '', value: '', className: '',
+      classList: { add(){}, remove(){}, toggle(){}, contains: () => false }, dataset: {}, children: [],
+      addEventListener(type, fn) { const m = listeners.get(id) || {}; m[type] = m[type] || []; m[type].push(fn); listeners.set(id, m); },
+      removeEventListener(){}, appendChild(){}, insertBefore(){}, remove(){}, focus(){},
+      querySelector: () => mkEl(id + ':child'), querySelectorAll: () => [], setAttribute(){}, getAttribute: () => null,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), scrollIntoView(){},
+    });
+    const elements = new Map();
+    const elFor = (id) => { if (!elements.has(id)) elements.set(id, mkEl(id)); return elements.get(id); };
+    global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800,
+      location: { href: '', protocol: 'https:', host: 'x', pathname: '/', search: '' },
+      history: { replaceState(){} },
+      sessionStorage: (() => { let s = {}; return { getItem: k => (k in s ? s[k] : null), setItem: (k, v) => { s[k] = String(v); }, removeItem: k => { delete s[k]; } }; })(),
+      matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
+    global.document = { getElementById: elFor, querySelector: () => elFor('__q'), querySelectorAll: () => [], createElement: () => mkEl('__c'), addEventListener(){}, body: elFor('body'), head: elFor('head'), documentElement: elFor('html'), readyState: 'complete' };
+    global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+    global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
+    global.WebSocket = function () { return { addEventListener(){}, send(){}, close(){} }; };
+    global.fetch = () => Promise.reject(new Error('offline'));
+    global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
+    const fs = require('fs');
+    const src = fs.readFileSync(__dirname + '/../public/client.js', 'utf8');
+    const wq = console.warn; const eq = console.error; console.warn = () => {}; console.error = () => {};
+    try {
+      eval(src + `
+;(function () {
+  // simulate a game that just ended: a live resume token, and a socket sitting there
+  saveResumeInfo('ROOMCODE', 'some-token');
+  let closed = false;
+  seats[0].ws = { close() { closed = true; } };
+  check('setup: a resume token is on file before quitting', !!loadResumeInfo(), true);
+  (listeners.get('btn-quit')['click'] || []).forEach(fn => fn());
+  check('Quit to Menu closed the socket', closed, true);
+  check('...and cleared the resume token FIRST — nothing left for a close handler to act on', loadResumeInfo(), null);
+  check('...and any reconnect loop is marked inactive', resumeState.active, false);
+})();
+`);
+    } catch (e) { check('client.js runs the quit-to-menu scenario without throwing', e.message, null); }
+    console.warn = wq; console.error = eq;
+  }
+
+  done('reconnecting works: same seat, same board, no false "someone wants to join"');
+}
+
+if (WHICH === 'lobby') {
+  // "Who's online" and challenging them directly — a request is just a normal join
+  // aimed at someone by id instead of by typing their room code.
+  const { check, done } = makeChecker();
+  const { server } = loadEngine();
+  const rooms = server.__rooms;
+
+  // -- presence: appears once named, shows status, never lists yourself to yourself
+  {
+    const a = rawSocket();
+    check('a bare connection with no name yet is invisible', a.lastUsers, undefined);
+    rawSay(a, { type: 'create', name: 'Alice1' });
+    const c = rawSocket();
+    rawSay(c, { type: 'create', name: 'Carol1' });
+    check("Carol's list shows Alice, waiting", c.lastUsers, [{ id: c.lastUsers[0].id, name: 'Alice1', status: 'waiting' }]);
+    check("Alice's list shows Carol, and not herself",
+      a.lastUsers.map(u => u.name), ['Carol1']);
+  }
+
+  // -- challenging by id: identical outcome to typing the room code, minus the code
+  {
+    const a = rawSocket(), c = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice2' });
+    const room = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(c, { type: 'create', name: 'Carol2' });
+    const aliceId = c.lastUsers.find(u => u.name === 'Alice2').id;
+    rawSay(c, { type: 'challenge', targetId: aliceId });
+    check('the challenger gets the same pending state a manual join gives', c.inbox.some(m => m.type === 'joinPending'), true);
+    check('the target gets a normal join request (same approval flow as always)',
+      a.inbox.find(m => m.type === 'joinRequest'), { type: 'joinRequest', name: 'Carol2' });
+    rawSay(a, { type: 'respondJoin', accept: true });
+    check('accepted into the challenged room', rooms.get(room).sockets[1] === c, true);
+  }
+
+  // -- can't challenge someone already paired up, and a bogus id never crashes
+  {
+    const a = rawSocket(), b = rawSocket(), e = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice3' });
+    const room = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(b, { type: 'join', room, name: 'Bob3' });
+    rawSay(a, { type: 'respondJoin', accept: true });
+    rawSay(e, { type: 'create', name: 'Eve3' });
+    const aliceId = e.lastUsers.find(u => u.name === 'Alice3').id;
+    rawSay(e, { type: 'challenge', targetId: aliceId });
+    check('challenging someone already in a game is refused', e.inbox.slice(-1)[0], { type: 'error', message: 'That player is no longer available.' });
+    rawSay(e, { type: 'challenge', targetId: 'totally-made-up' });
+    check('an unknown id is refused, not a crash', e.inbox.slice(-1)[0], { type: 'error', message: 'That player is no longer available.' });
+  }
+
+  // -- once paired, both players show as in-game, not two separate "waiting" entries
+  {
+    const a = rawSocket(), b = rawSocket(), spectator = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice4' });
+    const room = a.inbox.find(m => m.type === 'joined').room;
+    rawSay(b, { type: 'join', room, name: 'Bob4' });
+    rawSay(a, { type: 'respondJoin', accept: true });
+    rawSay(spectator, { type: 'create', name: 'Zoe4' });
+    check('both show in-game, in one consistent list',
+      spectator.lastUsers.filter(u => u.name === 'Alice4' || u.name === 'Bob4').map(u => u.status),
+      ['in-game', 'in-game']);
+  }
+
+  // -- leaving updates everyone else's view (no ghosts left behind)
+  {
+    const a = rawSocket(), c = rawSocket();
+    rawSay(a, { type: 'create', name: 'Alice5' });
+    rawSay(c, { type: 'create', name: 'Carol5' });
+    check('Carol sees Alice before she leaves', c.lastUsers.some(u => u.name === 'Alice5'), true);
+    a._close();
+    check('Alice drops off the list once disconnected', c.lastUsers.some(u => u.name === 'Alice5'), false);
+  }
+
+  done('the online list and lobby challenges work end to end');
 }
 
 if (WHICH === 'namecard') {
