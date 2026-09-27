@@ -369,7 +369,8 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const rooms = new Map();
-const connMeta = new Map(); // ws -> { roomCode, idx }
+const connMeta = new Map(); // ws -> { roomCode, idx, connId, name, pendingPreviousRoom }
+const connById = new Map(); // connId -> ws, for targeting a specific online player (lobby challenges)
 
 function newRoomCode() {
   let code;
@@ -3744,6 +3745,10 @@ function broadcastRaw(room, msg) {
   for (let i = 0; i < 2; i++) send(room.sockets[i], msg);
 }
 function nameFor(room, idx) {
+  // The room remembers a seated player's name even while their socket is down (mid
+  // reconnect) — deriving it only from the live socket meant a disconnected player's
+  // name vanished from the board the instant their connection dropped.
+  if (room.playerNames && room.playerNames[idx]) return room.playerNames[idx];
   const ws = room.sockets[idx];
   if (!ws) return null;
   const m = connMeta.get(ws);
@@ -4006,11 +4011,92 @@ function cleanupRoom(room) {
   if (!room.sockets[0] && !room.sockets[1] && !room.pendingJoin) rooms.delete(room.code);
 }
 
+// A room used to vanish the instant BOTH sockets closed — so a brief double drop (a
+// shared wifi hiccup, or someone reconnecting a beat too slowly) permanently lost the
+// match. Deletion is now delayed; anything that (re)claims a seat cancels the timer.
+const ROOM_REAP_GRACE_MS = 3 * 60 * 1000;
+function scheduleReap(room) {
+  if (room.reapTimer) return;
+  room.reapTimer = setTimeout(() => {
+    room.reapTimer = null;
+    if (!room.sockets[0] && !room.sockets[1] && !room.pendingJoin) rooms.delete(room.code);
+  }, ROOM_REAP_GRACE_MS);
+  room.reapTimer.unref?.();
+}
+function cancelReap(room) {
+  if (room.reapTimer) { clearTimeout(room.reapTimer); room.reapTimer = null; }
+}
+
+// Seats `ws` at `idx` in `room` — used by create (seat 0), an accepted join (seat 1),
+// and a successful resume (either seat). Always (re)issues a resume token, so a
+// reconnect a minute later works exactly the same way a first connection did.
+function seatPlayer(room, idx, ws, name) {
+  room.sockets[idx] = ws;
+  room.playerNames = room.playerNames || [null, null];
+  room.playerNames[idx] = name || room.playerNames[idx] || null;
+  room.resumeTokens = room.resumeTokens || [null, null];
+  const token = crypto.randomBytes(18).toString('hex');
+  room.resumeTokens[idx] = token;
+  const meta = connMeta.get(ws);
+  meta.roomCode = room.code; meta.idx = idx;
+  if (name) meta.name = name;
+  cancelReap(room);
+  return token;
+}
+
+// Cleanly vacates whatever seat `ws` currently holds — WITHOUT closing the socket —
+// so it can turn around and sit down somewhere else (Create/Join while already seated,
+// or a lobby "request to join" while waiting in a room of your own). Leaving the old
+// room's socket slot pointing at a socket that has mentally moved on would mean stray
+// broadcasts for that room keep arriving on a connection nobody is reading them for.
+function vacateSeat(roomCode, idx, ws) {
+  const room = rooms.get(roomCode);
+  if (!room || idx == null) return;
+  if (room.sockets[idx] !== ws) return;   // already replaced by someone/something else
+  room.sockets[idx] = null;
+  if (room.pendingJoin === ws) room.pendingJoin = null;
+  broadcastState(room);
+  scheduleReap(room);
+}
+
+// The "who's online" panel. Anyone who has created or joined at least one room (so
+// the server actually has a name for them) shows up, whichever room they're currently
+// in or waiting on — 'waiting' means their room has an open seat and nobody is already
+// asking to join it, i.e. the only status a lobby "request to join" can act on.
+function onlineStatusFor(meta) {
+  if (!meta.roomCode) return null;
+  const room = rooms.get(meta.roomCode);
+  if (!room) return null;
+  if (meta.idx === null) return 'pending';       // their own join request hasn't resolved yet
+  const oppIdx = meta.idx === 0 ? 1 : 0;
+  if (room.sockets[oppIdx]) return 'in-game';
+  if (meta.idx !== 0) return 'in-game';           // seat 1 with no seat 0 is a stale edge case, not "open"
+  return room.pendingJoin ? 'pending' : 'waiting';
+}
+function buildOnlineList() {
+  const list = [];
+  for (const [ws, meta] of connMeta) {
+    if (!meta.name || ws.readyState !== ws.OPEN) continue;
+    const status = onlineStatusFor(meta);
+    list.push({ id: meta.connId, name: meta.name, status: status || 'idle' });
+  }
+  return list;
+}
+function broadcastOnlineList() {
+  const list = buildOnlineList();
+  for (const [ws, meta] of connMeta) {
+    if (!meta.name || ws.readyState !== ws.OPEN) continue;
+    send(ws, { type: 'onlineUsers', users: list.filter(u => u.id !== meta.connId) });
+  }
+}
+
 const MAX_ROOMS = 500;            // a public instance should not grow without bound
 const MAX_MESSAGE_BYTES = 64 * 1024;
 
 wss.on('connection', (ws) => {
-  connMeta.set(ws, { roomCode: null, idx: null });
+  const connId = crypto.randomBytes(6).toString('hex');
+  connMeta.set(ws, { roomCode: null, idx: null, connId, pendingPreviousRoom: null });
+  connById.set(connId, ws);
 
   ws.on('message', (raw) => {
     // An oversized frame is the cheapest denial-of-service there is, so drop it
@@ -4025,14 +4111,18 @@ wss.on('connection', (ws) => {
         send(ws, { type: 'summonRejected', reason: 'The server is full — please try again shortly.' });
         return;
       }
+      // Clicking Create while already seated somewhere (or waiting on your own prior
+      // room) leaves cleanly, rather than orphaning that old room's socket slot.
+      if (meta.roomCode && meta.idx !== null) vacateSeat(meta.roomCode, meta.idx, ws);
       const roomCode = newRoomCode();
       const room = { code: roomCode, sockets: [ws, null], pendingJoin: null, decks: [null, null], state: freshMatchState() };
       // the host picks 5 or 6 shields when making the table
       room.state.shieldCount = (msg.shieldCount === 5) ? 5 : 6;
       rooms.set(roomCode, room);
-      meta.roomCode = roomCode; meta.idx = 0;
-      meta.name = (msg.name || '').trim().slice(0, 24) || null;
-      send(ws, { type: 'joined', room: roomCode, you: 0 });
+      meta.name = (msg.name || '').trim().slice(0, 24) || meta.name || null;
+      const token = seatPlayer(room, 0, ws, meta.name);
+      send(ws, { type: 'joined', room: roomCode, you: 0, resumeToken: token });
+      broadcastOnlineList();
       return;
     }
 
@@ -4042,11 +4132,16 @@ wss.on('connection', (ws) => {
       if (room.sockets[1]) { send(ws, { type: 'error', message: 'Room is full.' }); return; }
       if (!room.sockets[0]) { send(ws, { type: 'error', message: 'Host is not connected.' }); return; }
       if (room.pendingJoin) { send(ws, { type: 'error', message: 'Someone else is already asking to join — try again shortly.' }); return; }
+      // If this connection is already seated (or waiting) somewhere else, hold onto
+      // where — restored on a decline, cleanly vacated only once this join is accepted
+      // — so a "request to join" from the lobby can never cost you your own room.
+      meta.pendingPreviousRoom = (meta.roomCode && meta.idx !== null) ? { roomCode: meta.roomCode, idx: meta.idx } : null;
       room.pendingJoin = ws;
       meta.roomCode = room.code; meta.idx = null;
-      meta.name = (msg.name || '').trim().slice(0, 24) || null;
+      meta.name = (msg.name || '').trim().slice(0, 24) || meta.name || null;
       send(ws, { type: 'joinPending' });
       send(room.sockets[0], { type: 'joinRequest', name: meta.name });
+      broadcastOnlineList();
       return;
     }
 
@@ -4055,14 +4150,87 @@ wss.on('connection', (ws) => {
       if (!room || meta.idx !== 0 || !room.pendingJoin) return;
       const reqWs = room.pendingJoin;
       room.pendingJoin = null;
+      const reqMeta = connMeta.get(reqWs);
       if (msg.accept) {
-        room.sockets[1] = reqWs;
-        connMeta.get(reqWs).idx = 1;
-        send(reqWs, { type: 'joined', room: room.code, you: 1 });
+        if (reqMeta && reqMeta.pendingPreviousRoom) {
+          vacateSeat(reqMeta.pendingPreviousRoom.roomCode, reqMeta.pendingPreviousRoom.idx, reqWs);
+        }
+        const token = seatPlayer(room, 1, reqWs, reqMeta && reqMeta.name);
+        send(reqWs, { type: 'joined', room: room.code, you: 1, resumeToken: token });
         broadcastState(room);
       } else {
+        // give the requester their previous seat back, if any — declining them from
+        // someone else's room should never cost them the room they already had
+        if (reqMeta) {
+          if (reqMeta.pendingPreviousRoom) {
+            reqMeta.roomCode = reqMeta.pendingPreviousRoom.roomCode;
+            reqMeta.idx = reqMeta.pendingPreviousRoom.idx;
+          } else {
+            reqMeta.roomCode = null; reqMeta.idx = null;
+          }
+          reqMeta.pendingPreviousRoom = null;
+        }
         send(reqWs, { type: 'joinDeclined' });
       }
+      if (reqMeta) reqMeta.pendingPreviousRoom = null;
+      broadcastOnlineList();
+      return;
+    }
+
+    if (msg.type === 'resume') {
+      const room = rooms.get((msg.room || '').toUpperCase());
+      const token = (msg.token || '').toString();
+      let idx = -1;
+      if (room && token && room.resumeTokens) {
+        idx = room.resumeTokens.findIndex(t => t && t === token);
+      }
+      if (idx === -1) { send(ws, { type: 'resumeFailed' }); return; }
+      // If this connection was already seated (e.g. a stray duplicate tab), leave that
+      // seat cleanly first. If the OLD socket at the target seat is a genuine zombie —
+      // the server hasn't noticed its close yet — replacing it here is correct; the
+      // resuming client proved it holds the token.
+      if (meta.roomCode && meta.idx !== null && !(meta.roomCode === room.code && meta.idx === idx)) {
+        vacateSeat(meta.roomCode, meta.idx, ws);
+      }
+      const stale = room.sockets[idx];
+      if (stale && stale !== ws) { try { stale.close(); } catch {} }
+      const newToken = seatPlayer(room, idx, ws, meta.name || room.playerNames?.[idx]);
+      send(ws, { type: 'resumed', room: room.code, you: idx, resumeToken: newToken });
+      broadcastState(room);
+      logMsg(room, idx, 'reconnected.');
+      broadcastOnlineList();
+      return;
+    }
+
+    if (msg.type === 'challenge') {
+      const targetWs = connById.get((msg.targetId || '').toString());
+      const targetMeta = targetWs && connMeta.get(targetWs);
+      if (!targetMeta || !targetMeta.roomCode) { send(ws, { type: 'error', message: 'That player is no longer available.' }); return; }
+      const targetRoom = rooms.get(targetMeta.roomCode);
+      if (!targetRoom || targetMeta.idx !== 0 || targetRoom.sockets[1] || targetRoom.pendingJoin) {
+        send(ws, { type: 'error', message: 'That player is no longer available.' });
+        return;
+      }
+      if (targetWs === ws) return;
+      // From here it's exactly a normal join request against their room.
+      meta.pendingPreviousRoom = (meta.roomCode && meta.idx !== null) ? { roomCode: meta.roomCode, idx: meta.idx } : null;
+      targetRoom.pendingJoin = ws;
+      meta.roomCode = targetRoom.code; meta.idx = null;
+      send(ws, { type: 'joinPending' });
+      send(targetRoom.sockets[0], { type: 'joinRequest', name: meta.name });
+      broadcastOnlineList();
+      return;
+    }
+
+    if (msg.type === 'setName') {
+      const name = (msg.name || '').trim().slice(0, 24);
+      if (!name) return;
+      meta.name = name;
+      if (meta.roomCode) {
+        const room = rooms.get(meta.roomCode);
+        if (room && meta.idx !== null) { room.playerNames = room.playerNames || [null, null]; room.playerNames[meta.idx] = name; }
+      }
+      broadcastOnlineList();
       return;
     }
 
@@ -6072,13 +6240,19 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     const meta = connMeta.get(ws);
     connMeta.delete(ws);
-    if (!meta || !meta.roomCode) return;
+    if (meta) connById.delete(meta.connId);
+    if (!meta || !meta.roomCode) { if (meta) broadcastOnlineList(); return; }
     const room = rooms.get(meta.roomCode);
-    if (!room) return;
+    if (!room) { broadcastOnlineList(); return; }
     if (room.pendingJoin === ws) room.pendingJoin = null;
-    if (meta.idx !== null) room.sockets[meta.idx] = null;
-    broadcastState(room);
-    cleanupRoom(room);
+    // A dropped connection is NOT a deliberate leave — the seat and its resume token
+    // stay put, so the same player reconnecting (a real network drop, not someone
+    // else) can walk right back into the game via 'resume', without an approval
+    // prompt. The room itself just gets a delayed cleanup instead of an instant one,
+    // in case both players happen to drop around the same moment.
+    if (meta.idx !== null) { room.sockets[meta.idx] = null; broadcastState(room); scheduleReap(room); }
+    else { cleanupRoom(room); }
+    broadcastOnlineList();
   });
 });
 

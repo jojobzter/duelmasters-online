@@ -28,6 +28,9 @@ const CHECKS = [
   ['evolve',   [],                     'Vortex evolutions can be summoned: the menu, the picker, the bot'],
   ['filterdiscard', [],                'oppHand[...] filters (Rain of Arrows, Cabalt, Telescope Horn) are honoured'],
   ['namecard', [],                      'Nocturne Dragoon: naming a card works for both players and the bot'],
+  ['cardgrid', [],                    'the deck-builder search grid stays capped for responsiveness'],
+  ['reconnect', [],                    'a dropped connection can resume the same seat with no re-approval'],
+  ['lobby',     [],                    'the online-players list and lobby challenges work end to end'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],
   ['audit',   [],                      'every sheet clause is wired to the engine'],
   ['sheet',   [],                      'card data has no duplicates or contradictions']
