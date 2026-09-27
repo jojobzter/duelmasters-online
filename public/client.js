@@ -593,6 +593,14 @@ function normNameCached(name) {
   return v;
 }
 
+// The library can be a couple thousand cards, and rebuilding that many <img> elements
+// synchronously is real work on a phone's CPU — enough that the search box itself can
+// feel unresponsive mid-typing (each keystroke re-triggers the rebuild, and the
+// rebuild is what's actually slow, not the typing). A short or empty query used to
+// mean rendering the WHOLE library on every keystroke; capping how many results
+// actually become DOM nodes keeps every rebuild fast regardless of how broad the
+// search is, while still counting the true total so the hint below can say so.
+const CARD_GRID_RENDER_CAP = 200;
 function refreshCardGrid() {
   const grid = document.getElementById('card-grid');
   const query = (document.getElementById('card-search').value || '').toLowerCase();
@@ -603,10 +611,14 @@ function refreshCardGrid() {
   for (const id of currentDeck) deckCounts.set(id, (deckCounts.get(id) || 0) + 1);
 
   const frag = document.createDocumentFragment();
+  let totalMatches = 0, shown = 0;
   for (const id of cardIdsSorted) {
     const c = cardDB.get(id);
     if (query && !c.name.toLowerCase().includes(query) && !c.set.toLowerCase().includes(query)) continue;
     if (!cardPassesFilters(id)) continue;
+    totalMatches++;
+    if (shown >= CARD_GRID_RENDER_CAP) continue;   // still counted, just not turned into a DOM node
+    shown++;
     const meta = cardMetaDB.get(normNameCached(c.name));
     const div = document.createElement('div');
     div.className = 'card-thumb';
@@ -621,6 +633,13 @@ function refreshCardGrid() {
   }
   grid.innerHTML = '';
   grid.appendChild(frag);
+  const hint = document.getElementById('card-grid-cap-hint');
+  if (totalMatches > shown) {
+    hint.textContent = 'Showing ' + shown + ' of ' + totalMatches + ' matches — keep typing, or add a filter, to narrow it down.';
+    hint.style.display = 'block';
+  } else {
+    hint.style.display = 'none';
+  }
 }
 
 // One delegated handler for the whole grid, attached once, rather than two listeners
@@ -1021,7 +1040,11 @@ function openSeat(seatIndex, onOpenMsg) {
   seat.ws = new WebSocket(wsUrl());
   seat.ws.addEventListener('open', () => seat.ws.send(JSON.stringify(onOpenMsg)));
   seat.ws.addEventListener('message', (ev) => { cWrap.style.display = 'none'; handleSeatMessage(seatIndex, JSON.parse(ev.data)); });
-  seat.ws.addEventListener('close', () => { cWrap.style.display = 'none'; appendLog('Seat ' + (seatIndex + 1) + ' disconnected.'); });
+  seat.ws.addEventListener('close', () => {
+    cWrap.style.display = 'none';
+    appendLog('Seat ' + (seatIndex + 1) + ' disconnected.');
+    if (seatIndex === 0) onSeatZeroUnexpectedClose();
+  });
   seat.ws.addEventListener('error', () => { cWrap.style.display = 'none'; document.getElementById('room-info').textContent = 'Could not connect. Try again.'; });
   return seat;
 }
@@ -1033,6 +1056,116 @@ function sendOnSeat(seatIndex, msg) {
   const seat = seats[seatIndex];
   if (seat && seat.ws && seat.ws.readyState === WebSocket.OPEN) seat.ws.send(JSON.stringify(msg));
 }
+
+// ====================== Reconnect ======================
+// Scoped to seat 0 in a real (non-solo, non-bot) game — a hotseat/practice session is
+// entirely local to this one tab already, so there's no real "dropped connection" case
+// for it to recover from; a real opponent is who a network blip actually costs you.
+const RESUME_KEY = 'dm_resume';
+function saveResumeInfo(room, token) { try { window.sessionStorage.setItem(RESUME_KEY, JSON.stringify({ room, token })); } catch (e) {} }
+function loadResumeInfo() { try { const raw = window.sessionStorage.getItem(RESUME_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } }
+function clearResumeInfo() { try { window.sessionStorage.removeItem(RESUME_KEY); } catch (e) {} }
+function reflectRoomInUrl(room) { try { window.history.replaceState(null, '', window.location.pathname + '?room=' + encodeURIComponent(room)); } catch (e) {} }
+function clearRoomFromUrl() { try { window.history.replaceState(null, '', window.location.pathname); } catch (e) {} }
+
+function showReconnectBanner(text) { const el = document.getElementById('reconnect-banner'); el.textContent = text; el.style.display = 'block'; }
+function hideReconnectBanner() { document.getElementById('reconnect-banner').style.display = 'none'; }
+
+const resumeState = { active: false, attempt: 0, timer: null };
+function onSeatZeroUnexpectedClose() {
+  if (isSolo) return;
+  const info = loadResumeInfo();
+  if (!info) return;                    // never got far enough to have a token — an ordinary failed connection
+  if (resumeState.active) return;       // already retrying
+  resumeState.active = true; resumeState.attempt = 0;
+  tryResumeOnce(info);
+}
+function tryResumeOnce(info) {
+  showReconnectBanner(resumeState.attempt === 0 ? 'Connection lost — reconnecting...' : 'Still trying to reconnect...');
+  const ws = new WebSocket(wsUrl());
+  seats[0].ws = ws;
+  let responded = false;
+  ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'resume', room: info.room, token: info.token })));
+  ws.addEventListener('message', (ev) => {
+    responded = true;
+    const msg = JSON.parse(ev.data);
+    resumeState.active = false; resumeState.attempt = 0;
+    if (resumeState.timer) { clearTimeout(resumeState.timer); resumeState.timer = null; }
+    if (msg.type === 'resumeFailed') {
+      hideReconnectBanner();
+      clearResumeInfo();
+      alert("Couldn't reconnect — that game is no longer available.");
+      location.href = location.pathname;
+      return;
+    }
+    hideReconnectBanner();
+    handleSeatMessage(0, msg);
+  });
+  ws.addEventListener('close', () => {
+    if (responded) return;   // outcome already handled above, one way or the other
+    resumeState.attempt++;
+    if (resumeState.attempt > 8) {
+      resumeState.active = false;
+      showReconnectBanner("Couldn't reconnect — check your connection. Reload this page to try again.");
+      return;   // resume info stays saved; reloading the page will try again from scratch
+    }
+    const delay = [1000, 2000, 4000, 8000][Math.min(resumeState.attempt - 1, 3)];
+    resumeState.timer = setTimeout(() => tryResumeOnce(info), delay);
+  });
+  ws.addEventListener('error', () => {});
+}
+
+// ====================== Online players / lobby ======================
+// Presence begins the moment you create or join a room (that's when the server first
+// has a name for you) and keeps working while you wait or play — it doesn't require a
+// separate "browse before you've done anything" connection.
+let lastOnlineUsers = [];
+function renderOnlineList(users) {
+  lastOnlineUsers = users || [];
+  const setupPanel = document.getElementById('online-panel-setup');
+  const tablePanel = document.getElementById('online-panel-toggle');
+  const hasAny = lastOnlineUsers.length > 0;
+  // the setup-screen panel only needs to exist once there's something to show; the
+  // table-screen toggle can appear as soon as we're connected, so it's there waiting
+  if (document.getElementById('screen-setup').style.display !== 'none') {
+    setupPanel.style.display = hasAny ? 'block' : 'none';
+  }
+  tablePanel.style.display = 'inline-block';
+  const statusLabel = { waiting: 'Waiting for opponent', 'in-game': 'In a game', pending: 'Joining a game' };
+  const buildRows = (container) => {
+    container.innerHTML = '';
+    if (!hasAny) { container.innerHTML = '<div class="online-empty-hint">No one else online right now.</div>'; return; }
+    lastOnlineUsers.forEach(u => {
+      const row = document.createElement('div');
+      row.className = 'online-row';
+      const label = statusLabel[u.status] || u.status;
+      const statusClass = 'status-' + (u.status || 'idle');
+      row.innerHTML = '<span class="online-name"></span><span class="online-status ' + statusClass + '"></span>';
+      row.querySelector('.online-name').textContent = u.name;
+      row.querySelector('.online-status').textContent = label;
+      if (u.status === 'waiting') {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = 'Request to Join';
+        btn.addEventListener('click', () => {
+          btn.disabled = true; btn.textContent = 'Requesting...';
+          sendOnSeat(0, { type: 'challenge', targetId: u.id });
+        });
+        row.appendChild(btn);
+      }
+      container.appendChild(row);
+    });
+  };
+  buildRows(document.getElementById('online-list-setup'));
+  buildRows(document.getElementById('online-list-table'));
+}
+document.getElementById('online-panel-toggle').addEventListener('click', () => {
+  const el = document.getElementById('online-panel-table');
+  el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none';
+});
+document.getElementById('online-panel-close').addEventListener('click', () => {
+  document.getElementById('online-panel-table').style.display = 'none';
+});
 
 const nameInput = document.getElementById('player-name');
 nameInput.value = localStorage.getItem('dm_playername') || '';
@@ -1156,6 +1289,7 @@ function handleSeatMessage(seatIndex, msg) {
   if (msg.type === 'joined') {
     seat.idx = msg.you; seat.roomCode = msg.room;
     if (seatIndex === 0) {
+      if (!isSolo && msg.resumeToken) { saveResumeInfo(msg.room, msg.resumeToken); reflectRoomInUrl(msg.room); }
       const youLabel = myName() ? (myName() + ' (Player ' + (msg.you + 1) + ')') : ('Player ' + (msg.you + 1));
       document.getElementById('room-info').textContent =
         'Room code: ' + msg.room + '  (share this with your opponent) — you are ' + youLabel +
@@ -1182,6 +1316,23 @@ function handleSeatMessage(seatIndex, msg) {
     }
     return;
   }
+  if (msg.type === 'resumed') {
+    // Rejoining a game already in progress — skip straight to the board; the normal
+    // 'joined' flow (deck submission, the pre-game screen) has already happened once.
+    // The server issues a fresh resume token each time a seat is (re)claimed, so the
+    // one just used to get back in is already spent — save the new one, not the old.
+    seat.idx = msg.you; seat.roomCode = msg.room;
+    if (msg.resumeToken) saveResumeInfo(msg.room, msg.resumeToken);
+    reflectRoomInUrl(msg.room);
+    ensureTableVisible();
+    return;
+  }
+  if (msg.type === 'resumeFailed') {
+    hideReconnectBanner();
+    clearResumeInfo();
+    return;
+  }
+  if (msg.type === 'onlineUsers') { renderOnlineList(msg.users); return; }
   if (msg.type === 'joinRequest') {
     if (isSolo) sendOnSeat(0, { type: 'respondJoin', accept: true });
     else {
@@ -1277,6 +1428,9 @@ function handleSeatMessage(seatIndex, msg) {
   }
   if (msg.type === 'state') {
     seat.state = msg.state;
+    // A finished game has nothing left to reconnect into — don't keep trying on a
+    // future drop, and don't leave stale info around for the next visit to this tab.
+    if (seatIndex === 0 && !isSolo && msg.state && msg.state.gameOver) clearResumeInfo();
     if (isBotGame && seatIndex === 1) { Bot.onState(msg.state); return; }
     askSilentSkill(msg.state);
     if (seatIndex === activeSeat) renderState(msg.state);
@@ -1852,6 +2006,18 @@ document.getElementById('btn-quit').addEventListener('click', () => {
   // return to the lobby without a page reload, so the loaded card images survive
   if (typeof Bot !== 'undefined') Bot.stop();
   isBotGame = false;
+  // Leaving on purpose — the reconnect machinery must not mistake this deliberate
+  // close for a dropped connection and quietly try to resume the game you just quit.
+  // (This is exactly what made Quit to Menu feel slow to respond: it closed the
+  // socket, the close handler saw a valid resume token and started reconnecting in
+  // the background, and a successful resume would then flip the screen right back
+  // to the table a moment later.) Clearing the token — and any retry already in
+  // flight — before closing the socket is what actually prevents that.
+  clearResumeInfo();
+  resumeState.active = false;
+  if (resumeState.timer) { clearTimeout(resumeState.timer); resumeState.timer = null; }
+  hideReconnectBanner();
+  clearRoomFromUrl();
   seats.forEach(s => { try { if (s.ws) s.ws.close(); } catch (e) {} s.ws = null; s.idx = null; s.state = null; });
   activeSeat = 0; isSolo = false; lastActiveTurn = null;
   document.getElementById('game-over-modal').style.display = 'none';
@@ -3544,3 +3710,22 @@ function renderGyZone(elId, cards, isMine, ownerIdx) {
   }
   el.onclick = () => openGyModal(isMine ? 'Your Graveyard' : 'Opponent Graveyard', cards, ownerIdx, isMine);
 }
+
+// ====================== Page load: pick up a saved session ======================
+// A page reload (not just a socket drop) loses `seats`, so this is the same resume
+// path, just triggered once at startup instead of from a close event.
+(function bootstrapResume() {
+  const params = new URLSearchParams(window.location.search || '');
+  const roomParam = (params.get('room') || '').trim().toUpperCase();
+  const info = loadResumeInfo();
+  if (info && info.room && info.token) {
+    showReconnectBanner('Reconnecting to your game...');
+    resumeState.active = true; resumeState.attempt = 0;
+    tryResumeOnce(info);
+  } else if (roomParam) {
+    // someone opened a shared link, or reloaded before ever getting a token — offer
+    // the code as a starting point rather than silently doing nothing with it
+    const el = document.getElementById('join-code');
+    if (el) el.value = roomParam;
+  }
+})();

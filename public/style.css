@@ -677,3 +677,61 @@ input {
   .shield-choice { display: flex; flex-direction: column; gap: 4px; }
   .shield-choice select { width: 100%; padding: 10px 8px; }
 }
+
+/* ---- reconnect banner: shown while a dropped connection tries to resume ---- */
+#reconnect-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 2000;
+  background: #5a3d0a; color: #ffe6b3; text-align: center;
+  padding: 8px 12px; font-size: 0.92em; font-weight: bold;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+}
+
+/* ---- online players panel (setup screen: inline; table screen: a side drawer) ---- */
+.online-panel {
+  background: #1b2029; border: 1px solid #39424f; border-radius: 8px;
+  padding: 10px 12px; margin-top: 10px; max-width: 320px;
+}
+.online-panel h3 { margin: 0 0 8px; font-size: 0.95em; color: #cfe0ff; }
+.online-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.online-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: #22262f; border-radius: 6px; padding: 6px 8px; font-size: 0.88em;
+}
+.online-row .online-name { color: #dfe6f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.online-row .online-status { font-size: 0.8em; color: #8a94a6; margin-left: 6px; }
+.online-row .online-status.status-waiting { color: #6adf8f; }
+.online-row .online-status.status-in-game { color: #e0a86a; }
+.online-row .online-status.status-pending { color: #8a94a6; }
+.online-row button {
+  background: #2a6a4a; color: #eafff0; border: none; border-radius: 5px;
+  padding: 5px 9px; font-size: 0.85em; cursor: pointer; white-space: nowrap;
+}
+.online-row button:hover { background: #34825c; }
+.online-empty-hint { color: #8a94a6; font-size: 0.85em; padding: 4px 2px; }
+
+/* the table-screen version floats as a collapsible drawer on the side, per the
+   toggle button, so it never competes with the board for space by default */
+.online-toggle {
+  position: fixed; top: 10px; right: 10px; z-index: 950;
+  background: #22262f; color: #cfe0ff; border: 1px solid #39424f; border-radius: 20px;
+  padding: 6px 12px; font-size: 0.85em; cursor: pointer;
+}
+.online-panel-drawer {
+  position: fixed; top: 48px; right: 10px; z-index: 950;
+  max-height: 70vh;
+}
+.online-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.online-panel-header h3 { margin: 0; }
+.online-panel-close {
+  background: none; border: none; color: #8a94a6; font-size: 1.2em; line-height: 1;
+  cursor: pointer; padding: 0 4px;
+}
+
+@media (max-width: 760px) {
+  .online-panel { max-width: 100%; }
+  .online-panel-drawer { left: 10px; right: 10px; top: 48px; max-width: none; }
+}
+
+.card-grid-cap-hint {
+  color: #8a94a6; font-size: 0.82em; padding: 4px 2px 8px; text-align: center;
+}

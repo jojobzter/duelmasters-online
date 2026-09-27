@@ -8,6 +8,8 @@
 </head>
 <body>
 
+<div id="reconnect-banner" style="display:none">Reconnecting...</div>
+
 <div id="screen-setup" class="screen">
   <div class="title-row">
     <h1>Duel Masters Table</h1>
@@ -65,6 +67,7 @@
             <button id="btn-clear-filters" class="clear-filters" type="button">Clear all filters</button>
           </div>
         </div>
+        <div id="card-grid-cap-hint" class="card-grid-cap-hint" style="display:none"></div>
         <div id="card-grid" class="card-grid"></div>
       </div>
       <div class="deck-editor">
@@ -125,6 +128,10 @@
       <button id="btn-accept-join">Accept</button>
       <button id="btn-decline-join">Decline</button>
     </div>
+    <div id="online-panel-setup" class="online-panel" style="display:none">
+      <h3>Online now</h3>
+      <div id="online-list-setup" class="online-list"></div>
+    </div>
   </section>
 </div>
 
@@ -139,6 +146,14 @@
 
 
 <div id="screen-table" class="screen table-screen" style="display:none">
+  <button id="online-panel-toggle" class="online-toggle" style="display:none">🌐 Online</button>
+  <div id="online-panel-table" class="online-panel online-panel-drawer" style="display:none">
+    <div class="online-panel-header">
+      <h3>Online now</h3>
+      <button id="online-panel-close" class="online-panel-close" type="button">×</button>
+    </div>
+    <div id="online-list-table" class="online-list"></div>
+  </div>
   <div id="table">
     <div class="zone-label">Opponent Hand</div>
     <div id="opp-hand" class="zone hand-zone opp-hand"></div>
