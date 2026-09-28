@@ -7,7 +7,7 @@
 //
 // __dirname below refers to tools/, so paths to project files go up one level.
 const WHICH = process.argv[2];
-const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'namecard', 'cardgrid', 'reconnect', 'lobby', 'effects', 'audit', 'sheet'];
+const NAMES = ['guards', 'client', 'server', 'bot', 'deadlock', 'vortex', 'postattack', 'survivor', 'slayer', 'triggers', 'discard', 'manaleak', 'phoenix', 'jagraveen', 'foil', 'evolve', 'filterdiscard', 'namecard', 'cardgrid', 'tableimages', 'reconnect', 'lobby', 'effects', 'audit', 'sheet'];
 if (!NAMES.includes(WHICH)) {
   console.error('usage: node tools/checks.js <' + NAMES.join('|') + '>');
   process.exit(2);
@@ -2108,30 +2108,63 @@ if (WHICH === 'evolve') {
 }
 
 if (WHICH === 'cardgrid') {
-  // The deck-builder search box could feel unresponsive on a phone: an empty or short
-  // query matched most of the ~2000+ card library, and every keystroke rebuilt the
-  // WHOLE matching set as real <img>-holding DOM nodes — the rebuild itself was the
-  // slow part, not the typing. Rendering is now capped, however broad the query is.
+  // The deck-builder search box (and clicking cards while deck-building) could feel
+  // unresponsive on a phone: an empty or short query matched most of the ~2000+ card
+  // library, and every keystroke — or every single card added to the deck — rebuilt
+  // the WHOLE matching set as real <img>-holding DOM nodes. The fix must still let a
+  // player browse every card with no query at all (nothing capped away); only one
+  // batch is built at a time, and scrolling near the bottom loads the next batch.
   const { check, done } = makeChecker();
   const fs = require('fs');
   const src = fs.readFileSync(__dirname + '/../public/client.js', 'utf8');
 
   const mkGeneric = () => ({ style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' },
     classList: { add(){}, remove(){}, toggle(){}, contains: () => false }, addEventListener(){}, removeEventListener(){},
-    appendChild(){}, insertBefore(){}, querySelector: () => mkGeneric(), querySelectorAll: () => [], setAttribute(){},
+    appendChild(){}, insertBefore(){}, querySelector: () => null, querySelectorAll: () => [], setAttribute(){},
     getAttribute: () => null, getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }),
     textContent: '', innerHTML: '', value: '', checked: false, focus(){}, remove(){}, children: [], dataset: {}, scrollIntoView(){}, click(){} });
 
-  // purpose-built stand-ins for the three elements refreshCardGrid actually touches,
-  // so the test can see what it DID rather than just that it didn't crash
-  const searchEl = Object.assign(mkGeneric(), { value: '' });
-  const hintEl = Object.assign(mkGeneric(), { style: { display: 'none' } });
-  let renderedCount = null;         // how many .card-thumb nodes actually got attached
-  let gridInnerHTMLClears = 0;
-  const gridEl = Object.assign(mkGeneric(), {
-    appendChild(fragment) { renderedCount = (fragment && fragment.__thumbCount) || 0; },
-  });
-  Object.defineProperty(gridEl, 'innerHTML', { set() { gridInnerHTMLClears++; }, get() { return ''; } });
+  // A minimal but REAL element/fragment model (not just a no-op stub) — real enough
+  // that appendChild/children/querySelector/remove behave the way actual DOM does,
+  // since the grid's own batching logic depends on all four of those.
+  // Real code here sets `.className = 'card-thumb'` etc. (a plain string), never
+  // classList.add — so this stub's className IS the thing to match on, not a
+  // separately-tracked classList set that nothing ever actually populates.
+  function makeRealElement(tag) {
+    const el = {
+      tagName: tag || 'DIV', style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' },
+      className: '',
+      classList: { contains(c) { return (el.className || '').split(/\s+/).includes(c); }, add(){}, remove(){}, toggle(){} },
+      dataset: {}, children: [], _innerHTML: '',
+      get innerHTML() { return this._innerHTML; },
+      set innerHTML(v) { this._innerHTML = v; if (v === '') this.children = []; },
+      appendChild(child) {
+        if (child.__isFragment) { this.children.push(...child.children); child.children = []; }
+        else this.children.push(child);
+      },
+      querySelector(sel) {
+        // only ever asked for '.card-grid-sentinel' or '.count-badge' here
+        const cls = sel.replace('.', '');
+        return this.children.find(c => c.className === cls) || null;
+      },
+      querySelectorAll: () => [], setAttribute(){}, getAttribute: () => null,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), scrollIntoView(){}, remove(){}, focus(){},
+      addEventListener(){}, removeEventListener(){},
+    };
+    return el;
+  }
+  const searchEl = Object.assign(makeRealElement(), { value: '' });
+  const hintEl = makeRealElement();
+  let gridEl = makeRealElement();
+
+  // real enough IntersectionObserver: captures the callback and options so the test
+  // can fire it manually to simulate "the sentinel scrolled into view"
+  let lastObserverCallback = null, lastObserverOptions = null, observedTargets = [];
+  global.IntersectionObserver = function (cb, opts) {
+    lastObserverCallback = cb; lastObserverOptions = opts;
+    return { observe: (t) => observedTargets.push(t), disconnect: () => { observedTargets = []; } };
+  };
+  const fireSentinelIntersecting = () => lastObserverCallback([{ isIntersecting: true, target: observedTargets[observedTargets.length - 1] }]);
 
   global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800,
     location: { href: '', protocol: 'https:', host: 'x', pathname: '/', search: '' }, history: { replaceState(){} },
@@ -2139,8 +2172,8 @@ if (WHICH === 'cardgrid') {
     matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
   global.document = {
     getElementById: (id) => id === 'card-search' ? searchEl : id === 'card-grid' ? gridEl : id === 'card-grid-cap-hint' ? hintEl : mkGeneric(),
-    createDocumentFragment: () => { const f = mkGeneric(); f.__thumbCount = 0; const real = f.appendChild.bind(f); f.appendChild = (x) => { f.__thumbCount++; real(x); }; return f; },
-    createElement: () => mkGeneric(), querySelector: () => mkGeneric(), querySelectorAll: () => [], addEventListener(){},
+    createDocumentFragment: () => { const f = makeRealElement(); f.__isFragment = true; return f; },
+    createElement: (tag) => makeRealElement(tag), querySelector: () => mkGeneric(), querySelectorAll: () => [], addEventListener(){},
     body: mkGeneric(), head: mkGeneric(), documentElement: mkGeneric(), readyState: 'complete',
   };
   global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
@@ -2153,30 +2186,121 @@ if (WHICH === 'cardgrid') {
   try {
     eval(src + `
 ;(function () {
-  // a library far bigger than the render cap, entirely matching an empty query —
-  // exactly the "just opened the deck builder" case that used to render everything
+  const thumbCount = () => gridEl.children.filter(c => c.className === 'card-thumb').length;
+
+  // a library far bigger than one batch, entirely matching an empty query — exactly
+  // the "just opened the deck builder" case that used to render everything at once
   cardDB = new Map();
   for (let i = 0; i < 2000; i++) cardDB.set('DM-1/Card ' + i, { url: 'u', name: 'Card ' + i, set: 'DM-1' });
   cardMetaDB = new Map(); currentDeck = []; activeCivFilters = new Set(); activeCostFilters.clear();
   activeRaceFilter = ''; activeKeywordFilters.clear(); invalidateCardGridCache();
   searchEl.value = '';
   refreshCardGrid();
-  check('an empty query on a huge library is still capped', renderedCount <= CARD_GRID_RENDER_CAP, true);
-  check('...specifically at the documented cap', renderedCount, CARD_GRID_RENDER_CAP);
-  check('the hint explains there is more, and how to see it', /2000/.test(hintEl.textContent) && /narrow/i.test(hintEl.textContent), true);
+  check('only ONE batch is built at first, not the whole library', thumbCount(), CARD_GRID_BATCH);
+  check('the hint says how many of the true total are shown', hintEl.textContent, CARD_GRID_BATCH + ' of 2000 shown — scroll for more.');
 
-  // a query narrow enough to fall under the cap: everything matching is shown, no hint
-  searchEl.value = 'card 7';   // "Card 7", "Card 70".."Card 79", "Card 700".."Card 799" etc.
+  // scrolling near the bottom (the sentinel intersecting) loads the next batch —
+  // simulated here by firing the observer callback directly, same as a real scroll
+  fireSentinelIntersecting();
+  check('scrolling near the bottom loads another batch', thumbCount(), CARD_GRID_BATCH * 2);
+  // keep "scrolling" until the entire 2000-card library has actually been rendered —
+  // this is the part that matters: NOTHING is permanently hidden from browsing
+  let guard = 0;
+  while (thumbCount() < 2000 && guard++ < 50) fireSentinelIntersecting();
+  check('every single card is reachable by scrolling — nothing is capped away', thumbCount(), 2000);
+  check('the hint disappears once everything is shown', hintEl.style.display, 'none');
+
+  // a query narrow enough to fall under one batch: shown immediately, no hint at all
+  searchEl.value = 'card 7';
   invalidateCardGridCache();
   refreshCardGrid();
-  check('a narrow query renders ALL its matches (no needless capping)', renderedCount < CARD_GRID_RENDER_CAP && renderedCount > 0, true);
-  check('...and the hint goes away once nothing is hidden', hintEl.style.display, 'none');
+  const narrowCount = thumbCount();
+  check('a narrow query renders ALL its matches at once (no needless batching)', narrowCount < CARD_GRID_BATCH && narrowCount > 0, true);
+  check('...and shows no hint, since nothing is left out', hintEl.style.display, 'none');
+
+  // adding a card to the deck must NOT reset how much of the list is currently
+  // rendered — that's what made clicking cards while scrolled down jarring
+  searchEl.value = '';
+  invalidateCardGridCache();
+  refreshCardGrid();
+  fireSentinelIntersecting();   // now two batches deep, i.e. scrolled some distance in
+  const renderedBefore = thumbCount();
+  const target = gridEl.children.find(c => c.className === 'card-thumb');
+  currentDeck.push(target.dataset.cardId);
+  updateThumbCount(target.dataset.cardId);
+  check('adding a card updates its badge in place...', target.querySelector('.count-badge') && target.querySelector('.count-badge').textContent, 1);
+  check('...WITHOUT rebuilding (and losing) the already-rendered batch', thumbCount(), renderedBefore);
 })();
 `);
   } catch (e) { check('client.js runs the card-grid scenario without throwing', e.message, null); }
   console.warn = wq; console.error = eq;
 
-  done('the card search grid stays capped, however broad the query is');
+  done('the card search grid stays fully browsable, one fast batch at a time');
+}
+
+if (WHICH === 'tableimages') {
+  // Reloading into a game left you on the table with text-only cards and no way to load
+  // images: the folder buttons live on the setup screen, which the table hides. The
+  // table now offers a loader while nothing is loaded, and redraws itself when images
+  // finish loading (they can arrive after the resumed game does).
+  const { check, done } = makeChecker();
+  const listeners = new Map(), elements = new Map(); const clicks = [];
+  const mkEl = (id) => ({ style: { display: '', setProperty(){}, removeProperty(){}, getPropertyValue: () => '' }, textContent: '', innerHTML: '', value: '', className: '',
+    classList: { add(){}, remove(){}, toggle(){}, contains: () => false }, dataset: {}, children: [],
+    addEventListener(t, fn) { const m = listeners.get(id) || {}; (m[t] = m[t] || []).push(fn); listeners.set(id, m); }, removeEventListener(){},
+    appendChild(){}, insertBefore(){}, remove(){}, focus(){}, click() { clicks.push(id); }, querySelector: () => mkEl(id + ':c'), querySelectorAll: () => [],
+    setAttribute(){}, getAttribute: () => null, getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), scrollIntoView(){} });
+  const elFor = (id) => { if (!elements.has(id)) elements.set(id, mkEl(id)); return elements.get(id); };
+  global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800, location: { href: '', protocol: 'https:', host: 'x', pathname: '/', search: '' },
+    history: { replaceState(){} }, sessionStorage: { getItem: () => null, setItem(){}, removeItem(){} }, matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
+  global.location = global.window.location;
+  global.document = { getElementById: elFor, querySelector: () => elFor('__q'), querySelectorAll: () => [], createElement: () => mkEl('__c'), addEventListener(){},
+    createDocumentFragment: () => mkEl('__f'), body: elFor('body'), head: elFor('head'), documentElement: elFor('html'), readyState: 'complete' };
+  global.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+  global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
+  global.WebSocket = function () { return { addEventListener(){}, send(){}, close(){} }; };
+  global.fetch = () => Promise.reject(new Error('offline')); global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
+  const src = require('fs').readFileSync(__dirname + '/../public/client.js', 'utf8');
+  const wq = console.warn, eq = console.error; console.warn = () => {}; console.error = () => {};
+  try {
+    eval(src + `
+;(function () {
+  const banner = () => elFor('table-images-banner').style.display;
+  const table = elFor('screen-table');
+  cardDB.clear();
+  table.style.display = 'none'; updateImagesBanner();
+  check('not offered on the setup screen', banner(), 'none');
+  table.style.display = 'flex'; updateImagesBanner();
+  check('offered on the table while no images are loaded', banner(), 'flex');
+
+  // pressing it starts a load: with no remembered folder and no directory-picker
+  // support (iOS), that is the fallback file input — which must still be clickable now
+  // that the setup screen (its old parent) is hidden
+  (listeners.get('btn-table-load-images').click || []).forEach(fn => fn());
+  check('the button opens the folder chooser', clicks.includes('fallback-input'), true);
+
+  // images finish loading later: the table redraws itself and the banner goes away
+  let redrawnWith = null; renderState = (st) => { redrawnWith = st; };
+  seats[activeSeat].state = { marker: 'current-game' };
+  cardDB.set('DM-1/Card', { url: 'u', name: 'Card', set: 'DM-1' });
+  onCardImagesLoaded();
+  check('the table is redrawn with the current game once images arrive', redrawnWith && redrawnWith.marker, 'current-game');
+  check('...and the banner is gone', banner(), 'none');
+
+  // dismissable for someone happy with text
+  cardDB.clear(); imagesBannerDismissed = false; updateImagesBanner();
+  check('back when images vanish', banner(), 'flex');
+  (listeners.get('btn-table-images-dismiss').click || []).forEach(fn => fn());
+  check('dismissing hides it', banner(), 'none');
+})();
+`);
+  } catch (e) { check('client.js runs the table-images scenario without throwing', e.message, null); }
+  console.warn = wq; console.error = eq;
+  const html = require('fs').readFileSync(__dirname + '/../public/index.html', 'utf8');
+  const tableStart = html.indexOf('id="screen-table"'), setupStart = html.indexOf('id="screen-setup"');
+  const inputAt = html.indexOf('id="fallback-input"');
+  check('the folder input is not inside the setup screen any more', !(inputAt > setupStart && inputAt < tableStart), true);
+  done('a player mid-game with no images can load them from the table');
 }
 
 if (WHICH === 'reconnect') {
@@ -2419,6 +2543,128 @@ if (WHICH === 'lobby') {
     check('Carol sees Alice before she leaves', c.lastUsers.some(u => u.name === 'Alice5'), true);
     a._close();
     check('Alice drops off the list once disconnected', c.lastUsers.some(u => u.name === 'Alice5'), false);
+  }
+
+  // -- visible from the MAIN PAGE, before any room exists: a bare 'setName' is enough
+  // to appear in everyone's list (as 'idle'), and to see everyone else's
+  {
+    const roomsBefore = server.__rooms.size;
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'setName', name: 'Idle6a' });
+    rawSay(b, { type: 'setName', name: 'Idle6b' });
+    check('someone who has only set a name (no room yet) is listed as idle',
+      a.lastUsers.filter(u => u.name === 'Idle6b').map(u => u.status), ['idle']);
+    check('...and it works both ways', b.lastUsers.filter(u => u.name === 'Idle6a').map(u => u.status), ['idle']);
+    check('no room was created just by showing up', server.__rooms.size, roomsBefore);
+  }
+
+  // -- inviting someone who has no room yet: a nudge — nothing is created for them
+  {
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'setName', name: 'Inviter7' });
+    rawSay(b, { type: 'setName', name: 'Invitee7' });
+    const roomsBefore = server.__rooms.size;
+    const bId = a.lastUsers.find(u => u.name === 'Invitee7').id;
+    rawSay(a, { type: 'challenge', targetId: bId });
+    check('the invitee is told who wants to play', b.inbox.find(m => m.type === 'challengeInvite'), { type: 'challengeInvite', fromName: 'Inviter7' });
+    check('the inviter gets a confirmation, not an error', a.inbox.find(m => m.type === 'challengeSent'), { type: 'challengeSent', targetName: 'Invitee7' });
+    check('no room was created out from under the invitee', server.__rooms.size, roomsBefore);
+    check('and no join request was fabricated', b.inbox.some(m => m.type === 'joinRequest'), false);
+    check('the inviter was not put into any room', a.inbox.some(m => m.type === 'joinPending'), false);
+  }
+
+  // -- the SAME connection carries from idle into a room: one continuous identity, no
+  // ghost entry left behind, and its status simply changes
+  {
+    const a = rawSocket(), watcher = rawSocket();
+    rawSay(a, { type: 'setName', name: 'Carry8' });
+    rawSay(watcher, { type: 'setName', name: 'Watch8' });
+    const idBefore = watcher.lastUsers.find(u => u.name === 'Carry8').id;
+    check('starts out idle', watcher.lastUsers.find(u => u.name === 'Carry8').status, 'idle');
+    rawSay(a, { type: 'create', name: 'Carry8' });
+    const entries = watcher.lastUsers.filter(u => u.name === 'Carry8');
+    check('still exactly ONE entry after creating a room (no duplicate ghost)', entries.length, 1);
+    check('the same id — one continuous identity', entries[0].id, idBefore);
+    check('and its status moved on to waiting', entries[0].status, 'waiting');
+  }
+
+  // -- renaming yourself updates everyone else's list; challenging yourself is ignored
+  {
+    const a = rawSocket(), b = rawSocket();
+    rawSay(a, { type: 'setName', name: 'Before9' });
+    rawSay(b, { type: 'setName', name: 'Other9' });
+    rawSay(a, { type: 'setName', name: 'After9' });
+    check('a new name shows up for others', b.lastUsers.some(u => u.name === 'After9'), true);
+    check('...and the old one is gone', b.lastUsers.some(u => u.name === 'Before9'), false);
+    // b's own id is only visible from OTHER sockets' lists, so read it from a's
+    const bOwnId = a.lastUsers.find(u => u.name === 'Other9').id;
+    const inboxBefore = b.inbox.length;
+    rawSay(b, { type: 'challenge', targetId: bOwnId });
+    check('challenging yourself does nothing at all', b.inbox.length, inboxBefore);
+    rawSay(a, { type: 'challenge', targetId: 'nonexistent' });
+    check('challenging an unknown id is still refused cleanly', a.inbox.slice(-1)[0], { type: 'error', message: 'That player is no longer available.' });
+  }
+
+  // -- the CLIENT: Create/Join must reuse the ambient presence socket, not open a
+  // second one (which would briefly show you twice, and drop your idle identity)
+  {
+    const sockets = [];
+    function FakeWS() {
+      this.readyState = 0; this.sent = []; this._l = {};
+      this.addEventListener = (t, fn, opts) => { (this._l[t] = this._l[t] || []).push({ fn, once: !!(opts && opts.once) }); };
+      this.send = (d) => this.sent.push(JSON.parse(d));
+      this.close = () => {};
+      this._fire = (t, ev) => { (this._l[t] || []).slice().forEach(h => { if (h.once) this._l[t] = this._l[t].filter(x => x !== h); h.fn(ev || {}); }); };
+      sockets.push(this);
+    }
+    FakeWS.CONNECTING = 0; FakeWS.OPEN = 1; FakeWS.CLOSING = 2; FakeWS.CLOSED = 3;
+
+    const elements = new Map();
+    const mkEl = (id) => ({ style: { setProperty(){}, removeProperty(){}, getPropertyValue: () => '' }, textContent: '', innerHTML: '', value: '', className: '',
+      classList: { add(){}, remove(){}, toggle(){}, contains: () => false }, dataset: {}, children: [], addEventListener(){}, removeEventListener(){},
+      appendChild(){}, insertBefore(){}, remove(){}, focus(){}, querySelector: () => mkEl(id + ':c'), querySelectorAll: () => [], setAttribute(){}, getAttribute: () => null,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 10, height: 10 }), scrollIntoView(){} });
+    const elFor = (id) => { if (!elements.has(id)) elements.set(id, mkEl(id)); return elements.get(id); };
+    global.window = { addEventListener(){}, innerWidth: 1000, innerHeight: 800,
+      location: { href: '', protocol: 'https:', host: 'x', pathname: '/', search: '' }, history: { replaceState(){} },
+      sessionStorage: { getItem: () => null, setItem(){}, removeItem(){} },
+      matchMedia: () => ({ matches: false, addEventListener(){} }), requestAnimationFrame: f => f() };
+    global.document = { getElementById: elFor, querySelector: () => elFor('__q'), querySelectorAll: () => [], createElement: () => mkEl('__c'), addEventListener(){},
+      body: elFor('body'), head: elFor('head'), documentElement: elFor('html'), readyState: 'complete' };
+    // a real browser exposes location as a bare global too (wsUrl() reads it that way),
+    // and unlike the load-only checks, this scenario actually opens sockets through it
+    global.location = global.window.location;
+    global.localStorage = { getItem: (k) => (k === 'dm_playername' ? 'Returning10' : null), setItem(){}, removeItem(){} };
+    global.Audio = function () { return { play: () => Promise.resolve(), pause(){}, addEventListener(){}, cloneNode() { return this; } }; };
+    global.WebSocket = FakeWS;
+    global.fetch = () => Promise.reject(new Error('offline'));
+    global.requestAnimationFrame = f => f(); global.navigator = { userAgent: 'node' };
+    const fs = require('fs');
+    const src = fs.readFileSync(__dirname + '/../public/client.js', 'utf8');
+    const wq = console.warn, eq = console.error; console.warn = () => {}; console.error = () => {};
+    try {
+      eval(src + `
+;(function () {
+  check('a returning player connects at page load, without clicking anything', sockets.length, 1);
+  const presence = sockets[0];
+  presence.readyState = 1; presence._fire('open');
+  check('...and registers their saved name straight away', presence.sent, [{ type: 'setName', name: 'Returning10' }]);
+  openSeat(0, { type: 'create', name: 'Returning10', shieldCount: 6 });
+  check('Create reuses that connection rather than opening a second one', sockets.length, 1);
+  check('...sending the create request on it', presence.sent[1] && presence.sent[1].type, 'create');
+  // and if Create is clicked in the split second before the socket finishes opening,
+  // it must wait for that same socket, not race a second one into existence
+  seats[0].ws = null; sockets.length = 0;
+  ensureLobbyConnection();
+  check('(fresh presence socket, still connecting)', sockets.length, 1);
+  openSeat(0, { type: 'join', room: 'ABC123', name: 'Returning10' });
+  check('Join while still connecting does not open a second socket either', sockets.length, 1);
+  sockets[0].readyState = 1; sockets[0]._fire('open');
+  check('...and both messages go out once it opens', sockets[0].sent.map(m => m.type), ['setName', 'join']);
+})();
+`);
+    } catch (e) { check('client.js runs the presence scenario without throwing', e.message, null); }
+    console.warn = wq; console.error = eq;
   }
 
   done('the online list and lobby challenges work end to end');
