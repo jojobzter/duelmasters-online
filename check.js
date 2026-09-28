@@ -29,6 +29,7 @@ const CHECKS = [
   ['filterdiscard', [],                'oppHand[...] filters (Rain of Arrows, Cabalt, Telescope Horn) are honoured'],
   ['namecard', [],                      'Nocturne Dragoon: naming a card works for both players and the bot'],
   ['cardgrid', [],                    'the deck-builder search grid stays capped for responsiveness'],
+  ['tableimages', [],                 'a player with no images loaded can load them from the table'],
   ['reconnect', [],                    'a dropped connection can resume the same seat with no re-approval'],
   ['lobby',     [],                    'the online-players list and lobby challenges work end to end'],
   ['effects', [],                      'the trickiest cards parse to executable shapes'],

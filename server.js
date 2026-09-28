@@ -4205,13 +4205,22 @@ wss.on('connection', (ws) => {
     if (msg.type === 'challenge') {
       const targetWs = connById.get((msg.targetId || '').toString());
       const targetMeta = targetWs && connMeta.get(targetWs);
-      if (!targetMeta || !targetMeta.roomCode) { send(ws, { type: 'error', message: 'That player is no longer available.' }); return; }
+      if (!targetMeta) { send(ws, { type: 'error', message: 'That player is no longer available.' }); return; }
+      if (targetWs === ws) return;
+      if (!targetMeta.roomCode) {
+        // they're online but haven't started a room yet (still picking a deck, say) —
+        // there's nothing to join them INTO, so this is a nudge rather than a join
+        // request: let them know someone wants to play, and let them start the room
+        // in their own time rather than one being created out from under them.
+        send(targetWs, { type: 'challengeInvite', fromName: meta.name });
+        send(ws, { type: 'challengeSent', targetName: targetMeta.name });
+        return;
+      }
       const targetRoom = rooms.get(targetMeta.roomCode);
       if (!targetRoom || targetMeta.idx !== 0 || targetRoom.sockets[1] || targetRoom.pendingJoin) {
         send(ws, { type: 'error', message: 'That player is no longer available.' });
         return;
       }
-      if (targetWs === ws) return;
       // From here it's exactly a normal join request against their room.
       meta.pendingPreviousRoom = (meta.roomCode && meta.idx !== null) ? { roomCode: meta.roomCode, idx: meta.idx } : null;
       targetRoom.pendingJoin = ws;
