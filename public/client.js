@@ -248,7 +248,7 @@ async function loadFolder() {
       statusEl.textContent = cardDB.size + ' cards loaded from "' + handle.name + '".' +
         (cardBackUrl ? ' Card back found.' : '') +
         (n ? '  ' + n + ' deck' + (n === 1 ? '' : 's') + ' loaded from your decks folder.' : '');
-      refreshCardGrid();
+      onCardImagesLoaded();
     } catch (e) {
       if (e.name !== 'AbortError') statusEl.textContent = 'Could not read folder: ' + e.message;
     }
@@ -263,9 +263,37 @@ document.getElementById('fallback-input').addEventListener('change', async (e) =
   document.getElementById('load-status').textContent = cardDB.size + ' cards loaded.' +
     (cardBackUrl ? ' Card back found.' : '') +
     (nDecks ? '  ' + nDecks + ' deck' + (nDecks === 1 ? '' : 's') + ' loaded from your decks folder.' : '');
-  refreshCardGrid();
+  onCardImagesLoaded();
 });
 document.getElementById('btn-load-folder').addEventListener('click', loadFolder);
+
+// Images finish loading at unpredictable moments — after a page reload the remembered
+// folder is re-read in the background, and a resumed game can arrive before it's done.
+// Redrawing only the deck builder left the TABLE showing text placeholders until the
+// next move happened to trigger a redraw, so the table is redrawn here too.
+function onCardImagesLoaded() {
+  refreshCardGrid();
+  const seat = seats[activeSeat];
+  const tableUp = document.getElementById('screen-table').style.display === 'flex';
+  if (tableUp && seat && seat.state) renderState(seat.state);
+  updateImagesBanner();
+}
+// On the table there's no folder button (that lives on the setup screen), so a player
+// who lands mid-game without images — a page reload on a browser that can't remember
+// the folder, mainly iPhones — would otherwise have no way to load them. Offered
+// only while nothing is loaded, and dismissable for anyone happy with text.
+let imagesBannerDismissed = false;
+function updateImagesBanner() {
+  const tableUp = document.getElementById('screen-table').style.display === 'flex';
+  document.getElementById('table-images-banner').style.display =
+    (tableUp && cardDB.size === 0 && !imagesBannerDismissed) ? 'flex' : 'none';
+}
+document.getElementById('btn-table-load-images').addEventListener('click', () => {
+  if (rememberedFolderHandle) reloadRememberedFolder(); else loadFolder();
+});
+document.getElementById('btn-table-images-dismiss').addEventListener('click', () => {
+  imagesBannerDismissed = true; updateImagesBanner();
+});
 
 // Browsers won't silently re-read local files after a page reload, but they WILL
 // re-grant with a single confirmation click on a remembered folder — much less
@@ -318,7 +346,7 @@ async function reloadRememberedFolder() {
     statusEl.textContent = cardDB.size + ' cards loaded from "' + rememberedFolderHandle.name + '".' +
       (cardBackUrl ? ' Card back found.' : '') + (nr ? '  ' + nr + ' deck(s) loaded.' : '');
     document.getElementById('btn-reload-folder').style.display = 'none';
-    refreshCardGrid();
+    onCardImagesLoaded();
   } catch (e) {
     statusEl.textContent = 'Could not reload folder: ' + e.message;
   }
@@ -337,7 +365,7 @@ document.getElementById('btn-reload-folder').addEventListener('click', reloadRem
     const nd = importFoundDecklists();
     document.getElementById('load-status').textContent = cardDB.size + ' cards loaded from "' + handle.name + '" (remembered).' +
       (nd ? '  ' + nd + ' deck' + (nd === 1 ? '' : 's') + ' loaded.' : '');
-    refreshCardGrid();
+    onCardImagesLoaded();
   } else {
     const btn = document.getElementById('btn-reload-folder');
     btn.textContent = 'Reload "' + handle.name + '"';
@@ -593,32 +621,50 @@ function normNameCached(name) {
   return v;
 }
 
-// The library can be a couple thousand cards, and rebuilding that many <img> elements
-// synchronously is real work on a phone's CPU — enough that the search box itself can
-// feel unresponsive mid-typing (each keystroke re-triggers the rebuild, and the
-// rebuild is what's actually slow, not the typing). A short or empty query used to
-// mean rendering the WHOLE library on every keystroke; capping how many results
-// actually become DOM nodes keeps every rebuild fast regardless of how broad the
-// search is, while still counting the true total so the hint below can say so.
-const CARD_GRID_RENDER_CAP = 200;
+// The library can be a couple thousand cards, and building that many <img> elements
+// synchronously is real work on a phone's CPU — enough that the search box (and
+// clicking cards while deck-building) could feel unresponsive, since each rebuild was
+// the slow part, not the typing or clicking itself. Nothing should be hidden from
+// browsing, though, so instead of a hard cap, only one batch is ever built at a time;
+// scrolling near the bottom quietly loads the next batch, same idea as any "load
+// more" feed. A keystroke or filter change starts this over from the top (it's a
+// genuinely new list); adding or removing a copy of a card you can already see just
+// updates that one card's badge in place (see updateThumbCount) so scrolling
+// position is never lost over the most repetitive action in deck-building.
+const CARD_GRID_BATCH = 120;
+let cardGridMatches = [];   // the full filtered/sorted list for the CURRENT query/filters — complete, nothing dropped
+let cardGridRendered = 0;   // how many of those are actually built as DOM nodes right now
+let cardGridObserver = null;
+
 function refreshCardGrid() {
   const grid = document.getElementById('card-grid');
   const query = (document.getElementById('card-search').value || '').toLowerCase();
   if (!cardIdsSorted) cardIdsSorted = [...cardDB.keys()].sort();
 
-  // one pass over the deck instead of a filter per card
+  cardGridMatches = cardIdsSorted.filter(id => {
+    const c = cardDB.get(id);
+    if (query && !c.name.toLowerCase().includes(query) && !c.set.toLowerCase().includes(query)) return false;
+    return cardPassesFilters(id);
+  });
+  cardGridRendered = 0;
+  grid.innerHTML = '';
+  renderMoreCardThumbs();
+}
+
+// Builds the next CARD_GRID_BATCH entries of cardGridMatches and appends them —
+// called once for the first batch (by refreshCardGrid) and then automatically again
+// each time the sentinel below scrolls into view, until every match is rendered.
+function renderMoreCardThumbs() {
+  const grid = document.getElementById('card-grid');
   const deckCounts = new Map();
   for (const id of currentDeck) deckCounts.set(id, (deckCounts.get(id) || 0) + 1);
 
+  const start = cardGridRendered;
+  const end = Math.min(start + CARD_GRID_BATCH, cardGridMatches.length);
   const frag = document.createDocumentFragment();
-  let totalMatches = 0, shown = 0;
-  for (const id of cardIdsSorted) {
+  for (let i = start; i < end; i++) {
+    const id = cardGridMatches[i];
     const c = cardDB.get(id);
-    if (query && !c.name.toLowerCase().includes(query) && !c.set.toLowerCase().includes(query)) continue;
-    if (!cardPassesFilters(id)) continue;
-    totalMatches++;
-    if (shown >= CARD_GRID_RENDER_CAP) continue;   // still counted, just not turned into a DOM node
-    shown++;
     const meta = cardMetaDB.get(normNameCached(c.name));
     const div = document.createElement('div');
     div.className = 'card-thumb';
@@ -631,14 +677,49 @@ function refreshCardGrid() {
       `<div class="name">${c.name}</div>`;
     frag.appendChild(div);
   }
-  grid.innerHTML = '';
+  cardGridRendered = end;
+
+  const oldSentinel = grid.querySelector('.card-grid-sentinel');
+  if (oldSentinel) oldSentinel.remove();
   grid.appendChild(frag);
+
   const hint = document.getElementById('card-grid-cap-hint');
-  if (totalMatches > shown) {
-    hint.textContent = 'Showing ' + shown + ' of ' + totalMatches + ' matches — keep typing, or add a filter, to narrow it down.';
+  if (cardGridRendered < cardGridMatches.length) {
+    hint.textContent = cardGridRendered + ' of ' + cardGridMatches.length + ' shown — scroll for more.';
     hint.style.display = 'block';
+    const sentinel = document.createElement('div');
+    sentinel.className = 'card-grid-sentinel';
+    grid.appendChild(sentinel);
+    if (!cardGridObserver) {
+      cardGridObserver = new IntersectionObserver((entries) => {
+        if (entries.some(en => en.isIntersecting)) renderMoreCardThumbs();
+      }, { root: grid, rootMargin: '400px' });
+    } else {
+      cardGridObserver.disconnect();
+    }
+    cardGridObserver.observe(sentinel);
   } else {
     hint.style.display = 'none';
+    if (cardGridObserver) cardGridObserver.disconnect();
+  }
+}
+
+// A single card's own deck count changed (added or removed one copy) — update just
+// that thumbnail's badge, if it's currently rendered, instead of rebuilding the grid
+// and losing however far the player had scrolled to find it.
+function updateThumbCount(id) {
+  const grid = document.getElementById('card-grid');
+  for (const child of grid.children) {
+    if (!child.dataset || child.dataset.cardId !== id) continue;
+    const count = currentDeck.filter(x => x === id).length;
+    let badge = child.querySelector('.count-badge');
+    if (count > 0) {
+      if (!badge) { badge = document.createElement('div'); badge.className = 'count-badge'; child.appendChild(badge); }
+      badge.textContent = count;
+    } else if (badge) {
+      badge.remove();
+    }
+    return;
   }
 }
 
@@ -659,7 +740,7 @@ document.getElementById('card-grid').addEventListener('click', (e) => {
     return;
   }
   currentDeck.push(id);
-  refreshCardGrid(); refreshDeckList();
+  updateThumbCount(id); refreshDeckList();
 });
 
 // typing fires this on every keystroke, so coalesce to one rebuild per frame
@@ -704,7 +785,7 @@ function refreshDeckList() {
     btn.addEventListener('click', () => {
       const i = currentDeck.indexOf(id);
       if (i !== -1) currentDeck.splice(i, 1);
-      refreshDeckList(); refreshCardGrid();
+      refreshDeckList(); updateThumbCount(id);
     });
     row.appendChild(btn);
     list.appendChild(row);
@@ -1033,10 +1114,20 @@ let practiceDeck = null;
 
 function wsUrl() { const proto = location.protocol === 'https:' ? 'wss://' : 'ws://'; return proto + location.host; }
 
-function openSeat(seatIndex, onOpenMsg) {
-  const cWrap = document.getElementById('connect-progress-wrap');
-  cWrap.style.display = 'block';
+function openSeat(seatIndex, onOpenMsg, silent) {
   const seat = seats[seatIndex];
+  // Seat 0 may already have a connection open — the ambient "who's online" presence
+  // link (see ensureLobbyConnection) — from before Create/Join was ever clicked.
+  // Reuse it rather than opening a second socket, so the SAME identity (and the same
+  // entry in everyone else's online list) carries straight through into the room.
+  if (seat.ws && (seat.ws.readyState === WebSocket.OPEN || seat.ws.readyState === WebSocket.CONNECTING)) {
+    const fire = () => seat.ws.send(JSON.stringify(onOpenMsg));
+    if (seat.ws.readyState === WebSocket.OPEN) fire();
+    else seat.ws.addEventListener('open', fire, { once: true });
+    return seat;
+  }
+  const cWrap = document.getElementById('connect-progress-wrap');
+  if (!silent) cWrap.style.display = 'block';
   seat.ws = new WebSocket(wsUrl());
   seat.ws.addEventListener('open', () => seat.ws.send(JSON.stringify(onOpenMsg)));
   seat.ws.addEventListener('message', (ev) => { cWrap.style.display = 'none'; handleSeatMessage(seatIndex, JSON.parse(ev.data)); });
@@ -1045,8 +1136,24 @@ function openSeat(seatIndex, onOpenMsg) {
     appendLog('Seat ' + (seatIndex + 1) + ' disconnected.');
     if (seatIndex === 0) onSeatZeroUnexpectedClose();
   });
-  seat.ws.addEventListener('error', () => { cWrap.style.display = 'none'; document.getElementById('room-info').textContent = 'Could not connect. Try again.'; });
+  seat.ws.addEventListener('error', () => { cWrap.style.display = 'none'; if (!silent) document.getElementById('room-info').textContent = 'Could not connect. Try again.'; });
   return seat;
+}
+// An ambient presence connection for seat 0 — opened as soon as a name is available,
+// well before Create/Join is ever clicked, so "who's online" already has someone to
+// show the moment you land on the page. Idempotent: safe to call repeatedly (on load,
+// and again whenever the name changes) since it only acts while seat 0 has no
+// connection yet.
+function ensureLobbyConnection() {
+  if (isSolo) return;
+  if (seats[0].ws) {
+    // already connected (lobby-only, or a real room by now) — just keep the name current
+    if (seats[0].ws.readyState === WebSocket.OPEN) sendOnSeat(0, { type: 'setName', name: myName() });
+    return;
+  }
+  const name = myName();
+  if (!name) return;
+  openSeat(0, { type: 'setName', name }, true);
 }
 function sendMsg(msg) {
   const seat = seats[activeSeat];
@@ -1131,7 +1238,7 @@ function renderOnlineList(users) {
     setupPanel.style.display = hasAny ? 'block' : 'none';
   }
   tablePanel.style.display = 'inline-block';
-  const statusLabel = { waiting: 'Waiting for opponent', 'in-game': 'In a game', pending: 'Joining a game' };
+  const statusLabel = { waiting: 'Waiting for opponent', 'in-game': 'In a game', pending: 'Joining a game', idle: 'Browsing' };
   const buildRows = (container) => {
     container.innerHTML = '';
     if (!hasAny) { container.innerHTML = '<div class="online-empty-hint">No one else online right now.</div>'; return; }
@@ -1143,13 +1250,18 @@ function renderOnlineList(users) {
       row.innerHTML = '<span class="online-name"></span><span class="online-status ' + statusClass + '"></span>';
       row.querySelector('.online-name').textContent = u.name;
       row.querySelector('.online-status').textContent = label;
-      if (u.status === 'waiting') {
+      if (u.status === 'waiting' || u.status === 'idle') {
+        const isInvite = u.status === 'idle';   // no room to join yet — this is a nudge, not a join request
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.textContent = 'Request to Join';
+        btn.textContent = isInvite ? 'Invite to play' : 'Request to Join';
         btn.addEventListener('click', () => {
-          btn.disabled = true; btn.textContent = 'Requesting...';
+          btn.disabled = true;
+          btn.textContent = isInvite ? 'Invited \u2713' : 'Requesting...';
           sendOnSeat(0, { type: 'challenge', targetId: u.id });
+          // an invite changes nothing on the list itself, so nothing would ever
+          // re-enable the button — give it a short cooldown instead of leaving it dead
+          if (isInvite) setTimeout(() => { btn.disabled = false; btn.textContent = 'Invite to play'; }, 8000);
         });
         row.appendChild(btn);
       }
@@ -1169,7 +1281,10 @@ document.getElementById('online-panel-close').addEventListener('click', () => {
 
 const nameInput = document.getElementById('player-name');
 nameInput.value = localStorage.getItem('dm_playername') || '';
-nameInput.addEventListener('change', () => localStorage.setItem('dm_playername', nameInput.value.trim().slice(0, 24)));
+nameInput.addEventListener('change', () => {
+  localStorage.setItem('dm_playername', nameInput.value.trim().slice(0, 24));
+  ensureLobbyConnection();
+});
 // 5 or 6 shields. 5 was the original tournament rule; 6 is the later standard.
 function chosenShieldCount() {
   const el = document.getElementById('shield-count');
@@ -1333,6 +1448,14 @@ function handleSeatMessage(seatIndex, msg) {
     return;
   }
   if (msg.type === 'onlineUsers') { renderOnlineList(msg.users); return; }
+  if (msg.type === 'challengeInvite') {
+    showNotice((msg.fromName || 'Someone') + ' wants to play! Pick a deck and click Create Room to start a game.');
+    return;
+  }
+  if (msg.type === 'challengeSent') {
+    showNotice('Invitation sent to ' + (msg.targetName || 'that player') + '.');
+    return;
+  }
   if (msg.type === 'joinRequest') {
     if (isSolo) sendOnSeat(0, { type: 'respondJoin', accept: true });
     else {
@@ -2981,6 +3104,7 @@ function renderState(state) {
     return;
   }
   ensureTableVisible();
+  updateImagesBanner();
 
   // ---- end game / surrender / game over modals ----
   document.getElementById('end-game-request-modal').style.display =
@@ -3722,10 +3846,16 @@ function renderGyZone(elId, cards, isMine, ownerIdx) {
     showReconnectBanner('Reconnecting to your game...');
     resumeState.active = true; resumeState.attempt = 0;
     tryResumeOnce(info);
-  } else if (roomParam) {
-    // someone opened a shared link, or reloaded before ever getting a token — offer
-    // the code as a starting point rather than silently doing nothing with it
-    const el = document.getElementById('join-code');
-    if (el) el.value = roomParam;
+  } else {
+    if (roomParam) {
+      // someone opened a shared link, or reloaded before ever getting a token — offer
+      // the code as a starting point rather than silently doing nothing with it
+      const el = document.getElementById('join-code');
+      if (el) el.value = roomParam;
+    }
+    // no game to resume into — go ahead and become visible in "online now" right
+    // away if a name is already on file (a returning player); ensureLobbyConnection()
+    // also fires later from the name field itself for a first-time visitor.
+    ensureLobbyConnection();
   }
 })();

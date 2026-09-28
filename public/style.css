@@ -702,6 +702,7 @@ input {
 .online-row .online-status.status-waiting { color: #6adf8f; }
 .online-row .online-status.status-in-game { color: #e0a86a; }
 .online-row .online-status.status-pending { color: #8a94a6; }
+.online-row .online-status.status-idle { color: #6a8ad0; }
 .online-row button {
   background: #2a6a4a; color: #eafff0; border: none; border-radius: 5px;
   padding: 5px 9px; font-size: 0.85em; cursor: pointer; white-space: nowrap;
@@ -735,3 +736,18 @@ input {
 .card-grid-cap-hint {
   color: #8a94a6; font-size: 0.82em; padding: 4px 2px 8px; text-align: center;
 }
+/* an invisible flex item pinned to the end of the grid's own row-wrap, so it always
+   sits on its own line after the last card, however many cards are in the last row */
+.card-grid-sentinel { flex-basis: 100%; height: 1px; }
+
+/* shown on the table only while no card images are loaded (see updateImagesBanner) */
+.table-images-banner {
+  position: fixed; left: 10px; bottom: 10px; z-index: 950; max-width: calc(100% - 20px);
+  align-items: center; gap: 8px; flex-wrap: wrap;
+  background: #22262f; border: 1px solid #39424f; border-radius: 8px; padding: 8px 10px;
+  color: #cfe0ff; font-size: 0.85em;
+}
+.table-images-banner button {
+  background: #2a6a4a; color: #eafff0; border: none; border-radius: 5px; padding: 6px 10px; cursor: pointer;
+}
+.table-images-banner #btn-table-images-dismiss { background: none; color: #8a94a6; font-size: 1.1em; padding: 0 4px; }

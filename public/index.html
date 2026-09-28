@@ -9,6 +9,7 @@
 <body>
 
 <div id="reconnect-banner" style="display:none">Reconnecting...</div>
+<input id="fallback-input" type="file" webkitdirectory multiple style="display:none" />
 
 <div id="screen-setup" class="screen">
   <div class="title-row">
@@ -25,7 +26,6 @@
     </p>
     <button id="btn-load-folder">Choose "cards" folder</button>
     <button id="btn-reload-folder" style="display:none; background:#2a6a4a">Reload remembered folder</button>
-    <input id="fallback-input" type="file" webkitdirectory multiple style="display:none" />
     <div id="load-progress-wrap" class="progress-wrap" style="display:none">
       <div id="load-progress-bar" class="progress-bar"></div>
     </div>
@@ -153,6 +153,11 @@
       <button id="online-panel-close" class="online-panel-close" type="button">×</button>
     </div>
     <div id="online-list-table" class="online-list"></div>
+  </div>
+  <div id="table-images-banner" class="table-images-banner" style="display:none">
+    <span>Card images aren't loaded on this device, so cards show as text.</span>
+    <button id="btn-table-load-images" type="button">Load cards folder</button>
+    <button id="btn-table-images-dismiss" type="button" title="Hide">×</button>
   </div>
   <div id="table">
     <div class="zone-label">Opponent Hand</div>
